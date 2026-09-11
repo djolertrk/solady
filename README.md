@@ -7,6 +7,11 @@
 
 Gas optimized Solidity snippets.
 
+**This branch contains a partial checked Solidity rewrite.** Five libraries in
+`src/utils` have no assembly or `unchecked` blocks; the rest remain upstream.
+See [the checked port, missing APIs, and comparison commands](SAFE_SOLADY.md).
+The full compatibility and gas-parity target has not yet been reached.
+
 I'm sooooooOooooooooOoooOoooooooooooooooo...
 
 ## Installation

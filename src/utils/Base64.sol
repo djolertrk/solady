@@ -1,171 +1,91 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.4;
+pragma solidity ^0.8.20;
 
-/// @notice Library to encode strings in Base64.
-/// @author Solady (https://github.com/vectorized/solady/blob/main/src/utils/Base64.sol)
-/// @author Modified from Solmate (https://github.com/transmissions11/solmate/blob/main/src/utils/Base64.sol)
-/// @author Modified from (https://github.com/Brechtpd/base64/blob/main/base64.sol) by Brecht Devos - <brecht@loopring.org>.
+/// @notice Checked Solidity implementation of the pinned Solady Base64 API.
+/// @dev Decode accepts the documented standard, URL and IMAP alphabets and
+/// padding modes. Invalid input has unspecified output in the upstream API.
 library Base64 {
-    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
-    /*                    ENCODING / DECODING                     */
-    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+    bytes32 private constant ENCODE0 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef";
+    bytes32 private constant ENCODE1 = "ghijklmnopqrstuvwxyz0123456789+/";
 
-    /// @dev Encodes `data` using the base64 encoding described in RFC 4648.
-    /// See: https://datatracker.ietf.org/doc/html/rfc4648
-    /// @param fileSafe  Whether to replace '+' with '-' and '/' with '_'.
-    /// @param noPadding Whether to strip away the padding.
     function encode(bytes memory data, bool fileSafe, bool noPadding)
         internal
         pure
         returns (string memory result)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let dataLength := mload(data)
-
-            if dataLength {
-                // Multiply by 4/3 rounded up.
-                // The `shl(2, ...)` is equivalent to multiplying by 4.
-                let encodedLength := shl(2, div(add(dataLength, 2), 3))
-
-                // Set `result` to point to the start of the free memory.
-                result := mload(0x40)
-
-                // Store the table into the scratch space.
-                // Offsetted by -1 byte so that the `mload` will load the character.
-                // We will rewrite the free memory pointer at `0x40` later with
-                // the allocated size.
-                // The magic constant 0x0670 will turn "-_" into "+/".
-                mstore(0x1f, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef")
-                mstore(0x3f, xor("ghijklmnopqrstuvwxyz0123456789-_", mul(iszero(fileSafe), 0x0670)))
-
-                // Skip the first slot, which stores the length.
-                let ptr := add(result, 0x20)
-                let end := add(ptr, encodedLength)
-
-                let dataEnd := add(add(0x20, data), dataLength)
-                let dataEndValue := mload(dataEnd) // Cache the value at the `dataEnd` slot.
-                mstore(dataEnd, 0x00) // Zeroize the `dataEnd` slot to clear dirty bits.
-
-                // Run over the input, 3 bytes at a time.
-                for {} 1 {} {
-                    data := add(data, 3) // Advance 3 bytes.
-                    let input := mload(data)
-
-                    // Write 4 bytes. Optimized for fewer stack operations.
-                    mstore8(0, mload(and(shr(18, input), 0x3F)))
-                    mstore8(1, mload(and(shr(12, input), 0x3F)))
-                    mstore8(2, mload(and(shr(6, input), 0x3F)))
-                    mstore8(3, mload(and(input, 0x3F)))
-                    mstore(ptr, mload(0x00))
-
-                    ptr := add(ptr, 4) // Advance 4 bytes.
-                    if iszero(lt(ptr, end)) { break }
-                }
-                mstore(dataEnd, dataEndValue) // Restore the cached value at `dataEnd`.
-                mstore(0x40, add(end, 0x20)) // Allocate the memory.
-                // Equivalent to `o = [0, 2, 1][dataLength % 3]`.
-                let o := div(2, mod(dataLength, 3))
-                // Offset `ptr` and pad with '='. We can simply write over the end.
-                mstore(sub(ptr, o), shl(240, 0x3d3d))
-                // Set `o` to zero if there is padding.
-                o := mul(iszero(iszero(noPadding)), o)
-                mstore(sub(ptr, o), 0) // Zeroize the slot after the string.
-                mstore(result, sub(encodedLength, o)) // Store the length.
+        uint256 n = data.length;
+        uint256 padding = n % 3 == 0 ? 0 : 3 - n % 3;
+        uint256 length = ((n + 2) / 3) * 4;
+        if (noPadding) length -= padding;
+        bytes memory out = new bytes(length);
+        uint256 j;
+        for (uint256 i; i < n; i += 3) {
+            uint256 word = uint256(uint8(data[i])) << 16;
+            if (i + 1 < n) word |= uint256(uint8(data[i + 1])) << 8;
+            if (i + 2 < n) word |= uint8(data[i + 2]);
+            out[j] = _encode((word >> 18) & 63, fileSafe);
+            out[j + 1] = _encode((word >> 12) & 63, fileSafe);
+            if (j + 2 < length) {
+                out[j + 2] = i + 1 < n ? _encode((word >> 6) & 63, fileSafe) : bytes1("=");
             }
+            if (j + 3 < length) {
+                out[j + 3] = i + 2 < n ? _encode(word & 63, fileSafe) : bytes1("=");
+            }
+            j += 4;
         }
+        return string(out);
     }
 
-    /// @dev Encodes `data` using the base64 encoding described in RFC 4648.
-    /// Equivalent to `encode(data, false, false)`.
+    function _encode(uint256 index, bool fileSafe) private pure returns (bytes1) {
+        if (fileSafe && index >= 62) return index == 62 ? bytes1("-") : bytes1("_");
+        return index < 32 ? ENCODE0[index] : ENCODE1[index & 31];
+    }
+
     function encode(bytes memory data) internal pure returns (string memory result) {
-        result = encode(data, false, false);
+        return encode(data, false, false);
     }
 
-    /// @dev Encodes `data` using the base64 encoding described in RFC 4648.
-    /// Equivalent to `encode(data, fileSafe, false)`.
     function encode(bytes memory data, bool fileSafe) internal pure returns (string memory result) {
-        result = encode(data, fileSafe, false);
+        return encode(data, fileSafe, false);
     }
 
-    /// @dev Decodes base64 encoded `data`.
-    ///
-    /// Supports:
-    /// - RFC 4648 (both standard and file-safe mode).
-    /// - RFC 3501 (63: ',').
-    ///
-    /// Does not support:
-    /// - Line breaks.
-    ///
-    /// Note: For performance reasons,
-    /// this function will NOT revert on invalid `data` inputs.
-    /// Outputs for invalid inputs will simply be undefined behaviour.
-    /// It is the user's responsibility to ensure that the `data`
-    /// is a valid base64 encoded string.
     function decode(string memory data) internal pure returns (bytes memory result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let dataLength := mload(data)
-
-            if dataLength {
-                let decodedLength := mul(shr(2, dataLength), 3)
-
-                for {} 1 {} {
-                    // If padded.
-                    if iszero(and(dataLength, 3)) {
-                        let t := xor(mload(add(data, dataLength)), 0x3d3d)
-                        // forgefmt: disable-next-item
-                        decodedLength := sub(
-                            decodedLength,
-                            add(iszero(byte(30, t)), iszero(byte(31, t)))
-                        )
-                        break
-                    }
-                    // If non-padded.
-                    decodedLength := add(decodedLength, sub(and(dataLength, 3), 1))
-                    break
-                }
-                result := mload(0x40)
-
-                // Write the length of the bytes.
-                mstore(result, decodedLength)
-
-                // Skip the first slot, which stores the length.
-                let ptr := add(result, 0x20)
-                let end := add(ptr, decodedLength)
-
-                // Load the table into the scratch space.
-                // Constants are optimized for smaller bytecode with zero gas overhead.
-                // `m` also doubles as the mask of the upper 6 bits.
-                let m := 0xfc000000fc00686c7074787c8084888c9094989ca0a4a8acb0b4b8bcc0c4c8cc
-                mstore(0x5b, m)
-                mstore(0x3b, 0x04080c1014181c2024282c3034383c4044484c5054585c6064)
-                mstore(0x1a, 0xf8fcf800fcd0d4d8dce0e4e8ecf0f4)
-
-                for {} 1 {} {
-                    // Read 4 bytes.
-                    data := add(data, 4)
-                    let input := mload(data)
-
-                    // Write 3 bytes.
-                    // forgefmt: disable-next-item
-                    mstore(ptr, or(
-                        and(m, mload(byte(28, input))),
-                        shr(6, or(
-                            and(m, mload(byte(29, input))),
-                            shr(6, or(
-                                and(m, mload(byte(30, input))),
-                                shr(6, mload(byte(31, input)))
-                            ))
-                        ))
-                    ))
-                    ptr := add(ptr, 3)
-                    if iszero(lt(ptr, end)) { break }
-                }
-                mstore(0x40, add(end, 0x20)) // Allocate the memory.
-                mstore(end, 0) // Zeroize the slot after the bytes.
-                mstore(0x60, 0) // Restore the zero slot.
-            }
+        bytes memory input = bytes(data);
+        uint256 n = input.length;
+        if (n == 0) return new bytes(0);
+        uint256 length = (n / 4) * 3;
+        uint256 tail = n % 4;
+        if (tail != 0) {
+            length += tail - 1;
+        } else {
+            if (input[n - 1] == "=") --length;
+            if (input[n - 2] == "=") --length;
         }
+        result = new bytes(length);
+        uint256 j;
+        for (uint256 i; i < n; i += 4) {
+            uint256 word = _decode(input[i]) << 18;
+            if (i + 1 < n) word |= _decode(input[i + 1]) << 12;
+            if (i + 2 < n) word |= _decode(input[i + 2]) << 6;
+            if (i + 3 < n) word |= _decode(input[i + 3]);
+            if (j < length) result[j] = bytes1(uint8(word >> 16));
+            if (j + 1 < length) result[j + 1] = bytes1(uint8(word >> 8));
+            if (j + 2 < length) result[j + 2] = bytes1(uint8(word));
+            j += 3;
+        }
+    }
+
+    bytes32 private constant DECODE1 =
+        hex"00000000000000000000003e3f3e003f3435363738393a3b3c3d000000000000";
+    bytes32 private constant DECODE2 =
+        hex"00000102030405060708090a0b0c0d0e0f10111213141516171819000000003f";
+    bytes32 private constant DECODE3 =
+        hex"001a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132330000000000";
+
+    function _decode(bytes1 c) private pure returns (uint256) {
+        uint256 x = uint8(c);
+        if (x < 32 || x >= 128) return 0;
+        bytes32 table = x < 64 ? DECODE1 : x < 96 ? DECODE2 : DECODE3;
+        return uint8(table[x & 31]);
     }
 }
