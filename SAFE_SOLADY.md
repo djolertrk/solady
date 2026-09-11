@@ -262,6 +262,14 @@ path, and one contract grows by 8 bytes. All 3,630 codegen UI tests and
 `solar/target/safe-solady/m5/final-mixed-200/` and the corpus comparison under
 `solar/target/codegen-bench/cmp-final.md`.
 
+A follow-up compiler change converts the checked bit search's `if` steps
+into the shift-and-or chain of the assembly original and lets memory stores
+skip the cleanup of already-canonical words. Over the same matrix, `clz`
+falls from 545,169 to 490,872 opcode gas, `sort` from 518,895 to 492,404
+(37 of 46 wins), `insertionSort(uint256[])` from 536,435 to 509,874, and
+`insertionSort(address[])` from 864,338 to 832,722; the other APIs are
+unchanged. Those artifacts are under `solar/target/safe-solady/m5/ifc2-mixed-200/`.
+
 At 1,000,000 optimizer runs the checked results are within a few hundred gas
 of the 200-run figures, while the original-source envelope tightens:
 `insertionSort(uint256[])` keeps 37 of 46 wins, `popCount` all 776, the zero
