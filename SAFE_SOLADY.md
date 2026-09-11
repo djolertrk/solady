@@ -199,6 +199,77 @@ This is progress toward the codec milestone, not gas parity. At 200 runs,
 that prefixed case remains 65,600 gas behind original Solady / best solc.
 ASCII, Base64, sorting, broader API coverage, and the other milestones remain.
 
+## Compiler optimization checkpoint, 2026-09-11, loop and codec work
+
+The second retained compiler round keeps the checked library sources frozen
+and changes only the compiler on `feat/safe-solady`: loop state stays on the
+EVM stack through live join layouts, a memory-object argument is disjoint from
+every allocation, call summaries ignore stores on reverting paths, the
+free-memory-pointer and length reads hoist across memory-clean helper calls,
+checked-loop relations prove `i < length / 2` and `length - 1 - i` bounds,
+counters with constant start and step never wrap within the target's 64-bit
+gas budget, fixed-bytes literals compare as words, and small lookup helpers
+are cloned into the loops that call them when the loop's live words leave
+room. The measurement below uses the same isolated harness, calldata, solc
+`0.8.37`, Cancun, and 200 optimizer runs as the frozen baseline on compiler
+commit `d68e26f14`; every executed checked-source case still matches the
+independent oracle.
+
+Opcode gas summed over each API's isolated cases. "Wins" counts cases at or
+below the original / best solc envelope; the envelope column is that sum.
+
+| API | Cases | Wins | Original / best solc | Checked baseline | Checked now | Change |
+|---|---:|---:|---:|---:|---:|---:|
+| `LibSort.insertionSort(uint256[])` | 46 | 37 | 590,226 | 2,350,568 | 536,435 | -77.2% |
+| `LibSort.sort(uint256[])` | 46 | 29 | 318,592 | 1,463,708 | 518,895 | -64.5% |
+| `LibSort.insertionSort(address[])` | 46 | 8 | 647,365 | 2,743,738 | 864,338 | -68.5% |
+| `LibSort.copy(address[])` | 46 | 46 | 315,338 | 488,177 | 302,008 | -38.1% |
+| `LibSort.reverse(address[])` | 46 | 0 | 282,276 | 484,518 | 379,324 | -21.7% |
+| `LibSort.hasDuplicate(uint256[])` | 46 | 18 | 186,151 | 283,982 | 272,182 | -4.2% |
+| `LibString.toHexString(bytes)` | 16 | 1 | 122,680 | 472,788 | 170,661 | -63.9% |
+| `LibString.toString(uint256)` | 19 | 0 | 67,611 | 172,304 | 124,384 | -27.8% |
+| `LibString.toCase(string,bool)` | 6 | 0 | 19,580 | 47,500 | 38,934 | -18.0% |
+| `LibString.runeCount(string)` | 6 | 0 | 25,484 | 70,665 | 56,742 | -19.7% |
+| `LibString.is7BitASCII(string)` | 9 | 9 | 8,787 | 45,615 | 7,915 | -82.6% |
+| `LibBit.countZeroBytes(bytes)` | 17 | 17 | 17,014 | 116,351 | 13,223 | -88.6% |
+| `LibBit.countZeroBytesCalldata(bytes)` | 17 | 17 | 16,339 | 98,602 | 10,929 | -88.9% |
+| `LibBit.popCount(uint256)` | 776 | 776 | 371,704 | 465,626 | 285,594 | -38.7% |
+| `LibBit.clz(uint256)` | 776 | 1 | 349,976 | 568,335 | 545,169 | -4.1% |
+| `LibBit.toNibbles(bytes)` | 15 | 1 | 20,084 | 170,211 | 96,279 | -43.4% |
+| `Base64.encode(bytes)` | 16 | 0 | 68,788 | 496,710 | 353,725 | -28.8% |
+| `Base64.decode(string)` | 65 | 0 | 312,712 | 2,796,465 | 1,859,597 | -33.5% |
+| `SafeCastLib.toUint40(uint256)` | 6 | 0 | 2,384 | 3,670 | 3,574 | -2.6% |
+
+Five APIs now meet the envelope on every case: the two zero-byte counters,
+7-bit ASCII, `popCount`, and `copy(address[])`. `insertionSort(uint256[])`
+beats the envelope in aggregate and on 37 of 46 cases; the descending inputs
+still trail. The insertion-sort inner loop keeps its counters and the element
+value on the stack with no bounds branch, and the reversal loop carries no
+check at all. The decode loop reads its input length once, keeps no wrap
+check, and clones its lookup helper at all four sites; the encoder's helper
+stays shared at three of four sites because the loop already holds ten live
+words, and cloning it regardless costs the encoder more than half its gas in
+spills, which locates the remaining codec gap in the backend's join layouts
+rather than in the middle end.
+
+The shared runtime corpus, compiled with the same compiler and compared
+against the branch's previous head, improves geometric-mean runtime gas by
+0.20% and runtime size by 0.36%. The largest per-case move is the upstream
+LibString workload at -3.05% gas and -1.96% bytes; the only per-call
+increases are 38 gas on two-element sorts and 15 gas on one flash-loan fee
+path, and one contract grows by 8 bytes. All 3,630 codegen UI tests and
+295 codegen unit tests pass. Isolated artifacts are under
+`solar/target/safe-solady/m5/final-mixed-200/` and the corpus comparison under
+`solar/target/codegen-bench/cmp-final.md`.
+
+At 1,000,000 optimizer runs the checked results are within a few hundred gas
+of the 200-run figures, while the original-source envelope tightens:
+`insertionSort(uint256[])` keeps 37 of 46 wins, `popCount` all 776, the zero
+counters and 7-bit ASCII every case, but `copy(address[])` keeps only 12 of
+46 against a reference that drops to 291,974 gas. The other APIs stay below
+the envelope by the same margins as at 200 runs. Those artifacts are under
+`solar/target/safe-solady/m5/final-mixed-1m/`.
+
 ## Compatibility findings and remaining boundaries
 
 The pinned original behaves differently from the intended value-level oracle
