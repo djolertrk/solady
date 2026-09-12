@@ -38,7 +38,8 @@ library Base64 {
 
     function _encode(uint256 index, bool fileSafe) private pure returns (bytes1) {
         if (fileSafe && index >= 62) return index == 62 ? bytes1("-") : bytes1("_");
-        return index < 32 ? ENCODE0[index] : ENCODE1[index & 31];
+        bytes32 table = index < 32 ? ENCODE0 : ENCODE1;
+        return table[index & 31];
     }
 
     function encode(bytes memory data) internal pure returns (string memory result) {

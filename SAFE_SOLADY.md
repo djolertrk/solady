@@ -278,6 +278,59 @@ counters and 7-bit ASCII every case, but `copy(address[])` keeps only 12 of
 the envelope by the same margins as at 200 runs. Those artifacts are under
 `solar/target/safe-solady/m5/final-mixed-1m/`.
 
+## Compiler optimization checkpoint, 2026-09-12, codec control flow
+
+The branch was rebased onto the rewritten `feat/isle-mir` (dispatcher
+inlining and gas-observation barriers); on the same matrix the rebase alone
+changes only the zero-byte counters, which gain about 5% from upstream. The
+third compiler round then targets the branch control that dominated the
+codec profiles: if-conversion now prices every small diamond or triangle
+through the target cost model and also converts two literal arms
+(`B + c * (A - B)`), a literal over an already-selected value whose
+condition is implied (`x < 64 ? T1 : x < 96 ? T2 : T3` collapses one level
+at a time), and any pair of cheap arms as `f + c * (t - f)`; a `loop-split`
+pass duplicates a counted loop whose body tests `i + k < n` into a main loop
+running while `i + K < n` and the original loop for the last groups, and
+check elimination folds the lookahead guards in the main loop from that
+bound. The checked sources stay frozen for this measurement.
+
+| API | Cases | Original / best solc | Checked before | Checked now | Change |
+|---|---:|---:|---:|---:|---:|
+| `Base64.decode(string)` | 65 | 312,712 | 1,859,597 | 1,711,796 | -7.9% |
+| `Base64.encode(bytes)` | 16 | 68,788 | 353,603 | 334,156 | -5.5% |
+| `LibSort.sort(uint256[])` | 46 | 318,592 | 492,404 | 492,098 | -0.1% |
+| `LibSort.insertionSort(uint256[])` | 46 | 590,226 | 509,874 | 509,568 | -0.1% |
+| `LibSort.insertionSort(address[])` | 46 | 647,365 | 832,722 | 832,526 | 0.0% |
+| `LibString.runeCount(string)` | 6 | 25,484 | 56,742 | 57,072 | +0.6% |
+
+The other twelve APIs are unchanged and every executed checked-source case
+still matches the oracle. On the 344-character decode case the decoder's
+lookup helper is now straight-line arithmetic and the main loop carries no
+`i + k < n` guard: control falls from 40,512 to 21,272 gas and the case from
+102,571 to 93,565 gas. Its cost is now arithmetic (37%), stack movement and
+spills (31%), and the remaining branches (23%): the two range tests of every
+lookup, the three output-length guards, and the loop. The encoder's helper
+keeps its two-table diamond because both arms compute a byte lookup, so it
+stays a call at three of four sites.
+
+A separately measured source change writes that helper in the table-select
+form the decoder already uses (`bytes32 table = index < 32 ? ENCODE0 :
+ENCODE1; return table[index & 31];`): the helper becomes six straight-line
+instructions, the hot-leaf inliner clones it at every site, and
+`Base64.encode(bytes)` falls further to 325,680 gas (82,287 on the 256-byte
+case), with no oracle mismatch. That case now spends 26% of its gas in spill
+traffic and 18% in stack movement, so the residual codec gap is register
+pressure inside the group loop rather than branches or calls.
+
+The shared runtime corpus compiled with the same compiler is unchanged in
+geometric-mean gas and 0.01% smaller; the only per-call increases are the
+upstream LibString rune-count differential tests at 344 to 707 gas, where
+the smaller helper body now passes the single-use inliner's stack estimate
+and is inlined into a test function whose live words the estimate does not
+price. Artifacts: `solar/target/safe-solady/m5/rb-base-mixed-200/` (rebased,
+before), `rb-cand1-mixed-200/` (compiler round), `rb-cand1-encsrc-200/`
+(source change), and the corpus comparison `solar/target/codegen-bench/cmp-rb1.md`.
+
 ## Compatibility findings and remaining boundaries
 
 The pinned original behaves differently from the intended value-level oracle
