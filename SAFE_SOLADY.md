@@ -331,6 +331,40 @@ price. Artifacts: `solar/target/safe-solady/m5/rb-base-mixed-200/` (rebased,
 before), `rb-cand1-mixed-200/` (compiler round), `rb-cand1-encsrc-200/`
 (source change), and the corpus comparison `solar/target/codegen-bench/cmp-rb1.md`.
 
+## Compiler optimization checkpoint, 2026-09-12, element canonicality
+
+Element reads of typed memory arrays are masked to the element type, since
+inline assembly may store dirty words and solc masks such reads too. The
+fourth compiler round proves, per array, the widest word it can hold (a
+least fixed point over the call graph: the widest word any reachable
+function stores into an element, the element width ABI decoding validates
+for an external parameter, zero for a zeroed allocation, the widest argument
+any call site passes for an internal parameter, recursion included) and
+drops the masks that cover the bound, while a mask narrower than the array's
+words stays. The proved bounds also feed the ABI return proofs, so returned
+arrays keep their bulk-copy encoding. Sources are frozen for this
+measurement; the branch was first rebased onto the rewritten `feat/isle-mir`
+at `ce9ddc81a`, which changed nothing on this matrix.
+
+| API | Cases | Original / best solc | Checked before | Checked now | Change |
+|---|---:|---:|---:|---:|---:|
+| `LibSort.insertionSort(address[])` | 46 | 647,365 | 839,439 | 781,605 | -6.9% |
+| `LibSort.reverse(address[])` | 46 | 282,276 | 379,324 | 366,164 | -3.5% |
+| `LibSort.copy(address[])` | 46 | 315,338 | 302,008 | 288,540 | -4.5% |
+
+`copy(address[])` keeps its 46 wins with a wider margin; the other sixteen
+APIs are unchanged and every executed case matches the oracle. The complete
+harness keeps 5 of its 27 address masks: two in `hasDuplicate(address[])`,
+whose `uint256` scratch stores widen that function's bound, and three in the
+ABI encoders. The shared runtime corpus is bit-identical. Two experiments
+were measured and rejected: writing the decoder's lookup helper with a
+validity table instead of its range test makes the helper branch-free and
+inlined at every site but costs 14% more through stack traffic, and a wider
+hot-leaf inlining budget for straight-line helpers changes no bytecode.
+Artifacts: `solar/target/safe-solady/m5/rb-base3-mixed-200/` (before) and
+`rb-cand4-mixed-200/` (after); corpus comparison
+`solar/target/codegen-bench/cmp-rb4.md`.
+
 ## Compatibility findings and remaining boundaries
 
 The pinned original behaves differently from the intended value-level oracle
