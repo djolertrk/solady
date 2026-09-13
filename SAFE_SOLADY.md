@@ -512,6 +512,35 @@ loop cost 1.3%; all three now stay as they were. Artifacts:
 (pointers); corpus comparisons `solar/target/codegen-bench/cmp-cand12.md`
 and `cmp-cand22.md`.
 
+## Compiler optimization checkpoint, 2026-09-13, counter elimination
+
+The sixth round removes a loop's counter once its addresses are pointers:
+the exit test compares an ascending pointer with its value at the bound
+and the counter's phi and update are deleted, which also lets every
+address family of the loop become a pointer at once. Sources are frozen.
+Two defects the rebase onto upstream's halt-and-heap fix surfaced are
+fixed in the same batch: merging equivalent functions now keeps the
+proved element widths apart, so `copy(address[])` keeps its canonical
+return, and a constructor's conditional halt stays an explicit `STOP`
+ahead of the runtime bytes.
+
+| API | Cases | Original / best solc | Checked before | Checked now | Change |
+|---|---:|---:|---:|---:|---:|
+| `LibSort.reverse(address[])` | 46 | 305,975 | 316,988 | 302,736 | -4.5% |
+| `LibString.toHexString(bytes)` | 16 | 124,344 | 136,625 | 130,867 | -4.2% |
+| `LibBit.toNibbles(bytes)` | 15 | 20,084 | 76,704 | 73,728 | -3.9% |
+| `LibSort.copy(address[])` | 46 | 331,217 | 262,284 | 253,580 | -3.3% |
+| `LibSort.insertionSort(address[])` | 46 | 678,219 | 593,267 | 575,499 | -3.0% |
+| `LibSort.sort(uint256[])` | 46 | 311,155 | 338,536 | 329,698 | -2.6% |
+| `LibSort.insertionSort(uint256[])` | 46 | 585,478 | 352,687 | 343,825 | -2.5% |
+
+`reverse` now wins 31 of its 46 cases and is under its envelope in total;
+`copy` keeps 42 wins. The other APIs are unchanged and every executed case
+matches the oracle. The shared runtime corpus is flat (runtime gas -0.01%, bytes unchanged, no per-call loss). Artifacts:
+`solar/target/safe-solady/m5/rb-cand22-mixed-200/` (before) and
+`rb-cand30-mixed-200/` (after); corpus comparison
+`solar/target/codegen-bench/cmp-cand30.md`.
+
 ## Compatibility findings and remaining boundaries
 
 The pinned original behaves differently from the intended value-level oracle
