@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import urllib.parse
 import gzip
 import hashlib
 import json
@@ -149,7 +150,7 @@ def closure(sources, roots):
 
 
 def select_harness_apis(apis, api_filters, isolate):
-    requested = set(api_filters)
+    requested = set(api_filters or ())
     found = {row["library"] + "." + row["signature"] for row in apis}
     if requested - found:
         raise ValueError(f"unknown API filters: {sorted(requested - found)}")
@@ -347,6 +348,54 @@ def test_vectors(row, rng):
             [low, high] * 17,
             [high - i * (1 << 128) for i in range(33)],
         ]
+        def typed(values):
+            if t == "address":
+                return ["0x" + x.to_bytes(20, "big").hex() for x in values]
+            if t == "bytes32":
+                return [x.to_bytes(32, "big") for x in values]
+            return list(values)
+
+        def search_sorted(values, needle):
+            # The upstream probe sequence: a one-based binary search whose
+            # last probe decides the nearest index when the needle is absent.
+            l, h, t, index = 1, len(values), None, 0
+            while True:
+                index = (l + h) // 2
+                if index != 0:
+                    t = values[index - 1]
+                if l > h or (index != 0 and t == needle):
+                    break
+                if needle <= t:
+                    h = index - 1
+                else:
+                    l = index + 1
+            found = index != 0 and t == needle
+            return found, (index - 1 if index != 0 else 0)
+
+        if name in ["searchSorted", "inSorted"]:
+            for a in arrays:
+                u = sorted(set(a))
+                needles = set(u)
+                needles |= {x + 1 for x in u if x + 1 <= high}
+                needles |= {x - 1 for x in u if x - 1 >= low}
+                needles |= {low, high, 0}
+                for needle in sorted(needles):
+                    found, index = search_sorted(u, needle)
+                    yield [typed(u), typed([needle])[0]], (
+                        [found] if name == "inSorted" else [found, index]
+                    )
+            return
+        if name in ["difference", "intersection", "union"]:
+            uniques = [sorted(set(a)) for a in arrays]
+            for u1, u2 in zip(uniques, uniques[1:] + uniques[:1]):
+                for x, y in [(u1, u2), (u1, u1), (u1, []), ([], u2)]:
+                    expected = {
+                        "difference": set(x) - set(y),
+                        "intersection": set(x) & set(y),
+                        "union": set(x) | set(y),
+                    }[name]
+                    yield [typed(x), typed(y)], [typed(sorted(expected))]
+            return
         for a in arrays:
             if t == "address":
                 a = ["0x" + x.to_bytes(20, "big").hex() for x in a]
@@ -356,7 +405,7 @@ def test_vectors(row, rng):
                 expected = sorted(a)
             elif name == "reverse":
                 expected = list(reversed(a))
-            elif name == "copy":
+            elif name in ["copy", "clean"]:
                 expected = list(a)
             elif name == "hasDuplicate":
                 expected = len(set(a)) != len(a)
@@ -434,7 +483,191 @@ def test_vectors(row, rng):
                     yield [x], [result]
         return
     if row["library"] == "LibString":
-        if name == "toString":
+        NOT_FOUND = MAX
+        words = ["", "a", "ab", "abc", "hello world", "aaa", "banana", "a" * 32, "a" * 33]
+        needles = ["", "a", "aa", "an", "na", "world", "xyz", "b" * 40]
+
+        def checksummed(address):
+            digits = address[2:].lower()
+            hashed = keccak(digits.encode())
+            out = ""
+            for i, c in enumerate(digits):
+                nibble = hashed[i // 2] >> (4 if i % 2 == 0 else 0) & 15
+                out += c.upper() if c.isalpha() and nibble >= 8 else c
+            return "0x" + out
+
+        def indices_of(subject, needle):
+            found, i = [], 0
+            if len(needle) > len(subject):
+                return found
+            while i + len(needle) <= len(subject):
+                if subject[i : i + len(needle)] == needle:
+                    found.append(i)
+                    i += len(needle) or 1
+                else:
+                    i += 1
+            return found
+
+        def small_length(word):
+            n = 0
+            while n < 32 and word[n] != 0:
+                n += 1
+            return n
+
+        def escape_json(subject, quotes):
+            out = ""
+            for c in subject:
+                if ord(c) >= 0x20:
+                    out += "\\" + c if c in '"\\' else c
+                elif c in "\b\t\n\f\r":
+                    out += {"\b": "\\b", "\t": "\\t", "\n": "\\n", "\f": "\\f", "\r": "\\r"}[c]
+                else:
+                    out += "\\u%04x" % ord(c)
+            return '"' + out + '"' if quotes else out
+
+        small = [b"", b"a", b"hello", b"ab\x00cd", b"z" * 31, b"z" * 32, b"\x00abc"]
+        if name == "toHexStringChecksummed":
+            for x in scalars:
+                address = "0x" + (x & mask(160)).to_bytes(20, "big").hex()
+                yield [address], [checksummed(address)]
+        elif name == "replace":
+            for subject in words:
+                for needle in needles:
+                    for replacement in ["", "-", "xyz"]:
+                        yield [subject, needle, replacement], [subject.replace(needle, replacement)]
+        elif name in ["indexOf", "lastIndexOf"]:
+            for subject in words:
+                for needle in needles:
+                    froms = [0, 1, 2, 5, len(subject), len(subject) + 1, MAX] if len(types) == 3 else [None]
+                    for start in froms:
+                        n, m = len(subject), len(needle)
+                        if name == "indexOf":
+                            f = 0 if start is None else start
+                            if m == 0:
+                                expected = min(f, n)
+                            elif f >= n or m > n - f:
+                                expected = NOT_FOUND
+                            else:
+                                hit = subject.find(needle, f)
+                                expected = NOT_FOUND if hit < 0 else hit
+                        else:
+                            f = MAX if start is None else start
+                            if m > n:
+                                expected = NOT_FOUND
+                            else:
+                                f = min(f, n - m)
+                                hit = subject.rfind(needle, 0, f + m)
+                                expected = NOT_FOUND if hit < 0 else hit
+                        yield ([subject, needle] + ([] if start is None else [start])), [expected]
+        elif name in ["contains", "startsWith", "endsWith"]:
+            for subject in words:
+                for needle in needles:
+                    expected = {
+                        "contains": needle in subject,
+                        "startsWith": subject.startswith(needle),
+                        "endsWith": subject.endswith(needle),
+                    }[name]
+                    yield [subject, needle], [expected]
+        elif name == "repeat":
+            for subject in ["", "a", "ab", "abc" * 11]:
+                for times in [0, 1, 2, 3, 33]:
+                    yield [subject, times], [subject * times]
+        elif name == "slice":
+            for subject in words:
+                for start in [0, 1, 2, 5, 32, 33, MAX]:
+                    if len(types) == 3:
+                        for end in [0, 1, 2, 5, 32, 33, MAX]:
+                            s2, e2 = min(start, len(subject)), min(end, len(subject))
+                            yield [subject, start, end], [subject[s2:e2] if s2 < e2 else ""]
+                    else:
+                        yield [subject, start], [subject[min(start, len(subject)) :]]
+        elif name == "indicesOf":
+            for subject in words:
+                for needle in needles:
+                    yield [subject, needle], [indices_of(subject, needle)]
+        elif name == "split":
+            for subject in words + ["a,b,,c", ",", "a,", ",a"]:
+                for delimiter in ["", ",", "a", "an", "xyz"]:
+                    if delimiter == "":
+                        expected = list(subject)
+                    else:
+                        expected = subject.split(delimiter)
+                    yield [subject, delimiter], [expected]
+        elif name == "fromSmallString":
+            for word in small:
+                padded = word.ljust(32, b"\x00")
+                yield [padded], [padded[: small_length(padded)].decode()]
+        elif name == "normalizeSmallString":
+            for word in small:
+                padded = word.ljust(32, b"\x00")
+                n = small_length(padded)
+                yield [padded], [padded[:n] + bytes(32 - n)]
+        elif name == "toSmallString":
+            for subject in ["", "a", "hello", "z" * 31, "z" * 32, "z" * 33, "a" * 64]:
+                yield (
+                    [subject],
+                    [subject.encode().ljust(32, b"\x00")]
+                    if len(subject) <= 32
+                    else keccak(b"TooBigForSmallString()")[:4],
+                )
+        elif name == "escapeHTML":
+            for subject in ["", "plain", "<a href=\"x\">Tom & Jerry's</a>", "é<>", "&" * 33]:
+                yield (
+                    [subject],
+                    [
+                        subject.replace("&", "&amp;")
+                        .replace('"', "&quot;")
+                        .replace("'", "&#39;")
+                        .replace("<", "&lt;")
+                        .replace(">", "&gt;")
+                    ],
+                )
+        elif name == "escapeJSON":
+            for subject in ["", "plain", 'say "hi"\\', "tab\tnew\nline", "\x01\x0b\x1f", "é" * 20]:
+                for quotes in [False, True] if len(types) == 2 else [False]:
+                    yield ([subject, quotes] if len(types) == 2 else [subject]), [
+                        escape_json(subject, quotes)
+                    ]
+        elif name == "encodeURIComponent":
+            for subject in ["", "abc-_.!~*'()", "a b&c=d/e?f", "é日本", "%" * 33]:
+                yield [subject], [urllib.parse.quote(subject, safe="-_.!~*'()")]
+        elif name == "eqs":
+            for subject in ["", "a", "hello", "ab", "z" * 32]:
+                for word in small:
+                    padded = word.ljust(32, b"\x00")
+                    yield [subject, padded], [subject.encode() == padded[: small_length(padded)]]
+        elif name == "cmp":
+            for a in ["", "a", "ab", "b", "abc", "z" * 33, "z" * 32 + "a"]:
+                for b in ["", "a", "ab", "b", "abd", "z" * 33]:
+                    x, y = a.encode(), b.encode()
+                    yield [a, b], [0 if x == y else (-1 if x < y else 1)]
+        elif name == "packOne":
+            for subject in ["", "a", "hello", "z" * 31, "z" * 32]:
+                data = subject.encode()
+                packed = bytes([len(data)]) + data if 0 < len(data) < 32 else b""
+                yield [subject], [packed.ljust(32, b"\x00")]
+        elif name == "unpackOne":
+            for subject in ["", "a", "hello", "z" * 31]:
+                data = subject.encode()
+                packed = (bytes([len(data)]) + data if data else b"").ljust(32, b"\x00")
+                yield [packed], [subject]
+        elif name == "packTwo":
+            for a in ["", "a", "hello", "z" * 15]:
+                for b in ["", "b", "world", "y" * 15, "y" * 16]:
+                    x, y = a.encode(), b.encode()
+                    total = len(x) + len(y)
+                    packed = bytes([len(x)]) + x + bytes([len(y)]) + y if 0 < total <= 30 else b""
+                    yield [a, b], [packed.ljust(32, b"\x00")]
+        elif name == "unpackTwo":
+            for a in ["", "a", "hello", "z" * 15]:
+                for b in ["", "b", "world", "y" * 15]:
+                    x, y = a.encode(), b.encode()
+                    if len(x) + len(y) == 0:
+                        packed = bytes(32)
+                    else:
+                        packed = (bytes([len(x)]) + x + bytes([len(y)]) + y).ljust(32, b"\x00")
+                    yield [packed], [a, b]
+        elif name == "toString":
             for x in scalars:
                 if types[0] == "int256" and x >= 1 << 255:
                     x -= 1 << 256

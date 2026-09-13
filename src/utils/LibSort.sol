@@ -528,4 +528,592 @@ library LibSort {
         }
         return false;
     }
+
+    /// @dev Returns whether `a` contains `needle`, and the index of `needle`.
+    /// `index` precedence: equal to > nearest before > nearest after.
+    function searchSorted(uint256[] memory a, uint256 needle)
+        internal
+        pure
+        returns (bool found, uint256 index)
+    {
+        // The upstream probe sequence: a one-based binary search whose last
+        // probe decides the nearest index when the needle is absent.
+        uint256 l = 1;
+        uint256 h = a.length;
+        uint256 t;
+        while (true) {
+            index = (l + h) / 2;
+            if (index != 0) t = a[index - 1];
+            if (l > h || (index != 0 && t == needle)) break;
+            if (needle <= t) {
+                h = index - 1;
+            } else {
+                l = index + 1;
+            }
+        }
+        found = index != 0 && t == needle;
+        if (index != 0) index -= 1;
+    }
+
+    /// @dev Returns whether `a` contains `needle`.
+    function inSorted(uint256[] memory a, uint256 needle) internal pure returns (bool found) {
+        (found,) = searchSorted(a, needle);
+    }
+
+    /// @dev Returns whether `a` contains `needle`, and the index of `needle`.
+    /// `index` precedence: equal to > nearest before > nearest after.
+    function searchSorted(int256[] memory a, int256 needle)
+        internal
+        pure
+        returns (bool found, uint256 index)
+    {
+        // The upstream probe sequence: a one-based binary search whose last
+        // probe decides the nearest index when the needle is absent.
+        uint256 l = 1;
+        uint256 h = a.length;
+        int256 t;
+        while (true) {
+            index = (l + h) / 2;
+            if (index != 0) t = a[index - 1];
+            if (l > h || (index != 0 && t == needle)) break;
+            if (needle <= t) {
+                h = index - 1;
+            } else {
+                l = index + 1;
+            }
+        }
+        found = index != 0 && t == needle;
+        if (index != 0) index -= 1;
+    }
+
+    /// @dev Returns whether `a` contains `needle`.
+    function inSorted(int256[] memory a, int256 needle) internal pure returns (bool found) {
+        (found,) = searchSorted(a, needle);
+    }
+
+    /// @dev Returns whether `a` contains `needle`, and the index of `needle`.
+    /// `index` precedence: equal to > nearest before > nearest after.
+    function searchSorted(address[] memory a, address needle)
+        internal
+        pure
+        returns (bool found, uint256 index)
+    {
+        // The upstream probe sequence: a one-based binary search whose last
+        // probe decides the nearest index when the needle is absent.
+        uint256 l = 1;
+        uint256 h = a.length;
+        address t;
+        while (true) {
+            index = (l + h) / 2;
+            if (index != 0) t = a[index - 1];
+            if (l > h || (index != 0 && t == needle)) break;
+            if (needle <= t) {
+                h = index - 1;
+            } else {
+                l = index + 1;
+            }
+        }
+        found = index != 0 && t == needle;
+        if (index != 0) index -= 1;
+    }
+
+    /// @dev Returns whether `a` contains `needle`.
+    function inSorted(address[] memory a, address needle) internal pure returns (bool found) {
+        (found,) = searchSorted(a, needle);
+    }
+
+    /// @dev Returns whether `a` contains `needle`, and the index of `needle`.
+    /// `index` precedence: equal to > nearest before > nearest after.
+    function searchSorted(bytes32[] memory a, bytes32 needle)
+        internal
+        pure
+        returns (bool found, uint256 index)
+    {
+        // The upstream probe sequence: a one-based binary search whose last
+        // probe decides the nearest index when the needle is absent.
+        uint256 l = 1;
+        uint256 h = a.length;
+        bytes32 t;
+        while (true) {
+            index = (l + h) / 2;
+            if (index != 0) t = a[index - 1];
+            if (l > h || (index != 0 && t == needle)) break;
+            if (needle <= t) {
+                h = index - 1;
+            } else {
+                l = index + 1;
+            }
+        }
+        found = index != 0 && t == needle;
+        if (index != 0) index -= 1;
+    }
+
+    /// @dev Returns whether `a` contains `needle`.
+    function inSorted(bytes32[] memory a, bytes32 needle) internal pure returns (bool found) {
+        (found,) = searchSorted(a, needle);
+    }
+
+    /// @dev Returns the sorted set difference of `a` and `b`.
+    /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
+    function difference(uint256[] memory a, uint256[] memory b)
+        internal
+        pure
+        returns (uint256[] memory c)
+    {
+        uint256 n;
+        for (uint256 pass; pass < 2; ++pass) {
+            uint256 i;
+            uint256 j;
+            uint256 k;
+            while (i < a.length && j < b.length) {
+                uint256 u = a[i];
+                uint256 v = b[j];
+                if (u == v) {
+                    ++i;
+                    ++j;
+                } else if (u > v) {
+                    ++j;
+                } else {
+                    if (pass == 1) c[k] = u;
+                    ++k;
+                    ++i;
+                }
+            }
+            while (i < a.length) {
+                if (pass == 1) c[k] = a[i];
+                ++k;
+                ++i;
+            }
+            if (pass == 0) {
+                n = k;
+                c = new uint256[](n);
+            }
+        }
+    }
+
+    /// @dev Returns the sorted set intersection between `a` and `b`.
+    /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
+    function intersection(uint256[] memory a, uint256[] memory b)
+        internal
+        pure
+        returns (uint256[] memory c)
+    {
+        uint256 n;
+        for (uint256 pass; pass < 2; ++pass) {
+            uint256 i;
+            uint256 j;
+            uint256 k;
+            while (i < a.length && j < b.length) {
+                uint256 u = a[i];
+                uint256 v = b[j];
+                if (u == v) {
+                    if (pass == 1) c[k] = u;
+                    ++k;
+                    ++i;
+                    ++j;
+                } else if (u > v) {
+                    ++j;
+                } else {
+                    ++i;
+                }
+            }
+            if (pass == 0) {
+                n = k;
+                c = new uint256[](n);
+            }
+        }
+    }
+
+    /// @dev Returns the sorted set union of `a` and `b`.
+    /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
+    function union(uint256[] memory a, uint256[] memory b) internal pure returns (uint256[] memory c) {
+        uint256 n;
+        for (uint256 pass; pass < 2; ++pass) {
+            uint256 i;
+            uint256 j;
+            uint256 k;
+            while (i < a.length && j < b.length) {
+                uint256 u = a[i];
+                uint256 v = b[j];
+                if (u == v) {
+                    if (pass == 1) c[k] = u;
+                    ++k;
+                    ++i;
+                    ++j;
+                } else if (u > v) {
+                    if (pass == 1) c[k] = v;
+                    ++k;
+                    ++j;
+                } else {
+                    if (pass == 1) c[k] = u;
+                    ++k;
+                    ++i;
+                }
+            }
+            while (i < a.length) {
+                if (pass == 1) c[k] = a[i];
+                ++k;
+                ++i;
+            }
+            while (j < b.length) {
+                if (pass == 1) c[k] = b[j];
+                ++k;
+                ++j;
+            }
+            if (pass == 0) {
+                n = k;
+                c = new uint256[](n);
+            }
+        }
+    }
+
+    /// @dev Returns the sorted set difference of `a` and `b`.
+    /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
+    function difference(int256[] memory a, int256[] memory b)
+        internal
+        pure
+        returns (int256[] memory c)
+    {
+        uint256 n;
+        for (uint256 pass; pass < 2; ++pass) {
+            uint256 i;
+            uint256 j;
+            uint256 k;
+            while (i < a.length && j < b.length) {
+                int256 u = a[i];
+                int256 v = b[j];
+                if (u == v) {
+                    ++i;
+                    ++j;
+                } else if (u > v) {
+                    ++j;
+                } else {
+                    if (pass == 1) c[k] = u;
+                    ++k;
+                    ++i;
+                }
+            }
+            while (i < a.length) {
+                if (pass == 1) c[k] = a[i];
+                ++k;
+                ++i;
+            }
+            if (pass == 0) {
+                n = k;
+                c = new int256[](n);
+            }
+        }
+    }
+
+    /// @dev Returns the sorted set intersection between `a` and `b`.
+    /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
+    function intersection(int256[] memory a, int256[] memory b)
+        internal
+        pure
+        returns (int256[] memory c)
+    {
+        uint256 n;
+        for (uint256 pass; pass < 2; ++pass) {
+            uint256 i;
+            uint256 j;
+            uint256 k;
+            while (i < a.length && j < b.length) {
+                int256 u = a[i];
+                int256 v = b[j];
+                if (u == v) {
+                    if (pass == 1) c[k] = u;
+                    ++k;
+                    ++i;
+                    ++j;
+                } else if (u > v) {
+                    ++j;
+                } else {
+                    ++i;
+                }
+            }
+            if (pass == 0) {
+                n = k;
+                c = new int256[](n);
+            }
+        }
+    }
+
+    /// @dev Returns the sorted set union of `a` and `b`.
+    /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
+    function union(int256[] memory a, int256[] memory b) internal pure returns (int256[] memory c) {
+        uint256 n;
+        for (uint256 pass; pass < 2; ++pass) {
+            uint256 i;
+            uint256 j;
+            uint256 k;
+            while (i < a.length && j < b.length) {
+                int256 u = a[i];
+                int256 v = b[j];
+                if (u == v) {
+                    if (pass == 1) c[k] = u;
+                    ++k;
+                    ++i;
+                    ++j;
+                } else if (u > v) {
+                    if (pass == 1) c[k] = v;
+                    ++k;
+                    ++j;
+                } else {
+                    if (pass == 1) c[k] = u;
+                    ++k;
+                    ++i;
+                }
+            }
+            while (i < a.length) {
+                if (pass == 1) c[k] = a[i];
+                ++k;
+                ++i;
+            }
+            while (j < b.length) {
+                if (pass == 1) c[k] = b[j];
+                ++k;
+                ++j;
+            }
+            if (pass == 0) {
+                n = k;
+                c = new int256[](n);
+            }
+        }
+    }
+
+    /// @dev Returns the sorted set difference of `a` and `b`.
+    /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
+    function difference(address[] memory a, address[] memory b)
+        internal
+        pure
+        returns (address[] memory c)
+    {
+        uint256 n;
+        for (uint256 pass; pass < 2; ++pass) {
+            uint256 i;
+            uint256 j;
+            uint256 k;
+            while (i < a.length && j < b.length) {
+                address u = a[i];
+                address v = b[j];
+                if (u == v) {
+                    ++i;
+                    ++j;
+                } else if (u > v) {
+                    ++j;
+                } else {
+                    if (pass == 1) c[k] = u;
+                    ++k;
+                    ++i;
+                }
+            }
+            while (i < a.length) {
+                if (pass == 1) c[k] = a[i];
+                ++k;
+                ++i;
+            }
+            if (pass == 0) {
+                n = k;
+                c = new address[](n);
+            }
+        }
+    }
+
+    /// @dev Returns the sorted set intersection between `a` and `b`.
+    /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
+    function intersection(address[] memory a, address[] memory b)
+        internal
+        pure
+        returns (address[] memory c)
+    {
+        uint256 n;
+        for (uint256 pass; pass < 2; ++pass) {
+            uint256 i;
+            uint256 j;
+            uint256 k;
+            while (i < a.length && j < b.length) {
+                address u = a[i];
+                address v = b[j];
+                if (u == v) {
+                    if (pass == 1) c[k] = u;
+                    ++k;
+                    ++i;
+                    ++j;
+                } else if (u > v) {
+                    ++j;
+                } else {
+                    ++i;
+                }
+            }
+            if (pass == 0) {
+                n = k;
+                c = new address[](n);
+            }
+        }
+    }
+
+    /// @dev Returns the sorted set union of `a` and `b`.
+    /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
+    function union(address[] memory a, address[] memory b) internal pure returns (address[] memory c) {
+        uint256 n;
+        for (uint256 pass; pass < 2; ++pass) {
+            uint256 i;
+            uint256 j;
+            uint256 k;
+            while (i < a.length && j < b.length) {
+                address u = a[i];
+                address v = b[j];
+                if (u == v) {
+                    if (pass == 1) c[k] = u;
+                    ++k;
+                    ++i;
+                    ++j;
+                } else if (u > v) {
+                    if (pass == 1) c[k] = v;
+                    ++k;
+                    ++j;
+                } else {
+                    if (pass == 1) c[k] = u;
+                    ++k;
+                    ++i;
+                }
+            }
+            while (i < a.length) {
+                if (pass == 1) c[k] = a[i];
+                ++k;
+                ++i;
+            }
+            while (j < b.length) {
+                if (pass == 1) c[k] = b[j];
+                ++k;
+                ++j;
+            }
+            if (pass == 0) {
+                n = k;
+                c = new address[](n);
+            }
+        }
+    }
+
+    /// @dev Returns the sorted set difference of `a` and `b`.
+    /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
+    function difference(bytes32[] memory a, bytes32[] memory b)
+        internal
+        pure
+        returns (bytes32[] memory c)
+    {
+        uint256 n;
+        for (uint256 pass; pass < 2; ++pass) {
+            uint256 i;
+            uint256 j;
+            uint256 k;
+            while (i < a.length && j < b.length) {
+                bytes32 u = a[i];
+                bytes32 v = b[j];
+                if (u == v) {
+                    ++i;
+                    ++j;
+                } else if (u > v) {
+                    ++j;
+                } else {
+                    if (pass == 1) c[k] = u;
+                    ++k;
+                    ++i;
+                }
+            }
+            while (i < a.length) {
+                if (pass == 1) c[k] = a[i];
+                ++k;
+                ++i;
+            }
+            if (pass == 0) {
+                n = k;
+                c = new bytes32[](n);
+            }
+        }
+    }
+
+    /// @dev Returns the sorted set intersection between `a` and `b`.
+    /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
+    function intersection(bytes32[] memory a, bytes32[] memory b)
+        internal
+        pure
+        returns (bytes32[] memory c)
+    {
+        uint256 n;
+        for (uint256 pass; pass < 2; ++pass) {
+            uint256 i;
+            uint256 j;
+            uint256 k;
+            while (i < a.length && j < b.length) {
+                bytes32 u = a[i];
+                bytes32 v = b[j];
+                if (u == v) {
+                    if (pass == 1) c[k] = u;
+                    ++k;
+                    ++i;
+                    ++j;
+                } else if (u > v) {
+                    ++j;
+                } else {
+                    ++i;
+                }
+            }
+            if (pass == 0) {
+                n = k;
+                c = new bytes32[](n);
+            }
+        }
+    }
+
+    /// @dev Returns the sorted set union of `a` and `b`.
+    /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
+    function union(bytes32[] memory a, bytes32[] memory b) internal pure returns (bytes32[] memory c) {
+        uint256 n;
+        for (uint256 pass; pass < 2; ++pass) {
+            uint256 i;
+            uint256 j;
+            uint256 k;
+            while (i < a.length && j < b.length) {
+                bytes32 u = a[i];
+                bytes32 v = b[j];
+                if (u == v) {
+                    if (pass == 1) c[k] = u;
+                    ++k;
+                    ++i;
+                    ++j;
+                } else if (u > v) {
+                    if (pass == 1) c[k] = v;
+                    ++k;
+                    ++j;
+                } else {
+                    if (pass == 1) c[k] = u;
+                    ++k;
+                    ++i;
+                }
+            }
+            while (i < a.length) {
+                if (pass == 1) c[k] = a[i];
+                ++k;
+                ++i;
+            }
+            while (j < b.length) {
+                if (pass == 1) c[k] = b[j];
+                ++k;
+                ++j;
+            }
+            if (pass == 0) {
+                n = k;
+                c = new bytes32[](n);
+            }
+        }
+    }
+
+    /// @dev Cleans the upper 96 bits of the addresses.
+    /// In case `a` is produced via assembly and might have dirty upper bits.
+    function clean(address[] memory a) internal pure {
+        for (uint256 i; i < a.length; ++i) {
+            a[i] = a[i];
+        }
+    }
 }

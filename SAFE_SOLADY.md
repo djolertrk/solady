@@ -34,8 +34,8 @@ Use the scoped runner commands below for the published subset.
 | SafeCastLib | 95 | 95 |
 | LibBit | 24 | 24 |
 | Base64 | 4 | 4 |
-| LibSort | 28 | 57 |
-| LibString | 21 | 57 |
+| LibSort | 49 | 57 |
+| LibString | 48 | 57 |
 
 These are function-declaration counts, not a claim of complete source or
 behavioral compatibility. The runner checks parameter names, types and locations,
@@ -44,11 +44,15 @@ This includes preserving named-call syntax. It records
 the missing functions across the archive in `api-coverage.json`.
 
 The port currently covers checked casts, bit operations, Base64, four typed
-array overloads for sorting/copying/reversing/duplicate checks, and selected
-string conversion and inspection functions. Tokens, authentication, proxies,
-cryptography, storage utilities, most strings, and other libraries remain
-outside this port. Missing constants and user-defined types are also outside
-the function audit.
+array overloads for sorting, copying, reversing, duplicate checks, sorted
+search, and the sorted set operations, and the value-oriented string
+functions (conversion, inspection, search, slicing, splitting, small
+strings, escaping, and packing). The 17 declarations still absent need an
+in-place memory resize, raw storage references, or a nonlocal return, which
+ordinary checked Solidity cannot express with the original signature.
+Tokens, authentication, proxies, cryptography, storage utilities, and other
+libraries remain outside this port. Missing constants and user-defined
+types are also outside the function audit.
 
 ## Run the comparison
 
@@ -364,6 +368,69 @@ hot-leaf inlining budget for straight-line helpers changes no bytecode.
 Artifacts: `solar/target/safe-solady/m5/rb-base3-mixed-200/` (before) and
 `rb-cand4-mixed-200/` (after); corpus comparison
 `solar/target/codegen-bench/cmp-rb4.md`.
+
+## Port checkpoint, 2026-09-13, coverage, sizes, and both run settings
+
+The port now implements 220 of the 237 non-private declarations of the five
+libraries: every declaration of Base64, LibBit, and SafeCastLib, 49 of 57 in
+LibSort, and 48 of 57 in LibString. This round added `searchSorted`,
+`inSorted`, `difference`, `intersection`, and `union` for all four element
+types and `clean` in LibSort, and `toHexStringChecksummed`, `replace`,
+`indexOf` and `lastIndexOf` (both forms), `contains`, `startsWith`,
+`endsWith`, `repeat`, `slice` (both forms), `indicesOf`, `split`,
+`fromSmallString`, `normalizeSmallString`, `toSmallString`, `escapeHTML`,
+`escapeJSON` (both forms), `encodeURIComponent`, `eqs`, `cmp`, `packOne`,
+`unpackOne`, `packTwo`, and `unpackTwo` in LibString, each with an
+independent Python oracle in the runner. The runner also accepts a run
+without `--api` filters, which measures every implemented API.
+
+The 17 declarations still absent are excluded by scope decision, not
+omission: `uniquifySorted` and `groupSum` (eight declarations) shrink a
+memory array in place, the eight `StringStorage` functions read and write
+raw storage slots through a custom packing, and `directReturn` ends the
+call from inside a library. Ordinary checked Solidity cannot express any of
+them with the original signature, so a compatible port would need either an
+API change or a compiler primitive; both are disclosed rather than
+introduced.
+
+At 200 runs the complete matrix has 20,421 cases. The checked source
+matches the oracle on both compilers in every case. The 135 original-source
+mismatches are the 114 fixed-width hexadecimal cases with byte count zero
+and the 6 `toNibbles` cases recorded before, plus 15 new ones in `split`:
+when the delimiter is longer than the subject, the original `indicesOf`
+returns a null pointer that `split` dereferences, so the original's output
+depends on scratch memory (solc's builds return an extra NUL element on
+those inputs; our build of the same assembly happens to return the
+documented result on 4 of the 11 cases). The checked `split` returns the
+subject as its only element. All three classes stay excluded from rankings
+and visible in the results.
+
+The new APIs are correct but mostly not yet at parity. The binary searches
+are: `searchSorted(uint256[])` and `(bytes32[])` win all 791 cases,
+`inSorted(address[])` all 800, `searchSorted(int256[])` 857 of 870;
+`startsWith` and `endsWith` win 62 of 72. The set operations and the
+byte-loop string functions trail the assembly by the same per-byte
+overhead as the codecs: worst cases are `repeat` (+251,501 gas on a
+363-byte result), `split` (+50,050), `escapeHTML` (+44,729), `replace`
+(+41,393), `encodeURIComponent` (+37,465), and `indicesOf` (+36,787), and
+`union` wins none of its 184 cases. Their gates belong to M4-class
+word-at-a-time work, not to further porting.
+
+At 1,000,000 optimizer runs the frozen matrix keeps the same shape as at
+200: the zero counters, `popCount`, `is7BitASCII`, and `copy(address[])`
+win every case (`copy` 286,516 against an envelope of 291,974),
+`insertionSort(uint256[])` and `sort` keep 37 of 46, `hasDuplicate` 17,
+`clz` still 1 of 776 although it falls to 405,512 from 490,872, and the
+codecs are unchanged. Runtime bytes of the identical harnesses at 200 runs,
+checked source on our compiler against the original on solc legacy and
+via-IR: Base64 3,635 against 1,300 and 1,673; LibBit 3,320 against 3,342
+and 3,058; LibSort 7,365 against 2,777 and 2,505 (solc on the checked
+source: 10,955 and 6,126); LibString 2,838 against 3,033 and 2,954;
+SafeCastLib 4,224 against 7,352 and 6,597. Base64 and LibSort carry the
+documented size cost of the typed byte and sort loops; the other three
+harnesses are smaller than the original on solc. Artifacts:
+`solar/target/safe-solady/m7/port-200/` (complete matrix) and
+`solar/target/safe-solady/m5/rb-base4-mixed-1m/` (1,000,000 runs).
 
 ## Compatibility findings and remaining boundaries
 
