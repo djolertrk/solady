@@ -477,6 +477,41 @@ Artifacts: `solar/target/safe-solady/m5/rb-base5-mixed-200/` (before) and
 `rb-cand9-mixed-200/` (after); corpus comparison
 `solar/target/codegen-bench/cmp-rb9.md`.
 
+## Compiler optimization checkpoint, 2026-09-13, decoder joins and stepped pointers
+
+Two more rounds on frozen sources. The first lets a join with more than two
+predecessors keep the words an enclosing loop carries, which the Base64
+decoder's four three-way lookups had dropped on every iteration, and raises
+the hot-leaf inliner's budget to the twelve words the backend now carries,
+so all four lookups inline instead of two staying calls. The second steps
+element addresses as pointers after memory lowering: scaled and descending
+strides, invariant starts, and `a[j - 1]` derived from the `a[j]` pointer,
+under a price model that leaves a lone scaled use alone.
+
+| API | Cases | Original / best solc | Checked before | Checked now | Change |
+|---|---:|---:|---:|---:|---:|
+| `Base64.decode(string)` | 65 | 312,712 | 1,706,612 | 1,444,550 | -15.4% |
+| `Base64.encode(bytes)` | 16 | 68,788 | 280,884 | 236,394 | -15.8% |
+| `LibString.toCase(string,bool)` | 6 | 19,638 | 36,968 | 30,852 | -16.5% |
+| `LibString.toHexString(bytes)` | 16 | 124,344 | 156,890 | 136,625 | -12.9% |
+| `LibBit.toNibbles(bytes)` | 15 | 20,084 | 83,994 | 76,704 | -8.7% |
+| `LibSort.sort(uint256[])` | 46 | 311,155 | 346,776 | 338,536 | -2.4% |
+| `LibSort.insertionSort(uint256[])` | 46 | 585,478 | 361,120 | 352,687 | -2.3% |
+| `LibSort.reverse(address[])` | 46 | 305,975 | 321,938 | 316,988 | -1.5% |
+| `LibSort.insertionSort(address[])` | 46 | 678,219 | 597,272 | 593,267 | -0.7% |
+
+`decode` wins its first two cases; the other APIs, the newly ported
+`replace` included, are unchanged, and every executed case matches the
+oracle. The shared runtime corpus is flat for both rounds (lib-string -0.69%
+then -0.03%) with no per-call loss. The pointer rule was tuned against three
+measured losses: reducing `copy`'s two single-use pointers cost 1.2%,
+`toString`'s `out[--i]` cost 24%, and a byte pointer in `replace`'s search
+loop cost 1.3%; all three now stay as they were. Artifacts:
+`solar/target/safe-solady/m5/rb-rb10-mixed-200/` (before),
+`rb-cand12-mixed-200/` (joins and inlining), `rb-cand22-mixed-200/`
+(pointers); corpus comparisons `solar/target/codegen-bench/cmp-cand12.md`
+and `cmp-cand22.md`.
+
 ## Compatibility findings and remaining boundaries
 
 The pinned original behaves differently from the intended value-level oracle
