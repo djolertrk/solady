@@ -432,6 +432,51 @@ harnesses are smaller than the original on solc. Artifacts:
 `solar/target/safe-solady/m7/port-200/` (complete matrix) and
 `solar/target/safe-solady/m5/rb-base4-mixed-1m/` (1,000,000 runs).
 
+## Compiler optimization checkpoint, 2026-09-13, loop residency
+
+The fifth compiler round keeps loop state on the stack. Memory lowering
+materializes each element access as `add base, 32` plus an index term
+inside the loop that reads it; a second loop-invariant code motion run after
+lowering hoists that base, and cheap word arithmetic executed on every
+iteration is hoisted as well, within a budget of five carried words per
+loop. The backend then emits blocks in a loop-aware reverse postorder so a
+branch can carry its stack into the latch it feeds; a carried invariant
+condition is duplicated for the jump instead of spilled; a branch keeps up to
+twelve carried words, matching the join planner; and a store sweeping low
+memory through a loop pointer counts as a spill hazard. Sources are frozen
+for this measurement.
+
+| API | Cases | Original / best solc | Checked before | Checked now | Change |
+|---|---:|---:|---:|---:|---:|
+| `LibSort.insertionSort(uint256[])` | 46 | 585,478 | 505,343 | 361,120 | -28.5% |
+| `LibSort.sort(uint256[])` | 46 | 311,155 | 487,109 | 346,776 | -28.8% |
+| `LibSort.insertionSort(address[])` | 46 | 678,219 | 794,991 | 597,272 | -24.9% |
+| `LibString.runeCount(string)` | 6 | 25,700 | 57,966 | 43,798 | -24.4% |
+| `LibSort.reverse(address[])` | 46 | 305,975 | 376,422 | 321,938 | -14.5% |
+| `Base64.encode(bytes)` | 16 | 68,788 | 325,680 | 280,884 | -13.8% |
+| `LibBit.toNibbles(bytes)` | 15 | 20,084 | 96,279 | 83,949 | -12.8% |
+| `LibSort.copy(address[])` | 46 | 331,217 | 291,714 | 262,284 | -10.1% |
+| `LibSort.hasDuplicate(uint256[])` | 46 | 179,241 | 272,688 | 246,157 | -9.7% |
+| `LibString.toHexString(bytes)` | 16 | 124,344 | 170,677 | 156,890 | -8.1% |
+| `LibString.toCase(string,bool)` | 6 | 19,638 | 38,636 | 36,950 | -4.4% |
+| `LibString.toString(uint256)` | 19 | 70,108 | 126,170 | 121,024 | -4.1% |
+| `LibString.is7BitASCII(string)` | 12 | 15,659 | 10,792 | 10,518 | -2.5% |
+| `LibBit.countZeroBytes(bytes)` | 22 | 37,376 | 27,226 | 26,888 | -1.2% |
+| `LibBit.countZeroBytesCalldata(bytes)` | 22 | 35,621 | 23,679 | 23,589 | -0.4% |
+| `Base64.decode(string)` | 65 | 312,712 | 1,711,796 | 1,706,612 | -0.3% |
+
+`clz`, `popCount`, and `toUint40` are unchanged and every executed case
+matches the oracle. `insertionSort(uint256[])` wins 39 of 46 cases, `sort`
+38, `copy` 42, `hasDuplicate` 18; `insertionSort(address[])` is 12% under
+its envelope in total but still wins only its 8 largest cases. The shared
+runtime corpus improves 1.63% in runtime gas (lib-string -26.65%) and 0.44%
+in runtime bytes, with a worst per-call loss of 33 gas on a zero-trip loop
+whose hoisted base is now computed before the loop. The decoder's loop
+carries a dozen live words and still spills; that is the open residual.
+Artifacts: `solar/target/safe-solady/m5/rb-base5-mixed-200/` (before) and
+`rb-cand9-mixed-200/` (after); corpus comparison
+`solar/target/codegen-bench/cmp-rb9.md`.
+
 ## Compatibility findings and remaining boundaries
 
 The pinned original behaves differently from the intended value-level oracle
