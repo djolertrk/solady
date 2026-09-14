@@ -699,7 +699,59 @@ either a compiler that fuses adjacent byte accesses into word accesses or a
 language-level way to move a run of bytes.
 
 Artifacts: `solar/target/safe-solady/m5/full-cand46/` (before) and
-`solar/target/safe-solady/m6/src6/` (after).
+`solar/target/safe-solady/m6/src8/` (after).
+
+### Second round: decimal length, letter case, escape membership
+
+A follow-up pass took the three scalar APIs the plan still named. `toString`
+finds its digit count by halving the remaining magnitude in seven steps rather
+than dividing by ten once per digit. `toCase` hoists the letter range out of the
+loop and converts with the single bit that separates the two cases, instead of
+two guarded compound conditions per byte. The escape scans test membership of the
+escaped set with one shift and mask, so a byte that needs no escape never reaches
+the helper.
+
+| API | Cases | Original / best solc | Checked before | Checked now | Change |
+|---|---:|---:|---:|---:|---:|
+| `LibString.toString(uint256)` | 19 | 70,108 | 121,081 | 105,872 | -12.6% |
+| `LibString.toString(int256)` | 19 | 67,879 | 115,447 | 101,911 | -11.7% |
+| `LibString.toCase(string,bool)` | 6 | 19,638 | 30,852 | 25,256 | -18.1% |
+| `LibString.escapeJSON(string,bool)` | 12 | 34,136 | 124,553 | 77,581 | -37.7% |
+| `LibString.escapeJSON(string)` | 6 | 15,485 | 59,515 | 37,160 | -37.6% |
+| `LibString.escapeHTML(string)` | 5 | 14,426 | 89,667 | 76,800 | -14.3% |
+
+One change in this round was measured and reverted: counting how many of the five
+UTF-8 thresholds a byte reaches makes `runeCount` branch-free but 12.6% more
+expensive, because the first test already settles every ASCII byte and the
+short-circuit never evaluates the rest.
+
+The `toHexString(uint256,uint256)` pair rose 10% over the same interval without
+its source changing, and `searchSorted` and `inSorted` moved by comparable
+amounts in both directions. Compiling the same sources with the previous compiler
+reproduces the new numbers exactly, so this is the combined harness moving: these
+per-call figures include selector dispatch, and the LibString harness grew 581
+bytes in this round. Isolated, the hexadecimal loop is six instructions per
+nibble with no bounds check.
+
+### Where the port stands
+
+| Library | Envelope | Checked before | Checked now | Before | Now | Wins | Losses |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Base64 | 805,836 | 3,189,407 | 1,664,445 | 3.96x | 2.07x | 2 | 175 |
+| LibBit | 3,465,505 | 3,007,289 | 2,727,813 | 0.87x | 0.79x | 4,844 | 1,719 |
+| LibSort | 43,892,809 | 35,744,940 | 32,900,521 | 0.81x | 0.75x | 8,637 | 1,407 |
+| LibString | 6,121,520 | 10,343,017 | 8,902,513 | 1.69x | 1.45x | 1,747 | 1,165 |
+| SafeCastLib | 297,552 | 238,003 | 238,003 | 0.80x | 0.80x | 504 | 156 |
+| Total | 54,583,222 | 52,522,656 | 46,433,295 | 0.962x | 0.851x | 15,734 | 4,622 |
+
+The twelve costliest remaining gaps are the two Base64 directions (2.03x and
+2.07x), `replace` (2.28x), `split` (2.08x), `indicesOf` (2.06x), the
+`toHexString(uint256,uint256)` pair (1.68x), `toHexStringChecksummed` (2.39x),
+`hasDuplicate` (1.41x across all four element types), `slice` (1.20x) and
+`indexOf` (1.17x). Every one of them is a loop that reads or writes memory one
+byte at a time where the assembly moves a word, which is the boundary this port
+cannot cross from the source side.
+
 
 ## Compatibility findings and remaining boundaries
 

@@ -10,11 +10,46 @@ library LibString {
     uint256 internal constant NOT_FOUND = type(uint256).max;
     bytes16 private constant HEX = "0123456789abcdef";
 
+    /// @dev Set bit per byte value that `escapeHTML` rewrites: `"`, `&`, `'`,
+    /// `<` and `>`. Testing membership with one shift keeps every other byte
+    /// out of the escape helper.
+    uint256 private constant _HTML_ESCAPED =
+        (1 << 0x22) | (1 << 0x26) | (1 << 0x27) | (1 << 0x3c) | (1 << 0x3e);
+
+    /// @dev Set bit per byte value that `escapeJSON` rewrites: every control
+    /// byte below 0x20, plus `"` and `\`.
+    uint256 private constant _JSON_ESCAPED = 0xffffffff | (1 << 0x22) | (1 << 0x5c);
+
     function toString(uint256 value) internal pure returns (string memory result) {
+        // Halving the remaining magnitude costs at most seven steps, where
+        // dividing by ten once per digit costs up to seventy-eight.
         uint256 length = 1;
-        for (uint256 x = value; x >= 10; x /= 10) {
-            ++length;
+        uint256 x = value;
+        if (x >= 1e64) {
+            x /= 1e64;
+            length += 64;
         }
+        if (x >= 1e32) {
+            x /= 1e32;
+            length += 32;
+        }
+        if (x >= 1e16) {
+            x /= 1e16;
+            length += 16;
+        }
+        if (x >= 1e8) {
+            x /= 1e8;
+            length += 8;
+        }
+        if (x >= 1e4) {
+            x /= 1e4;
+            length += 4;
+        }
+        if (x >= 1e2) {
+            x /= 1e2;
+            length += 2;
+        }
+        if (x >= 10) ++length;
         bytes memory out = new bytes(length);
         do {
             --length;
@@ -136,6 +171,8 @@ library LibString {
         bytes memory b = bytes(s);
         for (uint256 i; i < b.length; ++result) {
             uint256 c = uint8(b[i]);
+            // Counting the thresholds `c` reaches instead is branch-free but
+            // measured worse: the first test already settles every ASCII byte.
             i += c < 0xc0 ? 1 : c < 0xe0 ? 2 : c < 0xf0 ? 3 : c < 0xf8 ? 4 : c < 0xfc ? 5 : 6;
         }
     }
@@ -155,11 +192,12 @@ library LibString {
     {
         bytes memory b = bytes(subject);
         bytes memory out = new bytes(b.length);
+        // The two cases differ only in which letter range is converted, and
+        // either direction is the same single bit flip.
+        uint256 lower = toUpper ? 97 : 65;
         for (uint256 i; i < b.length; ++i) {
-            uint8 c = uint8(b[i]);
-            if (toUpper && c >= 97 && c <= 122) c -= 32;
-            if (!toUpper && c >= 65 && c <= 90) c += 32;
-            out[i] = bytes1(c);
+            uint256 c = uint8(b[i]);
+            out[i] = bytes1(uint8(c ^ (c >= lower && c <= lower + 25 ? 0x20 : 0)));
         }
         return string(out);
     }
@@ -518,22 +556,26 @@ library LibString {
         bytes memory b = bytes(s);
         uint256 length;
         for (uint256 i; i < b.length; ++i) {
+            if ((_HTML_ESCAPED >> uint8(b[i])) & 1 == 0) {
+                ++length;
+                continue;
+            }
             (, uint256 escaped) = _htmlEscape(b[i]);
-            length += escaped == 0 ? 1 : escaped;
+            length += escaped;
         }
         bytes memory out = new bytes(length);
         uint256 o;
         for (uint256 i; i < b.length; ++i) {
-            (bytes32 seq, uint256 escaped) = _htmlEscape(b[i]);
-            if (escaped == 0) {
+            if ((_HTML_ESCAPED >> uint8(b[i])) & 1 == 0) {
                 out[o] = b[i];
                 ++o;
-            } else {
-                for (uint256 k; k < escaped; ++k) {
-                    out[o + k] = seq[k];
-                }
-                o += escaped;
+                continue;
             }
+            (bytes32 seq, uint256 escaped) = _htmlEscape(b[i]);
+            for (uint256 k; k < escaped; ++k) {
+                out[o + k] = seq[k];
+            }
+            o += escaped;
         }
         return string(out);
     }
@@ -573,8 +615,12 @@ library LibString {
         bytes memory b = bytes(s);
         uint256 length = addDoubleQuotes ? 2 : 0;
         for (uint256 i; i < b.length; ++i) {
+            if ((_JSON_ESCAPED >> uint8(b[i])) & 1 == 0) {
+                ++length;
+                continue;
+            }
             (, uint256 escaped) = _jsonEscape(b[i]);
-            length += escaped == 0 ? 1 : escaped;
+            length += escaped;
         }
         bytes memory out = new bytes(length);
         uint256 o;
@@ -583,16 +629,16 @@ library LibString {
             ++o;
         }
         for (uint256 i; i < b.length; ++i) {
-            (bytes32 seq, uint256 escaped) = _jsonEscape(b[i]);
-            if (escaped == 0) {
+            if ((_JSON_ESCAPED >> uint8(b[i])) & 1 == 0) {
                 out[o] = b[i];
                 ++o;
-            } else {
-                for (uint256 k; k < escaped; ++k) {
-                    out[o + k] = seq[k];
-                }
-                o += escaped;
+                continue;
             }
+            (bytes32 seq, uint256 escaped) = _jsonEscape(b[i]);
+            for (uint256 k; k < escaped; ++k) {
+                out[o + k] = seq[k];
+            }
+            o += escaped;
         }
         if (addDoubleQuotes) out[o] = "\"";
         return string(out);
