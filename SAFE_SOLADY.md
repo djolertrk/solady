@@ -584,6 +584,23 @@ checked source, and 14,225 of the 20,370 comparable cases meet the envelope.
 Artifacts: `solar/target/safe-solady/m5/full-cand32/` (before) and
 `full-cand39/` (after).
 
+## Measured and rejected, 2026-09-14: branch removal in the Base64 decoder
+
+Each of the decoder's four lookups per iteration guards its table select with a
+two-part range test, and the decoder executes sixteen times the envelope's
+control-flow steps. Four compiler changes were built to remove those guards:
+fusing the two branches of a short-circuit test whose join receives the same
+value on both edges, converting again after inlining creates that join, a larger
+speculation limit, and a cost model that no longer counts a speculated arm's
+bytes twice. Together they changed nothing across the 20,421-case matrix and
+nothing on the shared runtime corpus, and all four were reverted.
+
+The conversion is correctly rejected: the table select costs 55 gas and running
+it on both paths exceeds the 40 gas of branches removed. The saving is real only
+because valid Base64 always takes the in-range path, which a model without
+execution frequencies cannot know. This is recorded so the experiment is not
+repeated; closing it needs profile information, not a better local rule.
+
 ## Compatibility findings and remaining boundaries
 
 The pinned original behaves differently from the intended value-level oracle
