@@ -753,6 +753,44 @@ byte at a time where the assembly moves a word, which is the boundary this port
 cannot cross from the source side.
 
 
+## Composed workloads, 2026-09-14
+
+Per-API numbers do not say what an application pays, so
+`benchmarks/checked/composed.py` measures three workloads that chain several
+libraries in one call: an ERC-721 style `tokenURI` that escapes a name, renders
+an identifier and a checksummed owner and Base64s the document; a `mergeLists`
+set pipeline that sorts two lists and takes their union, intersection and
+difference; and a `decodeAndScan` path that Base64-decodes a payload then counts,
+measures and searches it. The workload source is byte-identical across every leg
+and uses only APIs whose declarations the port shares with the pinned archive, so
+the same contract compiles against the checked sources and against the original
+assembly. There is no separate Python oracle: the check is that all six legs
+return the same bytes, which is agreement between two independent implementations
+under three compiler pipelines. All 18 cases agree.
+
+| Workload | solc upstream legacy | solc upstream IR | solc safe legacy | solc safe IR | our compiler, upstream | our compiler, checked |
+|---|---:|---:|---:|---:|---:|---:|
+| `tokenURI` | 114,494 | 117,711 | 762,137 | 678,777 | 100,272 | 256,865 |
+| `mergeLists` | 164,390 | 169,921 | 586,149 | 673,405 | 130,612 | 310,333 |
+| `decodeAndScan` | 154,509 | 167,271 | 882,055 | 791,789 | 131,501 | 240,256 |
+| Total | 433,393 | 454,903 | 2,230,341 | 2,143,971 | 362,385 | 807,454 |
+
+Held against the same source, our compiler costs 0.84 times solc's cheaper
+pipeline on the original assembly and 0.38 times solc's cheaper pipeline on the
+checked rewrite. The checked port compiled by us costs 1.88 times the assembly
+envelope, ranging from 1.56x on the decode path to 2.25x on the metadata URI.
+
+The identical workload contract deploys at 7,969 runtime bytes from the checked
+sources against 4,139 for the original assembly under solc via-IR, and 4,929 when
+we compile that same assembly. Whole-application deployment cost is therefore the
+place where this port is furthest behind, and it is not hidden by the gas result.
+
+This is the honest statement the workloads support: a library collection written
+in ordinary checked Solidity, compiled by us, runs these three application
+workloads for 1.88 times the gas of the assembly original compiled by solc, and
+for 0.38 times what solc charges for the same checked sources. It is not parity,
+and the three workloads are not an application.
+
 ## Compatibility findings and remaining boundaries
 
 The pinned original behaves differently from the intended value-level oracle
