@@ -785,6 +785,12 @@ sources against 4,139 for the original assembly under solc via-IR, and 4,929 whe
 we compile that same assembly. Whole-application deployment cost is therefore the
 place where this port is furthest behind, and it is not hidden by the gas result.
 
+Both rewrites in this round touched libraries the pinned upstream suites cover.
+Re-running those suites after them reproduces the earlier result exactly: the
+checked implementations pass all 60 tests under both solc via-IR and our
+compiler, and the original solc baseline still fails only
+`testToNibblesDifferential`.
+
 This is the honest statement the workloads support: a library collection written
 in ordinary checked Solidity, compiled by us, runs these three application
 workloads for 1.88 times the gas of the assembly original compiled by solc, and
