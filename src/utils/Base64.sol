@@ -5,8 +5,24 @@ pragma solidity ^0.8.20;
 /// @dev Decode accepts the documented standard, URL and IMAP alphabets and
 /// padding modes. Invalid input has unspecified output in the upstream API.
 library Base64 {
-    bytes32 private constant ENCODE0 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef";
-    bytes32 private constant ENCODE1 = "ghijklmnopqrstuvwxyz0123456789+/";
+    /// @dev The standard alphabet. The two URL-safe replacements are patched
+    /// into a single memory copy so every lookup in a call shares one buffer.
+    string private constant ENCODE =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    /// @dev Sextet per byte value, zero where the byte is not part of any
+    /// accepted alphabet. Codes 43 and 45 map to 62; codes 44, 47 and 95 map
+    /// to 63, covering the standard, URL and IMAP alphabets. The table spans
+    /// the whole byte range so a lookup needs neither a range test nor a
+    /// bounds check.
+    bytes private constant DECODE = hex"0000000000000000000000000000000000000000000000000000000000000000"
+        hex"00000000000000000000003e3f3e003f3435363738393a3b3c3d000000000000"
+        hex"00000102030405060708090a0b0c0d0e0f10111213141516171819000000003f"
+        hex"001a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132330000000000"
+        hex"0000000000000000000000000000000000000000000000000000000000000000"
+        hex"0000000000000000000000000000000000000000000000000000000000000000"
+        hex"0000000000000000000000000000000000000000000000000000000000000000"
+        hex"0000000000000000000000000000000000000000000000000000000000000000";
 
     function encode(bytes memory data, bool fileSafe, bool noPadding)
         internal
@@ -18,28 +34,40 @@ library Base64 {
         uint256 length = ((n + 2) / 3) * 4;
         if (noPadding) length -= padding;
         bytes memory out = new bytes(length);
+        if (n == 0) return string(out);
+        bytes memory table = bytes(ENCODE);
+        if (fileSafe) {
+            // Written as byte values: a one-character string literal is first
+            // materialized as a `bytes` value before the `bytes1` conversion.
+            table[62] = bytes1(uint8(0x2d));
+            table[63] = bytes1(uint8(0x5f));
+        }
+        uint256 i;
         uint256 j;
-        for (uint256 i; i < n; i += 3) {
+        while (i + 2 < n && j + 3 < length) {
+            uint256 word = (uint256(uint8(data[i])) << 16) | (uint256(uint8(data[i + 1])) << 8)
+                | uint256(uint8(data[i + 2]));
+            out[j] = table[word >> 18];
+            out[j + 1] = table[(word >> 12) & 63];
+            out[j + 2] = table[(word >> 6) & 63];
+            out[j + 3] = table[word & 63];
+            i += 3;
+            j += 4;
+        }
+        if (i < n) {
             uint256 word = uint256(uint8(data[i])) << 16;
             if (i + 1 < n) word |= uint256(uint8(data[i + 1])) << 8;
             if (i + 2 < n) word |= uint8(data[i + 2]);
-            out[j] = _encode((word >> 18) & 63, fileSafe);
-            out[j + 1] = _encode((word >> 12) & 63, fileSafe);
+            out[j] = table[word >> 18];
+            out[j + 1] = table[(word >> 12) & 63];
             if (j + 2 < length) {
-                out[j + 2] = i + 1 < n ? _encode((word >> 6) & 63, fileSafe) : bytes1("=");
+                out[j + 2] = i + 1 < n ? table[(word >> 6) & 63] : bytes1("=");
             }
             if (j + 3 < length) {
-                out[j + 3] = i + 2 < n ? _encode(word & 63, fileSafe) : bytes1("=");
+                out[j + 3] = i + 2 < n ? table[word & 63] : bytes1("=");
             }
-            j += 4;
         }
         return string(out);
-    }
-
-    function _encode(uint256 index, bool fileSafe) private pure returns (bytes1) {
-        if (fileSafe && index >= 62) return index == 62 ? bytes1("-") : bytes1("_");
-        bytes32 table = index < 32 ? ENCODE0 : ENCODE1;
-        return table[index & 31];
     }
 
     function encode(bytes memory data) internal pure returns (string memory result) {
@@ -63,30 +91,28 @@ library Base64 {
             if (input[n - 2] == "=") --length;
         }
         result = new bytes(length);
+        bytes memory table = DECODE;
+        uint256 i;
         uint256 j;
-        for (uint256 i; i < n; i += 4) {
-            uint256 word = _decode(input[i]) << 18;
-            if (i + 1 < n) word |= _decode(input[i + 1]) << 12;
-            if (i + 2 < n) word |= _decode(input[i + 2]) << 6;
-            if (i + 3 < n) word |= _decode(input[i + 3]);
+        while (i + 3 < n && j + 2 < length) {
+            uint256 word = (uint256(uint8(table[uint8(input[i])])) << 18)
+                | (uint256(uint8(table[uint8(input[i + 1])])) << 12)
+                | (uint256(uint8(table[uint8(input[i + 2])])) << 6)
+                | uint256(uint8(table[uint8(input[i + 3])]));
+            result[j] = bytes1(uint8(word >> 16));
+            result[j + 1] = bytes1(uint8(word >> 8));
+            result[j + 2] = bytes1(uint8(word));
+            i += 4;
+            j += 3;
+        }
+        if (i < n) {
+            uint256 word = uint256(uint8(table[uint8(input[i])])) << 18;
+            if (i + 1 < n) word |= uint256(uint8(table[uint8(input[i + 1])])) << 12;
+            if (i + 2 < n) word |= uint256(uint8(table[uint8(input[i + 2])])) << 6;
+            if (i + 3 < n) word |= uint256(uint8(table[uint8(input[i + 3])]));
             if (j < length) result[j] = bytes1(uint8(word >> 16));
             if (j + 1 < length) result[j + 1] = bytes1(uint8(word >> 8));
             if (j + 2 < length) result[j + 2] = bytes1(uint8(word));
-            j += 3;
         }
-    }
-
-    bytes32 private constant DECODE1 =
-        hex"00000000000000000000003e3f3e003f3435363738393a3b3c3d000000000000";
-    bytes32 private constant DECODE2 =
-        hex"00000102030405060708090a0b0c0d0e0f10111213141516171819000000003f";
-    bytes32 private constant DECODE3 =
-        hex"001a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132330000000000";
-
-    function _decode(bytes1 c) private pure returns (uint256) {
-        uint256 x = uint8(c);
-        if (x < 32 || x >= 128) return 0;
-        bytes32 table = x < 64 ? DECODE1 : x < 96 ? DECODE2 : DECODE3;
-        return uint8(table[x & 31]);
     }
 }

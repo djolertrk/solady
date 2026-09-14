@@ -653,6 +653,27 @@ library LibSort {
         (found,) = searchSorted(a, needle);
     }
 
+    /// @dev Returns the number of values present in both `a` and `b`, walking
+    /// them in the same order as the set operations below. Their result lengths
+    /// are exact functions of this count, so each operation walks once.
+    function _common(uint256[] memory a, uint256[] memory b) private pure returns (uint256 n) {
+        uint256 i;
+        uint256 j;
+        while (i < a.length && j < b.length) {
+            uint256 u = a[i];
+            uint256 v = b[j];
+            if (u == v) {
+                ++n;
+                ++i;
+                ++j;
+            } else if (u > v) {
+                ++j;
+            } else {
+                ++i;
+            }
+        }
+    }
+
     /// @dev Returns the sorted set difference of `a` and `b`.
     /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
     function difference(uint256[] memory a, uint256[] memory b)
@@ -660,34 +681,28 @@ library LibSort {
         pure
         returns (uint256[] memory c)
     {
-        uint256 n;
-        for (uint256 pass; pass < 2; ++pass) {
-            uint256 i;
-            uint256 j;
-            uint256 k;
-            while (i < a.length && j < b.length) {
-                uint256 u = a[i];
-                uint256 v = b[j];
-                if (u == v) {
-                    ++i;
-                    ++j;
-                } else if (u > v) {
-                    ++j;
-                } else {
-                    if (pass == 1) c[k] = u;
-                    ++k;
-                    ++i;
-                }
-            }
-            while (i < a.length) {
-                if (pass == 1) c[k] = a[i];
+        c = new uint256[](a.length - _common(a, b));
+        uint256 i;
+        uint256 j;
+        uint256 k;
+        while (i < a.length && j < b.length) {
+            uint256 u = a[i];
+            uint256 v = b[j];
+            if (u == v) {
+                ++i;
+                ++j;
+            } else if (u > v) {
+                ++j;
+            } else {
+                c[k] = u;
                 ++k;
                 ++i;
             }
-            if (pass == 0) {
-                n = k;
-                c = new uint256[](n);
-            }
+        }
+        while (i < a.length) {
+            c[k] = a[i];
+            ++k;
+            ++i;
         }
     }
 
@@ -698,71 +713,84 @@ library LibSort {
         pure
         returns (uint256[] memory c)
     {
-        uint256 n;
-        for (uint256 pass; pass < 2; ++pass) {
-            uint256 i;
-            uint256 j;
-            uint256 k;
-            while (i < a.length && j < b.length) {
-                uint256 u = a[i];
-                uint256 v = b[j];
-                if (u == v) {
-                    if (pass == 1) c[k] = u;
-                    ++k;
-                    ++i;
-                    ++j;
-                } else if (u > v) {
-                    ++j;
-                } else {
-                    ++i;
-                }
-            }
-            if (pass == 0) {
-                n = k;
-                c = new uint256[](n);
+        c = new uint256[](_common(a, b));
+        uint256 i;
+        uint256 j;
+        uint256 k;
+        while (i < a.length && j < b.length) {
+            uint256 u = a[i];
+            uint256 v = b[j];
+            if (u == v) {
+                c[k] = u;
+                ++k;
+                ++i;
+                ++j;
+            } else if (u > v) {
+                ++j;
+            } else {
+                ++i;
             }
         }
     }
 
     /// @dev Returns the sorted set union of `a` and `b`.
     /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
-    function union(uint256[] memory a, uint256[] memory b) internal pure returns (uint256[] memory c) {
-        uint256 n;
-        for (uint256 pass; pass < 2; ++pass) {
-            uint256 i;
-            uint256 j;
-            uint256 k;
-            while (i < a.length && j < b.length) {
-                uint256 u = a[i];
-                uint256 v = b[j];
-                if (u == v) {
-                    if (pass == 1) c[k] = u;
-                    ++k;
-                    ++i;
-                    ++j;
-                } else if (u > v) {
-                    if (pass == 1) c[k] = v;
-                    ++k;
-                    ++j;
-                } else {
-                    if (pass == 1) c[k] = u;
-                    ++k;
-                    ++i;
-                }
-            }
-            while (i < a.length) {
-                if (pass == 1) c[k] = a[i];
+    function union(uint256[] memory a, uint256[] memory b)
+        internal
+        pure
+        returns (uint256[] memory c)
+    {
+        c = new uint256[](a.length + b.length - _common(a, b));
+        uint256 i;
+        uint256 j;
+        uint256 k;
+        while (i < a.length && j < b.length) {
+            uint256 u = a[i];
+            uint256 v = b[j];
+            if (u == v) {
+                c[k] = u;
+                ++k;
+                ++i;
+                ++j;
+            } else if (u > v) {
+                c[k] = v;
+                ++k;
+                ++j;
+            } else {
+                c[k] = u;
                 ++k;
                 ++i;
             }
-            while (j < b.length) {
-                if (pass == 1) c[k] = b[j];
-                ++k;
+        }
+        while (i < a.length) {
+            c[k] = a[i];
+            ++k;
+            ++i;
+        }
+        while (j < b.length) {
+            c[k] = b[j];
+            ++k;
+            ++j;
+        }
+    }
+
+    /// @dev Returns the number of values present in both `a` and `b`, walking
+    /// them in the same order as the set operations below. Their result lengths
+    /// are exact functions of this count, so each operation walks once.
+    function _common(int256[] memory a, int256[] memory b) private pure returns (uint256 n) {
+        uint256 i;
+        uint256 j;
+        while (i < a.length && j < b.length) {
+            int256 u = a[i];
+            int256 v = b[j];
+            if (u == v) {
+                ++n;
+                ++i;
                 ++j;
-            }
-            if (pass == 0) {
-                n = k;
-                c = new uint256[](n);
+            } else if (u > v) {
+                ++j;
+            } else {
+                ++i;
             }
         }
     }
@@ -774,34 +802,28 @@ library LibSort {
         pure
         returns (int256[] memory c)
     {
-        uint256 n;
-        for (uint256 pass; pass < 2; ++pass) {
-            uint256 i;
-            uint256 j;
-            uint256 k;
-            while (i < a.length && j < b.length) {
-                int256 u = a[i];
-                int256 v = b[j];
-                if (u == v) {
-                    ++i;
-                    ++j;
-                } else if (u > v) {
-                    ++j;
-                } else {
-                    if (pass == 1) c[k] = u;
-                    ++k;
-                    ++i;
-                }
-            }
-            while (i < a.length) {
-                if (pass == 1) c[k] = a[i];
+        c = new int256[](a.length - _common(a, b));
+        uint256 i;
+        uint256 j;
+        uint256 k;
+        while (i < a.length && j < b.length) {
+            int256 u = a[i];
+            int256 v = b[j];
+            if (u == v) {
+                ++i;
+                ++j;
+            } else if (u > v) {
+                ++j;
+            } else {
+                c[k] = u;
                 ++k;
                 ++i;
             }
-            if (pass == 0) {
-                n = k;
-                c = new int256[](n);
-            }
+        }
+        while (i < a.length) {
+            c[k] = a[i];
+            ++k;
+            ++i;
         }
     }
 
@@ -812,28 +834,22 @@ library LibSort {
         pure
         returns (int256[] memory c)
     {
-        uint256 n;
-        for (uint256 pass; pass < 2; ++pass) {
-            uint256 i;
-            uint256 j;
-            uint256 k;
-            while (i < a.length && j < b.length) {
-                int256 u = a[i];
-                int256 v = b[j];
-                if (u == v) {
-                    if (pass == 1) c[k] = u;
-                    ++k;
-                    ++i;
-                    ++j;
-                } else if (u > v) {
-                    ++j;
-                } else {
-                    ++i;
-                }
-            }
-            if (pass == 0) {
-                n = k;
-                c = new int256[](n);
+        c = new int256[](_common(a, b));
+        uint256 i;
+        uint256 j;
+        uint256 k;
+        while (i < a.length && j < b.length) {
+            int256 u = a[i];
+            int256 v = b[j];
+            if (u == v) {
+                c[k] = u;
+                ++k;
+                ++i;
+                ++j;
+            } else if (u > v) {
+                ++j;
+            } else {
+                ++i;
             }
         }
     }
@@ -841,42 +857,57 @@ library LibSort {
     /// @dev Returns the sorted set union of `a` and `b`.
     /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
     function union(int256[] memory a, int256[] memory b) internal pure returns (int256[] memory c) {
-        uint256 n;
-        for (uint256 pass; pass < 2; ++pass) {
-            uint256 i;
-            uint256 j;
-            uint256 k;
-            while (i < a.length && j < b.length) {
-                int256 u = a[i];
-                int256 v = b[j];
-                if (u == v) {
-                    if (pass == 1) c[k] = u;
-                    ++k;
-                    ++i;
-                    ++j;
-                } else if (u > v) {
-                    if (pass == 1) c[k] = v;
-                    ++k;
-                    ++j;
-                } else {
-                    if (pass == 1) c[k] = u;
-                    ++k;
-                    ++i;
-                }
-            }
-            while (i < a.length) {
-                if (pass == 1) c[k] = a[i];
+        c = new int256[](a.length + b.length - _common(a, b));
+        uint256 i;
+        uint256 j;
+        uint256 k;
+        while (i < a.length && j < b.length) {
+            int256 u = a[i];
+            int256 v = b[j];
+            if (u == v) {
+                c[k] = u;
+                ++k;
+                ++i;
+                ++j;
+            } else if (u > v) {
+                c[k] = v;
+                ++k;
+                ++j;
+            } else {
+                c[k] = u;
                 ++k;
                 ++i;
             }
-            while (j < b.length) {
-                if (pass == 1) c[k] = b[j];
-                ++k;
+        }
+        while (i < a.length) {
+            c[k] = a[i];
+            ++k;
+            ++i;
+        }
+        while (j < b.length) {
+            c[k] = b[j];
+            ++k;
+            ++j;
+        }
+    }
+
+    /// @dev Returns the number of values present in both `a` and `b`, walking
+    /// them in the same order as the set operations below. Their result lengths
+    /// are exact functions of this count, so each operation walks once.
+    function _common(address[] memory a, address[] memory b) private pure returns (uint256 n) {
+        uint256 i;
+        uint256 j;
+        while (i < a.length && j < b.length) {
+            address u = a[i];
+            address v = b[j];
+            if (u == v) {
+                ++n;
+                ++i;
                 ++j;
-            }
-            if (pass == 0) {
-                n = k;
-                c = new int256[](n);
+            } else if (u > v) {
+                ++j;
+            } else {
+                ++i;
             }
         }
     }
@@ -888,34 +919,28 @@ library LibSort {
         pure
         returns (address[] memory c)
     {
-        uint256 n;
-        for (uint256 pass; pass < 2; ++pass) {
-            uint256 i;
-            uint256 j;
-            uint256 k;
-            while (i < a.length && j < b.length) {
-                address u = a[i];
-                address v = b[j];
-                if (u == v) {
-                    ++i;
-                    ++j;
-                } else if (u > v) {
-                    ++j;
-                } else {
-                    if (pass == 1) c[k] = u;
-                    ++k;
-                    ++i;
-                }
-            }
-            while (i < a.length) {
-                if (pass == 1) c[k] = a[i];
+        c = new address[](a.length - _common(a, b));
+        uint256 i;
+        uint256 j;
+        uint256 k;
+        while (i < a.length && j < b.length) {
+            address u = a[i];
+            address v = b[j];
+            if (u == v) {
+                ++i;
+                ++j;
+            } else if (u > v) {
+                ++j;
+            } else {
+                c[k] = u;
                 ++k;
                 ++i;
             }
-            if (pass == 0) {
-                n = k;
-                c = new address[](n);
-            }
+        }
+        while (i < a.length) {
+            c[k] = a[i];
+            ++k;
+            ++i;
         }
     }
 
@@ -926,71 +951,84 @@ library LibSort {
         pure
         returns (address[] memory c)
     {
-        uint256 n;
-        for (uint256 pass; pass < 2; ++pass) {
-            uint256 i;
-            uint256 j;
-            uint256 k;
-            while (i < a.length && j < b.length) {
-                address u = a[i];
-                address v = b[j];
-                if (u == v) {
-                    if (pass == 1) c[k] = u;
-                    ++k;
-                    ++i;
-                    ++j;
-                } else if (u > v) {
-                    ++j;
-                } else {
-                    ++i;
-                }
-            }
-            if (pass == 0) {
-                n = k;
-                c = new address[](n);
+        c = new address[](_common(a, b));
+        uint256 i;
+        uint256 j;
+        uint256 k;
+        while (i < a.length && j < b.length) {
+            address u = a[i];
+            address v = b[j];
+            if (u == v) {
+                c[k] = u;
+                ++k;
+                ++i;
+                ++j;
+            } else if (u > v) {
+                ++j;
+            } else {
+                ++i;
             }
         }
     }
 
     /// @dev Returns the sorted set union of `a` and `b`.
     /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
-    function union(address[] memory a, address[] memory b) internal pure returns (address[] memory c) {
-        uint256 n;
-        for (uint256 pass; pass < 2; ++pass) {
-            uint256 i;
-            uint256 j;
-            uint256 k;
-            while (i < a.length && j < b.length) {
-                address u = a[i];
-                address v = b[j];
-                if (u == v) {
-                    if (pass == 1) c[k] = u;
-                    ++k;
-                    ++i;
-                    ++j;
-                } else if (u > v) {
-                    if (pass == 1) c[k] = v;
-                    ++k;
-                    ++j;
-                } else {
-                    if (pass == 1) c[k] = u;
-                    ++k;
-                    ++i;
-                }
-            }
-            while (i < a.length) {
-                if (pass == 1) c[k] = a[i];
+    function union(address[] memory a, address[] memory b)
+        internal
+        pure
+        returns (address[] memory c)
+    {
+        c = new address[](a.length + b.length - _common(a, b));
+        uint256 i;
+        uint256 j;
+        uint256 k;
+        while (i < a.length && j < b.length) {
+            address u = a[i];
+            address v = b[j];
+            if (u == v) {
+                c[k] = u;
+                ++k;
+                ++i;
+                ++j;
+            } else if (u > v) {
+                c[k] = v;
+                ++k;
+                ++j;
+            } else {
+                c[k] = u;
                 ++k;
                 ++i;
             }
-            while (j < b.length) {
-                if (pass == 1) c[k] = b[j];
-                ++k;
+        }
+        while (i < a.length) {
+            c[k] = a[i];
+            ++k;
+            ++i;
+        }
+        while (j < b.length) {
+            c[k] = b[j];
+            ++k;
+            ++j;
+        }
+    }
+
+    /// @dev Returns the number of values present in both `a` and `b`, walking
+    /// them in the same order as the set operations below. Their result lengths
+    /// are exact functions of this count, so each operation walks once.
+    function _common(bytes32[] memory a, bytes32[] memory b) private pure returns (uint256 n) {
+        uint256 i;
+        uint256 j;
+        while (i < a.length && j < b.length) {
+            bytes32 u = a[i];
+            bytes32 v = b[j];
+            if (u == v) {
+                ++n;
+                ++i;
                 ++j;
-            }
-            if (pass == 0) {
-                n = k;
-                c = new address[](n);
+            } else if (u > v) {
+                ++j;
+            } else {
+                ++i;
             }
         }
     }
@@ -1002,34 +1040,28 @@ library LibSort {
         pure
         returns (bytes32[] memory c)
     {
-        uint256 n;
-        for (uint256 pass; pass < 2; ++pass) {
-            uint256 i;
-            uint256 j;
-            uint256 k;
-            while (i < a.length && j < b.length) {
-                bytes32 u = a[i];
-                bytes32 v = b[j];
-                if (u == v) {
-                    ++i;
-                    ++j;
-                } else if (u > v) {
-                    ++j;
-                } else {
-                    if (pass == 1) c[k] = u;
-                    ++k;
-                    ++i;
-                }
-            }
-            while (i < a.length) {
-                if (pass == 1) c[k] = a[i];
+        c = new bytes32[](a.length - _common(a, b));
+        uint256 i;
+        uint256 j;
+        uint256 k;
+        while (i < a.length && j < b.length) {
+            bytes32 u = a[i];
+            bytes32 v = b[j];
+            if (u == v) {
+                ++i;
+                ++j;
+            } else if (u > v) {
+                ++j;
+            } else {
+                c[k] = u;
                 ++k;
                 ++i;
             }
-            if (pass == 0) {
-                n = k;
-                c = new bytes32[](n);
-            }
+        }
+        while (i < a.length) {
+            c[k] = a[i];
+            ++k;
+            ++i;
         }
     }
 
@@ -1040,72 +1072,64 @@ library LibSort {
         pure
         returns (bytes32[] memory c)
     {
-        uint256 n;
-        for (uint256 pass; pass < 2; ++pass) {
-            uint256 i;
-            uint256 j;
-            uint256 k;
-            while (i < a.length && j < b.length) {
-                bytes32 u = a[i];
-                bytes32 v = b[j];
-                if (u == v) {
-                    if (pass == 1) c[k] = u;
-                    ++k;
-                    ++i;
-                    ++j;
-                } else if (u > v) {
-                    ++j;
-                } else {
-                    ++i;
-                }
-            }
-            if (pass == 0) {
-                n = k;
-                c = new bytes32[](n);
+        c = new bytes32[](_common(a, b));
+        uint256 i;
+        uint256 j;
+        uint256 k;
+        while (i < a.length && j < b.length) {
+            bytes32 u = a[i];
+            bytes32 v = b[j];
+            if (u == v) {
+                c[k] = u;
+                ++k;
+                ++i;
+                ++j;
+            } else if (u > v) {
+                ++j;
+            } else {
+                ++i;
             }
         }
     }
 
     /// @dev Returns the sorted set union of `a` and `b`.
     /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
-    function union(bytes32[] memory a, bytes32[] memory b) internal pure returns (bytes32[] memory c) {
-        uint256 n;
-        for (uint256 pass; pass < 2; ++pass) {
-            uint256 i;
-            uint256 j;
-            uint256 k;
-            while (i < a.length && j < b.length) {
-                bytes32 u = a[i];
-                bytes32 v = b[j];
-                if (u == v) {
-                    if (pass == 1) c[k] = u;
-                    ++k;
-                    ++i;
-                    ++j;
-                } else if (u > v) {
-                    if (pass == 1) c[k] = v;
-                    ++k;
-                    ++j;
-                } else {
-                    if (pass == 1) c[k] = u;
-                    ++k;
-                    ++i;
-                }
-            }
-            while (i < a.length) {
-                if (pass == 1) c[k] = a[i];
+    function union(bytes32[] memory a, bytes32[] memory b)
+        internal
+        pure
+        returns (bytes32[] memory c)
+    {
+        c = new bytes32[](a.length + b.length - _common(a, b));
+        uint256 i;
+        uint256 j;
+        uint256 k;
+        while (i < a.length && j < b.length) {
+            bytes32 u = a[i];
+            bytes32 v = b[j];
+            if (u == v) {
+                c[k] = u;
+                ++k;
+                ++i;
+                ++j;
+            } else if (u > v) {
+                c[k] = v;
+                ++k;
+                ++j;
+            } else {
+                c[k] = u;
                 ++k;
                 ++i;
             }
-            while (j < b.length) {
-                if (pass == 1) c[k] = b[j];
-                ++k;
-                ++j;
-            }
-            if (pass == 0) {
-                n = k;
-                c = new bytes32[](n);
-            }
+        }
+        while (i < a.length) {
+            c[k] = a[i];
+            ++k;
+            ++i;
+        }
+        while (j < b.length) {
+            c[k] = b[j];
+            ++k;
+            ++j;
         }
     }
 

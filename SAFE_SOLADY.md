@@ -601,6 +601,106 @@ because valid Base64 always takes the in-range path, which a model without
 execution frequencies cannot know. This is recorded so the experiment is not
 repeated; closing it needs profile information, not a better local rule.
 
+## Measured and rejected, 2026-09-14: selector dispatch deposit weight
+
+The external selector switch chooses its lowering by lifetime cost: the runtime
+term is the summed dispatch gas of every route times the expected calls, and the
+deposit term is the code size times the deposit price times the number of cases.
+Dropping that last factor lets the combined harness afford wider tables. Across
+the 20,421-case matrix that measured 52,522,656 to 51,811,866 opcode gas, a 1.35%
+saving, with the envelope met on 14,405 cases instead of 14,225 and LibBit alone
+7.70% cheaper, for 230 more runtime bytes in the harness.
+
+The shared runtime corpus rejects it. Runtime gas moved 0.01% while runtime bytes
+grew 0.96%, creation bytes 0.81% and deployment gas 0.75%, with individual
+contracts up to 5.89% larger. The factor is also correct as written: the runtime
+term already sums over every route, so under the documented model of one
+deployment answering `expected_executions` equally likely calls both terms carry
+the same factor. Removing it does not fix a mis-weighting, it silently multiplies
+the assumed call count by the number of public functions. Reverted.
+
+## Checked-source algorithm checkpoint, 2026-09-14: tables, one-pass merges, fast scans
+
+The compiler is frozen at `solar` commit `b8076df70` for this measurement, so
+every number below comes from the checked sources alone. The earlier checkpoints
+showed the remaining distance to assembly was no longer the compiler: on the same
+checked sources our compiler already produced 2.2 to 2.5 times less gas than solc
+for the codecs, and beat solc on the original assembly sources too. What was left
+was written into the port.
+
+Four rewrites, all still free of assembly and of `unchecked`:
+
+- **Base64** builds one alphabet in memory per call, patching the two URL-safe
+  characters in place, instead of testing the mode and selecting between two
+  word tables for every output character. Decoding indexes a reverse table that
+  spans the whole byte range, so a lookup needs neither a range test nor a bounds
+  check. Both loops split complete groups from the tail, which removes four
+  per-iteration guards.
+- **LibSort** replaces the two-pass `for (pass; pass < 2)` merge in all twelve set
+  operations with one counting helper per element type. With sorted, uniquified
+  inputs the three result lengths are exact functions of a single count, so each
+  operation walks the inputs once for the count and once to fill, with no
+  per-element test of which pass is running.
+- **LibString** tests a needle's first byte before the full comparison and skips
+  the comparison entirely for one-byte needles, which removes a call at nearly
+  every scan position; `indicesOf` and `replace` lose the same two-pass loop;
+  `repeat` doubles an accumulated chunk with `bytes.concat` instead of copying a
+  byte at a time; and the escape helpers return a word and a length rather than
+  allocating a `bytes` for every scanned byte.
+- **LibBit** narrows `fls` and `clz` to their top byte in five branch-free steps
+  and then reads the bit index from a table, in place of an eight-step cascade.
+  `ffs` follows from `fls`.
+
+| API | Cases | Original / best solc | Checked before | Checked now | Change |
+|---|---:|---:|---:|---:|---:|
+| `Base64.decode(string)` | 65 | 312,712 | 1,444,550 | 634,543 | -56.1% |
+| `Base64.encode(bytes,bool,bool)` | 64 | 283,220 | 1,005,018 | 587,296 | -41.6% |
+| `LibSort.union(address[],address[])` | 184 | 1,224,890 | 1,680,521 | 1,273,605 | -24.2% |
+| `LibSort.union(bytes32[],bytes32[])` | 184 | 1,036,183 | 1,420,802 | 1,026,925 | -27.7% |
+| `LibSort.difference(address[],address[])` | 184 | 1,060,073 | 1,232,695 | 1,064,382 | -13.7% |
+| `LibString.replace(string,string,string)` | 216 | 698,202 | 2,112,701 | 1,597,428 | -24.4% |
+| `LibString.indicesOf(string,string)` | 72 | 196,058 | 615,340 | 401,792 | -34.7% |
+| `LibString.indexOf(string,string,uint256)` | 494 | 702,855 | 970,505 | 823,711 | -15.1% |
+| `LibString.repeat(string,uint256)` | 20 | 36,407 | 217,254 | 28,359 | -86.9% |
+| `LibBit.clz(uint256)` | 776 | 349,976 | 490,872 | 366,272 | -25.4% |
+| `LibBit.fls(uint256)` | 776 | 314,280 | 409,474 | 339,112 | -17.2% |
+| `LibBit.ffs(uint256)` | 776 | 403,520 | 455,972 | 385,447 | -15.5% |
+
+Whole-matrix totals, against the per-call cheaper of the two upstream solc
+pipelines:
+
+| Library | Envelope | Checked before | Checked now | Before | Now |
+|---|---:|---:|---:|---:|---:|
+| Base64 | 805,836 | 3,189,407 | 1,664,601 | 3.96x | 2.07x |
+| LibBit | 3,465,505 | 3,007,289 | 2,727,813 | 0.87x | 0.79x |
+| LibSort | 43,892,809 | 35,744,940 | 33,041,074 | 0.81x | 0.75x |
+| LibString | 6,121,520 | 10,343,017 | 8,889,614 | 1.69x | 1.45x |
+| SafeCastLib | 297,552 | 238,003 | 238,003 | 0.80x | 0.80x |
+| Total | 54,583,222 | 52,522,656 | 46,561,105 | 0.962x | 0.853x |
+
+`repeat`, `ffs`, and the `bytes32[]` and `int256[]` set operations now beat the
+assembly envelope outright. Across the matrix 15,732 of the 20,370 comparable
+cases meet it, against 14,225 before. All 20,421 cases still match the oracle on
+both compilers of the checked source; the 135 retained failures are unchanged and
+all sit in the upstream variants.
+
+Deployment size moved with it. The Base64 harness dropped from 3,638 to 1,974
+runtime bytes, which is 52% above the cheaper upstream solc build where it was
+180% above. LibSort is unchanged at 12,589 bytes, LibBit grew 111 bytes for its
+two tables, and LibString grew 508 bytes for the split scan paths, so the five
+harnesses together are 1,048 bytes smaller.
+
+What remains is per-byte memory traffic that checked Solidity cannot express away.
+Base64 at 2.07x reads its three input bytes with three loads and writes its four
+output characters with four `MSTORE8`s, where the assembly reads one word and
+writes one word. `escapeHTML` and `escapeJSON` moved only 5% because their cost is
+the two per-byte scans, not the allocation that was removed. Closing those needs
+either a compiler that fuses adjacent byte accesses into word accesses or a
+language-level way to move a run of bytes.
+
+Artifacts: `solar/target/safe-solady/m5/full-cand46/` (before) and
+`solar/target/safe-solady/m6/src6/` (after).
+
 ## Compatibility findings and remaining boundaries
 
 The pinned original behaves differently from the intended value-level oracle

@@ -4,41 +4,43 @@ pragma solidity ^0.8.20;
 /// @notice Checked Solidity implementation of the pinned Solady LibBit API.
 /// @dev Raw boolean operations require clean boolean inputs, as upstream does.
 library LibBit {
+    /// @dev Selector for the De Bruijn-style byte lookup that resolves the
+    /// bottom three bits of a bit index. Shifting it by a byte value and
+    /// masking to five bits yields that byte's slot in the tables below.
+    uint256 private constant _SELECTOR = 0x8421084210842108cc6318c6db6d54be;
+
+    /// @dev Highest set bit index per selector slot; slot 30 (a zero byte) is 0.
+    bytes32 private constant _FLS_LOW =
+        0x0706060506020504060203020504030106050205030304010505030400000000;
+
+    /// @dev The same table complemented to 255, so a leading-zero count is the
+    /// cascade result exclusive-ored with the slot.
+    bytes32 private constant _CLZ_LOW =
+        0xf8f9f9faf9fdfafbf9fdfcfdfafbfcfef9fafdfafcfcfbfefafafcfbffffffff;
+
+    /// @dev Narrows `x` to its top byte in five branch-free steps, then reads
+    /// that byte's highest set bit from a table. Zero keeps the 256 seeded in
+    /// the first step: every comparison below is then false and the table slot
+    /// for a zero byte contributes nothing.
     function fls(uint256 x) internal pure returns (uint256 r) {
-        if (x == 0) return 256;
-        if (x >> 128 != 0) {
-            x >>= 128;
-            r = 128;
-        }
-        if (x >> 64 != 0) {
-            x >>= 64;
-            r |= 64;
-        }
-        if (x >> 32 != 0) {
-            x >>= 32;
-            r |= 32;
-        }
-        if (x >> 16 != 0) {
-            x >>= 16;
-            r |= 16;
-        }
-        if (x >> 8 != 0) {
-            x >>= 8;
-            r |= 8;
-        }
-        if (x >> 4 != 0) {
-            x >>= 4;
-            r |= 4;
-        }
-        if (x >> 2 != 0) {
-            x >>= 2;
-            r |= 2;
-        }
-        return r | (x >> 1);
+        r = (x == 0 ? 256 : 0) | (x > type(uint128).max ? 128 : 0);
+        r |= (x >> r) > type(uint64).max ? 64 : 0;
+        r |= (x >> r) > type(uint32).max ? 32 : 0;
+        r |= (x >> r) > type(uint16).max ? 16 : 0;
+        r |= (x >> r) > type(uint8).max ? 8 : 0;
+        r |= uint8(_FLS_LOW[(_SELECTOR >> (x >> r)) & 31]);
     }
 
+    /// @dev Runs the same cascade as `fls` against the complemented table. The
+    /// cascade result only sets bits at or above three and the slot value has
+    /// every one of those bits set, so the exclusive-or subtracts it.
     function clz(uint256 x) internal pure returns (uint256 r) {
-        return x == 0 ? 256 : 255 - fls(x);
+        r = x > type(uint128).max ? 128 : 0;
+        r |= (x >> r) > type(uint64).max ? 64 : 0;
+        r |= (x >> r) > type(uint32).max ? 32 : 0;
+        r |= (x >> r) > type(uint16).max ? 16 : 0;
+        r |= (x >> r) > type(uint8).max ? 8 : 0;
+        r = (r ^ uint8(_CLZ_LOW[(_SELECTOR >> (x >> r)) & 31])) + (x == 0 ? 1 : 0);
     }
 
     function ffs(uint256 x) internal pure returns (uint256 r) {

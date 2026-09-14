@@ -200,6 +200,22 @@ library LibString {
         return true;
     }
 
+    /// @dev Returns the byte offset of the first occurrence of `needle` in
+    /// `subject` at or after `from`, or `NOT_FOUND`.
+    /// Comparing the first byte in the scan rejects nearly every offset without
+    /// entering the full comparison, so a scan costs one byte read per offset.
+    function _find(bytes memory s, bytes memory n, uint256 from) private pure returns (uint256) {
+        uint256 needleLength = n.length;
+        uint256 length = s.length;
+        if (needleLength == 0) return from > length ? length : from;
+        if (needleLength > length || from > length - needleLength) return NOT_FOUND;
+        bytes1 first = n[0];
+        for (uint256 i = from; i + needleLength <= length; ++i) {
+            if (s[i] == first && (needleLength < 2 || _matchAt(s, n, i))) return i;
+        }
+        return NOT_FOUND;
+    }
+
     /// @dev Returns `subject` all occurrences of `needle` replaced with `replacement`.
     function replace(string memory subject, string memory needle, string memory replacement)
         internal
@@ -209,34 +225,60 @@ library LibString {
         bytes memory s = bytes(subject);
         bytes memory n = bytes(needle);
         bytes memory r = bytes(replacement);
-        if (n.length > s.length) return subject;
+        uint256 needleLength = n.length;
+        uint256 length = s.length;
+        if (needleLength > length) return subject;
+        if (needleLength == 0) return _replaceEmpty(s, r);
+        bytes1 first = n[0];
         uint256 count;
-        for (uint256 i; i + n.length <= s.length;) {
-            if (_matchAt(s, n, i)) {
+        for (uint256 i; i + needleLength <= length;) {
+            if (s[i] == first && (needleLength < 2 || _matchAt(s, n, i))) {
                 ++count;
-                i += n.length;
-                if (n.length == 0) ++i;
+                i += needleLength;
             } else {
                 ++i;
             }
         }
-        bytes memory out = new bytes(s.length + count * r.length - count * n.length);
+        bytes memory out = new bytes(length + count * r.length - count * needleLength);
         uint256 o;
-        uint256 i;
-        while (i + n.length <= s.length) {
-            if (_matchAt(s, n, i)) {
-                for (uint256 k; k < r.length; ++k) out[o + k] = r[k];
-                o += r.length;
-                i += n.length;
-                if (n.length == 0) {
-                    if (i < s.length) out[o++] = s[i];
-                    ++i;
+        uint256 at;
+        while (at + needleLength <= length) {
+            if (s[at] == first && (needleLength < 2 || _matchAt(s, n, at))) {
+                for (uint256 k; k < r.length; ++k) {
+                    out[o + k] = r[k];
                 }
+                o += r.length;
+                at += needleLength;
             } else {
-                out[o++] = s[i++];
+                out[o] = s[at];
+                ++o;
+                ++at;
             }
         }
-        while (i < s.length) out[o++] = s[i++];
+        while (at < length) {
+            out[o] = s[at];
+            ++o;
+            ++at;
+        }
+        return string(out);
+    }
+
+    /// @dev `replace` with an empty needle: `replacement` is inserted before
+    /// every byte of `s` and once more at the end.
+    function _replaceEmpty(bytes memory s, bytes memory r) private pure returns (string memory) {
+        uint256 length = s.length;
+        bytes memory out = new bytes(length + (length + 1) * r.length);
+        uint256 o;
+        for (uint256 i; i <= length; ++i) {
+            for (uint256 k; k < r.length; ++k) {
+                out[o + k] = r[k];
+            }
+            o += r.length;
+            if (i < length) {
+                out[o] = s[i];
+                ++o;
+            }
+        }
         return string(out);
     }
 
@@ -248,14 +290,7 @@ library LibString {
         pure
         returns (uint256)
     {
-        bytes memory s = bytes(subject);
-        bytes memory n = bytes(needle);
-        if (n.length == 0) return from > s.length ? s.length : from;
-        if (from >= s.length || n.length > s.length - from) return NOT_FOUND;
-        for (uint256 i = from; i + n.length <= s.length; ++i) {
-            if (_matchAt(s, n, i)) return i;
-        }
-        return NOT_FOUND;
+        return _find(bytes(subject), bytes(needle), from);
     }
 
     /// @dev Returns the byte index of the first location of `needle` in `subject`,
@@ -275,12 +310,15 @@ library LibString {
     {
         bytes memory s = bytes(subject);
         bytes memory n = bytes(needle);
-        if (n.length > s.length) return NOT_FOUND;
-        uint256 fromMax = s.length - n.length;
+        uint256 needleLength = n.length;
+        if (needleLength > s.length) return NOT_FOUND;
+        uint256 fromMax = s.length - needleLength;
         if (from > fromMax) from = fromMax;
+        if (needleLength == 0) return from;
+        bytes1 first = n[0];
         for (uint256 i = from + 1; i != 0;) {
             --i;
-            if (_matchAt(s, n, i)) return i;
+            if (s[i] == first && (needleLength < 2 || _matchAt(s, n, i))) return i;
         }
         return NOT_FOUND;
     }
@@ -319,9 +357,20 @@ library LibString {
     function repeat(string memory subject, uint256 times) internal pure returns (string memory) {
         bytes memory s = bytes(subject);
         if (times == 0 || s.length == 0) return "";
-        bytes memory out = new bytes(s.length * times);
-        for (uint256 o; o < out.length; o += s.length) {
-            for (uint256 k; k < s.length; ++k) out[o + k] = s[k];
+        // Sizing the result first keeps the overflow panic of the original.
+        uint256 total = s.length * times;
+        if (total == 0) return "";
+        // Doubling the accumulated chunk turns the copy into whole-buffer
+        // concatenations: `times` bytes are moved a logarithmic number of times
+        // instead of one byte at a time.
+        bytes memory out;
+        bytes memory chunk = s;
+        uint256 remaining = times;
+        while (true) {
+            if (remaining & 1 == 1) out = bytes.concat(out, chunk);
+            remaining >>= 1;
+            if (remaining == 0) break;
+            chunk = bytes.concat(chunk, chunk);
         }
         return string(out);
     }
@@ -338,7 +387,9 @@ library LibString {
         if (start > s.length) start = s.length;
         if (start >= end) return "";
         bytes memory out = new bytes(end - start);
-        for (uint256 k; k < out.length; ++k) out[k] = s[start + k];
+        for (uint256 k; k < out.length; ++k) {
+            out[k] = s[start + k];
+        }
         return string(out);
     }
 
@@ -357,21 +408,36 @@ library LibString {
     {
         bytes memory s = bytes(subject);
         bytes memory n = bytes(needle);
-        if (n.length > s.length) return new uint256[](0);
-        uint256[] memory found;
-        for (uint256 pass; pass < 2; ++pass) {
-            uint256 count;
-            for (uint256 i; i + n.length <= s.length;) {
-                if (_matchAt(s, n, i)) {
-                    if (pass == 1) found[count] = i;
-                    ++count;
-                    i += n.length;
-                    if (n.length == 0) ++i;
-                } else {
-                    ++i;
-                }
+        uint256 needleLength = n.length;
+        uint256 length = s.length;
+        if (needleLength > length) return new uint256[](0);
+        if (needleLength == 0) {
+            uint256[] memory every = new uint256[](length + 1);
+            for (uint256 i; i <= length; ++i) {
+                every[i] = i;
             }
-            if (pass == 0) found = new uint256[](count);
+            return every;
+        }
+        bytes1 first = n[0];
+        uint256 count;
+        for (uint256 i; i + needleLength <= length;) {
+            if (s[i] == first && (needleLength < 2 || _matchAt(s, n, i))) {
+                ++count;
+                i += needleLength;
+            } else {
+                ++i;
+            }
+        }
+        uint256[] memory found = new uint256[](count);
+        uint256 k;
+        for (uint256 i; i + needleLength <= length;) {
+            if (s[i] == first && (needleLength < 2 || _matchAt(s, n, i))) {
+                found[k] = i;
+                ++k;
+                i += needleLength;
+            } else {
+                ++i;
+            }
         }
         return found;
     }
@@ -386,7 +452,9 @@ library LibString {
         uint256 d = bytes(delimiter).length;
         if (d == 0) {
             result = new string[](s.length);
-            for (uint256 i; i < s.length; ++i) result[i] = slice(subject, i, i + 1);
+            for (uint256 i; i < s.length; ++i) {
+                result[i] = slice(subject, i, i + 1);
+            }
             return result;
         }
         uint256[] memory indices = indicesOf(subject, delimiter);
@@ -409,7 +477,9 @@ library LibString {
     function fromSmallString(bytes32 s) internal pure returns (string memory result) {
         uint256 n = _smallStringLength(s);
         bytes memory out = new bytes(n);
-        for (uint256 i; i < n; ++i) out[i] = s[i];
+        for (uint256 i; i < n; ++i) {
+            out[i] = s[i];
+        }
         return string(out);
     }
 
@@ -430,13 +500,17 @@ library LibString {
     }
 
     /// @dev Returns the HTML escape of the byte `c`, or an empty string when it needs none.
-    function _htmlEscape(bytes1 c) private pure returns (bytes memory) {
-        if (c == "\"") return "&quot;";
-        if (c == "&") return "&amp;";
-        if (c == "'") return "&#39;";
-        if (c == "<") return "&lt;";
-        if (c == ">") return "&gt;";
-        return "";
+    /// @dev Returns the HTML escape of the byte `c` left-aligned in a word,
+    /// with its length, or a zero length when `c` needs none.
+    /// A word costs nothing to return, where a `bytes` would allocate once per
+    /// scanned byte.
+    function _htmlEscape(bytes1 c) private pure returns (bytes32 seq, uint256 len) {
+        if (c == "\"") return (bytes32("&quot;"), 6);
+        if (c == "&") return (bytes32("&amp;"), 5);
+        if (c == "'") return (bytes32("&#39;"), 5);
+        if (c == "<") return (bytes32("&lt;"), 4);
+        if (c == ">") return (bytes32("&gt;"), 4);
+        return (bytes32(0), 0);
     }
 
     /// @dev Escapes the string to be used within HTML tags.
@@ -444,39 +518,49 @@ library LibString {
         bytes memory b = bytes(s);
         uint256 length;
         for (uint256 i; i < b.length; ++i) {
-            uint256 escaped = _htmlEscape(b[i]).length;
+            (, uint256 escaped) = _htmlEscape(b[i]);
             length += escaped == 0 ? 1 : escaped;
         }
         bytes memory out = new bytes(length);
         uint256 o;
         for (uint256 i; i < b.length; ++i) {
-            bytes memory escaped = _htmlEscape(b[i]);
-            if (escaped.length == 0) {
-                out[o++] = b[i];
+            (bytes32 seq, uint256 escaped) = _htmlEscape(b[i]);
+            if (escaped == 0) {
+                out[o] = b[i];
+                ++o;
             } else {
-                for (uint256 k; k < escaped.length; ++k) out[o + k] = escaped[k];
-                o += escaped.length;
+                for (uint256 k; k < escaped; ++k) {
+                    out[o + k] = seq[k];
+                }
+                o += escaped;
             }
         }
         return string(out);
     }
 
     /// @dev Returns the JSON escape of the byte `c`, or an empty string when it needs none.
-    function _jsonEscape(bytes1 c) private pure returns (bytes memory) {
+    /// @dev Returns the JSON escape of the byte `c` left-aligned in a word,
+    /// with its length, or a zero length when `c` needs none.
+    function _jsonEscape(bytes1 c) private pure returns (bytes32 seq, uint256 len) {
         if (c >= 0x20) {
-            if (c == "\"") return "\\\"";
-            if (c == "\\") return "\\\\";
-            return "";
+            if (c == "\"") return (bytes32("\\\""), 2);
+            if (c == "\\") return (bytes32("\\\\"), 2);
+            return (bytes32(0), 0);
         }
-        if (c == 0x08) return "\\b";
-        if (c == 0x09) return "\\t";
-        if (c == 0x0a) return "\\n";
-        if (c == 0x0c) return "\\f";
-        if (c == 0x0d) return "\\r";
-        bytes memory u = "\\u0000";
-        u[4] = HEX[uint8(c) >> 4];
-        u[5] = HEX[uint8(c) & 15];
-        return u;
+        if (c == 0x08) return (bytes32("\\b"), 2);
+        if (c == 0x09) return (bytes32("\\t"), 2);
+        if (c == 0x0a) return (bytes32("\\n"), 2);
+        if (c == 0x0c) return (bytes32("\\f"), 2);
+        if (c == 0x0d) return (bytes32("\\r"), 2);
+        // "\u00" with the two hex digits of `c` written into bytes four and five.
+        uint256 x = uint8(c);
+        return (
+            bytes32(
+                uint256(bytes32("\\u00")) | (uint256(uint8(HEX[x >> 4])) << 216)
+                    | (uint256(uint8(HEX[x & 15])) << 208)
+            ),
+            6
+        );
     }
 
     /// @dev Escapes the string to be used within double-quotes in a JSON.
@@ -489,19 +573,25 @@ library LibString {
         bytes memory b = bytes(s);
         uint256 length = addDoubleQuotes ? 2 : 0;
         for (uint256 i; i < b.length; ++i) {
-            uint256 escaped = _jsonEscape(b[i]).length;
+            (, uint256 escaped) = _jsonEscape(b[i]);
             length += escaped == 0 ? 1 : escaped;
         }
         bytes memory out = new bytes(length);
         uint256 o;
-        if (addDoubleQuotes) out[o++] = "\"";
+        if (addDoubleQuotes) {
+            out[o] = "\"";
+            ++o;
+        }
         for (uint256 i; i < b.length; ++i) {
-            bytes memory escaped = _jsonEscape(b[i]);
-            if (escaped.length == 0) {
-                out[o++] = b[i];
+            (bytes32 seq, uint256 escaped) = _jsonEscape(b[i]);
+            if (escaped == 0) {
+                out[o] = b[i];
+                ++o;
             } else {
-                for (uint256 k; k < escaped.length; ++k) out[o + k] = escaped[k];
-                o += escaped.length;
+                for (uint256 k; k < escaped; ++k) {
+                    out[o + k] = seq[k];
+                }
+                o += escaped;
             }
         }
         if (addDoubleQuotes) out[o] = "\"";
@@ -518,8 +608,8 @@ library LibString {
         if (c >= 48 && c <= 57) return true;
         if (c >= 65 && c <= 90) return true;
         if (c >= 97 && c <= 122) return true;
-        return c == 45 || c == 95 || c == 46 || c == 33 || c == 126 || c == 42 || c == 39
-            || c == 40 || c == 41;
+        return c == 45 || c == 95 || c == 46 || c == 33 || c == 126 || c == 42 || c == 39 || c == 40
+            || c == 41;
     }
 
     /// @dev Encodes `s` so that it can be safely used in a URI,
@@ -531,7 +621,9 @@ library LibString {
         bytes memory b = bytes(s);
         bytes16 upperHex = "0123456789ABCDEF";
         uint256 length;
-        for (uint256 i; i < b.length; ++i) length += _uriUnreserved(uint8(b[i])) ? 1 : 3;
+        for (uint256 i; i < b.length; ++i) {
+            length += _uriUnreserved(uint8(b[i])) ? 1 : 3;
+        }
         bytes memory out = new bytes(length);
         uint256 o;
         for (uint256 i; i < b.length; ++i) {
@@ -590,7 +682,9 @@ library LibString {
         uint256 n = uint8(packed[0]);
         if (n > 31) n = 31;
         bytes memory out = new bytes(n);
-        for (uint256 i; i < n; ++i) out[i] = packed[i + 1];
+        for (uint256 i; i < n; ++i) {
+            out[i] = packed[i + 1];
+        }
         return string(out);
     }
 
@@ -622,11 +716,15 @@ library LibString {
         uint256 n = uint8(packed[0]);
         if (n > 30) n = 30;
         bytes memory x = new bytes(n);
-        for (uint256 i; i < n; ++i) x[i] = packed[i + 1];
+        for (uint256 i; i < n; ++i) {
+            x[i] = packed[i + 1];
+        }
         uint256 m = uint8(packed[n + 1]);
         if (m > 30 - n) m = 30 - n;
         bytes memory y = new bytes(m);
-        for (uint256 i; i < m; ++i) y[i] = packed[n + 2 + i];
+        for (uint256 i; i < m; ++i) {
+            y[i] = packed[n + 2 + i];
+        }
         return (string(x), string(y));
     }
 }
