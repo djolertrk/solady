@@ -563,6 +563,27 @@ their 2,512 cases, and every case matches the oracle on both compilers of the
 checked source. Artifacts: `solar/target/safe-solady/m5/rb-cand30-mixed-200/`
 (before), `rb-cand32-mixed-200/` (after) and `full-cand32/` (complete matrix).
 
+## Compiler optimization checkpoint, 2026-09-14, arrays a function builds
+
+The element widths the compiler proves now also settle the return of an array a
+function allocates and fills, not only one it received as a parameter. Sources
+are frozen for this measurement.
+
+| API | Cases | Original / best solc | Checked before | Checked now | Change |
+|---|---:|---:|---:|---:|---:|
+| `LibSort.copy(address[])` | 46 | 331,217 | 253,580 | 180,915 | -28.7% |
+| `LibSort.union(address[],address[])` | 184 | 1,224,878 | 2,094,772 | 1,680,521 | -19.8% |
+| `LibSort.intersection(address[],address[])` | 184 | 909,764 | 1,311,070 | 1,134,819 | -13.4% |
+| `LibSort.difference(address[],address[])` | 184 | 1,064,762 | 1,400,831 | 1,232,695 | -12.0% |
+
+`copy(address[])` beats the envelope on all 46 cases. The three set operations
+now cost what their `uint256[]` and `bytes32[]` variants cost, so the distance
+left to the envelope is the two-pass merge the port uses rather than the
+element type. All 20,421 cases match the oracle on both compilers of the
+checked source, and 14,225 of the 20,370 comparable cases meet the envelope.
+Artifacts: `solar/target/safe-solady/m5/full-cand32/` (before) and
+`full-cand39/` (after).
+
 ## Compatibility findings and remaining boundaries
 
 The pinned original behaves differently from the intended value-level oracle
