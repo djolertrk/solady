@@ -541,6 +541,28 @@ matches the oracle. The shared runtime corpus is flat (runtime gas -0.01%, bytes
 `rb-cand30-mixed-200/` (after); corpus comparison
 `solar/target/codegen-bench/cmp-cand30.md`.
 
+## Compiler optimization checkpoint, 2026-09-14, returned array parameters
+
+Returning an array parameter re-encoded its elements one at a time and cleaned
+them first, although ABI decoding had already validated them. The element
+widths the compiler proves per array parameter now also settle the return: an
+array the wrapper decoded for one of its own parameters returns with a single
+payload copy, the shape word arrays already had. Inline assembly that stores a
+full word keeps the per-element path. Sources are frozen for this measurement.
+
+| API | Cases | Original / best solc | Checked before | Checked now | Change |
+|---|---:|---:|---:|---:|---:|
+| `LibSort.reverse(address[])` | 46 | 305,975 | 302,736 | 149,749 | -50.5% |
+| `LibSort.insertionSort(address[])` | 46 | 678,219 | 575,499 | 423,406 | -26.4% |
+
+`reverse(address[])` now beats the envelope on all 46 cases and
+`insertionSort(address[])` on 38, up from 31 and 8. The other APIs are
+unchanged and the shared runtime corpus is unchanged. In the complete
+20,421-case matrix the thirteen `address[]` APIs meet the envelope on 1,915 of
+their 2,512 cases, and every case matches the oracle on both compilers of the
+checked source. Artifacts: `solar/target/safe-solady/m5/rb-cand30-mixed-200/`
+(before), `rb-cand32-mixed-200/` (after) and `full-cand32/` (complete matrix).
+
 ## Compatibility findings and remaining boundaries
 
 The pinned original behaves differently from the intended value-level oracle
