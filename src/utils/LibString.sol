@@ -247,9 +247,21 @@ library LibString {
         uint256 length = s.length;
         if (needleLength == 0) return from > length ? length : from;
         if (needleLength > length || from > length - needleLength) return NOT_FOUND;
+        uint256 last = length - needleLength;
         bytes1 first = n[0];
-        for (uint256 i = from; i + needleLength <= length; ++i) {
-            if (s[i] == first && (needleLength < 2 || _matchAt(s, n, i))) return i;
+        if (needleLength == 1) {
+            for (uint256 i = from; i <= last; ++i) {
+                if (s[i] == first) return i;
+            }
+            return NOT_FOUND;
+        }
+        // Two characters are tested before the rest, so a subject whose first
+        // character repeats does not pay a call at every position it occupies.
+        bytes1 second = n[1];
+        for (uint256 i = from; i <= last; ++i) {
+            if (s[i] == first && s[i + 1] == second && (needleLength == 2 || _matchAt(s, n, i))) {
+                return i;
+            }
         }
         return NOT_FOUND;
     }
@@ -268,24 +280,32 @@ library LibString {
         if (needleLength > length) return subject;
         if (needleLength == 0) return _replaceEmpty(s, r);
         bytes1 first = n[0];
+        bytes1 second = needleLength < 2 ? first : n[1];
         uint256 count;
         for (uint256 i; i + needleLength <= length;) {
-            if (s[i] == first && (needleLength < 2 || _matchAt(s, n, i))) {
+            if (s[i] == first
+                && (needleLength < 2
+                    || (s[i + 1] == second
+                        && (needleLength == 2 || _matchAt(s, n, i))))) {
                 ++count;
                 i += needleLength;
             } else {
                 ++i;
             }
         }
-        bytes memory out = new bytes(length + count * r.length - count * needleLength);
+        uint256 replacementLength = r.length;
+        bytes memory out = new bytes(length + count * replacementLength - count * needleLength);
         uint256 o;
         uint256 at;
         while (at + needleLength <= length) {
-            if (s[at] == first && (needleLength < 2 || _matchAt(s, n, at))) {
-                for (uint256 k; k < r.length; ++k) {
+            if (s[at] == first
+                && (needleLength < 2
+                    || (s[at + 1] == second
+                        && (needleLength == 2 || _matchAt(s, n, at))))) {
+                for (uint256 k; k < replacementLength; ++k) {
                     out[o + k] = r[k];
                 }
-                o += r.length;
+                o += replacementLength;
                 at += needleLength;
             } else {
                 out[o] = s[at];
@@ -354,9 +374,19 @@ library LibString {
         if (from > fromMax) from = fromMax;
         if (needleLength == 0) return from;
         bytes1 first = n[0];
+        if (needleLength == 1) {
+            for (uint256 i = from + 1; i != 0;) {
+                --i;
+                if (s[i] == first) return i;
+            }
+            return NOT_FOUND;
+        }
+        bytes1 second = n[1];
         for (uint256 i = from + 1; i != 0;) {
             --i;
-            if (s[i] == first && (needleLength < 2 || _matchAt(s, n, i))) return i;
+            if (s[i] == first && s[i + 1] == second && (needleLength == 2 || _matchAt(s, n, i))) {
+                return i;
+            }
         }
         return NOT_FOUND;
     }
@@ -457,9 +487,13 @@ library LibString {
             return every;
         }
         bytes1 first = n[0];
+        bytes1 second = needleLength < 2 ? first : n[1];
         uint256 count;
         for (uint256 i; i + needleLength <= length;) {
-            if (s[i] == first && (needleLength < 2 || _matchAt(s, n, i))) {
+            if (s[i] == first
+                && (needleLength < 2
+                    || (s[i + 1] == second
+                        && (needleLength == 2 || _matchAt(s, n, i))))) {
                 ++count;
                 i += needleLength;
             } else {
@@ -469,7 +503,10 @@ library LibString {
         uint256[] memory found = new uint256[](count);
         uint256 k;
         for (uint256 i; i + needleLength <= length;) {
-            if (s[i] == first && (needleLength < 2 || _matchAt(s, n, i))) {
+            if (s[i] == first
+                && (needleLength < 2
+                    || (s[i + 1] == second
+                        && (needleLength == 2 || _matchAt(s, n, i))))) {
                 found[k] = i;
                 ++k;
                 i += needleLength;
