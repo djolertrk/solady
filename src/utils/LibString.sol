@@ -70,8 +70,12 @@ library LibString {
         returns (string memory result)
     {
         bytes memory out = new bytes(byteCount * 2);
-        for (uint256 i = out.length; i != 0;) {
-            --i;
+        // The length is always even, so two digits are written per step and no
+        // odd remainder can be left over.
+        for (uint256 i = out.length; i > 1;) {
+            i -= 2;
+            out[i + 1] = HEX[value & 15];
+            value >>= 4;
             out[i] = HEX[value & 15];
             value >>= 4;
         }
