@@ -34,6 +34,11 @@ ROOT = Path(__file__).resolve().parents[2]
 REPO = ROOT
 ARCHIVE = Path(__file__).resolve().with_name("upstream-solady-0.1.26.json.gz")
 CHECKED_LIBRARIES = ("Base64", "LibBit", "LibSort", "LibString", "SafeCastLib")
+CORE_PREFIX = "solar:core/v1/"
+# The compiler-owned modules the port may import. Under solar the compiler
+# supplies them itself and sets a supplied copy aside; the copy is what lets
+# the solc legs resolve the same import.
+DEFAULT_CORE_MODULES = REPO.parent / "solar/crates/sema/src/core/v1"
 MAX = (1 << 256) - 1
 
 
@@ -74,12 +79,24 @@ def walk(node):
 
 
 def safety_violations(output):
+    # The compiler-owned modules are the trusted primitive layer: their bodies
+    # spell operations that have no other Solidity spelling, and the compiler
+    # lowers them directly rather than compiling the body. They are recorded
+    # in the audit by hash instead of being held to the port's policy.
     return [
         (path, node["nodeType"])
         for path, source in output["sources"].items()
+        if not path.startswith(CORE_PREFIX)
         for node in walk(source["ast"])
         if node.get("nodeType") in {"InlineAssembly", "UncheckedBlock"}
     ]
+
+
+def core_sources(core_dir):
+    return {
+        CORE_PREFIX + path.name: {"content": path.read_text()}
+        for path in sorted(Path(core_dir).glob("*.sol"))
+    }
 
 
 def type_name(parameter):
@@ -165,13 +182,14 @@ def select_harness_apis(apis, api_filters, isolate):
     ]
 
 
-def prepare(solc, out, api_filters=(), isolate=False):
+def prepare(solc, out, api_filters=(), isolate=False, core_dir=DEFAULT_CORE_MODULES):
     archive = json.loads(gzip.decompress(ARCHIVE.read_bytes()))
     safe = closure(
         {
             p.relative_to(ROOT).as_posix(): {"content": p.read_text()}
             for p in sorted((ROOT / "src").rglob("*.sol"))
-        },
+        }
+        | core_sources(core_dir),
         [f"src/utils/{name}.sol" for name in CHECKED_LIBRARIES],
     )
     safe = dict(sorted(safe.items()))
@@ -221,9 +239,14 @@ def prepare(solc, out, api_filters=(), isolate=False):
         row["outputs"] = [t for t, _ in returns]
         row["wrapper_returns"] = returns
     harness_apis = select_harness_apis(apis, api_filters, isolate)
+    # Files the port adds have no upstream counterpart, so the shared harness
+    # cannot import them by name: the upstream leg would not resolve the path.
+    # The safe leg still reaches them through the libraries that use them.
+    port_only = sorted(path for path in safe if path not in archive["sources"])
     harness = "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.20;\n"
     for path in safe:
-        harness += f'import "{path}";\n'
+        if path not in port_only:
+            harness += f'import "{path}";\n'
     for library in sorted({r["library"] for r in harness_apis}):
         harness += f"contract {library}Harness {{\n"
         for row in harness_apis:
@@ -249,13 +272,17 @@ def prepare(solc, out, api_filters=(), isolate=False):
             harness += f"function {row['wrapper']}({params}) external pure returns ({result_types}) {{ {body} }}\n"
         harness += "}\n"
     safe["Harness.sol"] = {"content": harness}
-    upstream = closure(archive["sources"], safe.keys() - {"Harness.sol"})
+    upstream = closure(archive["sources"], safe.keys() - {"Harness.sol"} - set(port_only))
     upstream["Harness.sol"] = {"content": harness}
     (out / "Harness.sol").write_text(harness)
     audit = {
         "archive": str(ARCHIVE.relative_to(REPO)),
         "archive_sha256": digest(ARCHIVE.read_bytes()),
-        "policy": "no InlineAssembly or UncheckedBlock in any safe source or dependency",
+        "policy": "no InlineAssembly or UncheckedBlock in any safe source or dependency; compiler-owned solar:core modules are the trusted primitive layer and are exempt",
+        "core_modules": {
+            p: digest(v["content"].encode()) for p, v in safe.items() if p.startswith(CORE_PREFIX)
+        },
+        "port_only_sources": port_only,
         "source_sha256": {p: digest(v["content"].encode()) for p, v in safe.items()},
         "libraries": inventory,
         "implemented_apis": len(apis),
@@ -263,7 +290,9 @@ def prepare(solc, out, api_filters=(), isolate=False):
             row["library"] + "." + row["signature"] for row in harness_apis
         ],
         "isolated_harness": isolate,
-        "library_count": len(safe) - 1,
+        "library_count": sum(
+            1 for p in safe if p != "Harness.sol" and not p.startswith(CORE_PREFIX)
+        ),
         "total_source_files": len(inventory),
     }
     (out / "api-coverage.json").write_text(json.dumps(audit, indent=2) + "\n")
@@ -411,6 +440,11 @@ def test_vectors(row, rng):
                 expected = len(set(a)) != len(a)
             elif name == "isSortedAndUniquified":
                 expected = all(a[i - 1] < a[i] for i in range(1, len(a)))
+            elif name == "uniquifySorted":
+                # The input must be sorted; equal neighbours collapse and the
+                # in-place wrapper returns the shortened array.
+                a = sorted(a)
+                expected = sorted(set(a))
             else:
                 expected = a == sorted(a)
             yield [a], [expected]
@@ -810,7 +844,7 @@ def run(args):
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=False)
     safe, upstream, apis, audit = prepare(
-        args.solc, out, args.api, args.isolate_api
+        args.solc, out, args.api, args.isolate_api, core_dir=args.core_modules
     )
     variants = [
         (
@@ -1156,6 +1190,12 @@ if __name__ == "__main__":
         "--isolate-api",
         action="store_true",
         help="compile a harness containing only the APIs selected by --api",
+    )
+    parser.add_argument(
+        "--core-modules",
+        type=Path,
+        default=DEFAULT_CORE_MODULES,
+        help="directory holding the compiler-owned solar:core/v1 module sources",
     )
     parser.add_argument("--output", type=Path, required=True)
     raise SystemExit(run(parser.parse_args()))

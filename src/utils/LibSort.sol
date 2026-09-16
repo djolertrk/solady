@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import {Arrays} from "solar:core/v1/Arrays.sol";
+
 /// @notice Checked Solidity sorting without type punning or sentinel reads.
-/// @dev In-place memory-length mutation APIs are deliberately absent.
+/// @dev Shrinking an array in place has no Solidity spelling, so the APIs
+/// that do it go through the compiler-owned `Arrays.truncate`.
 library LibSort {
     function insertionSort(uint256[] memory a) internal pure {
         uint256 order = _presorted(a);
@@ -135,6 +138,21 @@ library LibSort {
         return false;
     }
 
+    /// @dev Removes duplicate elements from a ascendingly sorted memory array.
+    function uniquifySorted(uint256[] memory a) internal pure {
+        if (a.length < 2) return;
+        // Every element is compared with the last one kept, so a run of equal
+        // values collapses onto its first occurrence.
+        uint256 w = 1;
+        for (uint256 r = 1; r < a.length; ++r) {
+            if (a[r] != a[w - 1]) {
+                a[w] = a[r];
+                ++w;
+            }
+        }
+        Arrays.truncate(a, w);
+    }
+
     function insertionSort(int256[] memory a) internal pure {
         uint256 order = _presorted(a);
         if (order == 1) return;
@@ -264,6 +282,21 @@ library LibSort {
             seen[slot] = i + 1;
         }
         return false;
+    }
+
+    /// @dev Removes duplicate elements from a ascendingly sorted memory array.
+    function uniquifySorted(int256[] memory a) internal pure {
+        if (a.length < 2) return;
+        // Every element is compared with the last one kept, so a run of equal
+        // values collapses onto its first occurrence.
+        uint256 w = 1;
+        for (uint256 r = 1; r < a.length; ++r) {
+            if (a[r] != a[w - 1]) {
+                a[w] = a[r];
+                ++w;
+            }
+        }
+        Arrays.truncate(a, w);
     }
 
     function insertionSort(address[] memory a) internal pure {
@@ -398,6 +431,21 @@ library LibSort {
         return false;
     }
 
+    /// @dev Removes duplicate elements from a ascendingly sorted memory array.
+    function uniquifySorted(address[] memory a) internal pure {
+        if (a.length < 2) return;
+        // Every element is compared with the last one kept, so a run of equal
+        // values collapses onto its first occurrence.
+        uint256 w = 1;
+        for (uint256 r = 1; r < a.length; ++r) {
+            if (a[r] != a[w - 1]) {
+                a[w] = a[r];
+                ++w;
+            }
+        }
+        Arrays.truncate(a, w);
+    }
+
     function insertionSort(bytes32[] memory a) internal pure {
         uint256 order = _presorted(a);
         if (order == 1) return;
@@ -527,6 +575,21 @@ library LibSort {
             seen[slot] = i + 1;
         }
         return false;
+    }
+
+    /// @dev Removes duplicate elements from a ascendingly sorted memory array.
+    function uniquifySorted(bytes32[] memory a) internal pure {
+        if (a.length < 2) return;
+        // Every element is compared with the last one kept, so a run of equal
+        // values collapses onto its first occurrence.
+        uint256 w = 1;
+        for (uint256 r = 1; r < a.length; ++r) {
+            if (a[r] != a[w - 1]) {
+                a[w] = a[r];
+                ++w;
+            }
+        }
+        Arrays.truncate(a, w);
     }
 
     /// @dev Returns whether `a` contains `needle`, and the index of `needle`.
