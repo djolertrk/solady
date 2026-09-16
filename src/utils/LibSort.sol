@@ -719,24 +719,6 @@ library LibSort {
     /// @dev Returns the number of values present in both `a` and `b`, walking
     /// them in the same order as the set operations below. Their result lengths
     /// are exact functions of this count, so each operation walks once.
-    function _common(uint256[] memory a, uint256[] memory b) private pure returns (uint256 n) {
-        uint256 i;
-        uint256 j;
-        while (i < a.length && j < b.length) {
-            uint256 u = a[i];
-            uint256 v = b[j];
-            if (u == v) {
-                ++n;
-                ++i;
-                ++j;
-            } else if (u > v) {
-                ++j;
-            } else {
-                ++i;
-            }
-        }
-    }
-
     /// @dev Returns the sorted set difference of `a` and `b`.
     /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
     function difference(uint256[] memory a, uint256[] memory b)
@@ -744,7 +726,7 @@ library LibSort {
         pure
         returns (uint256[] memory c)
     {
-        c = new uint256[](a.length - _common(a, b));
+        c = new uint256[](a.length);
         uint256 i;
         uint256 j;
         uint256 k;
@@ -767,6 +749,7 @@ library LibSort {
             ++k;
             ++i;
         }
+        Arrays.truncate(c, k);
     }
 
     /// @dev Returns the sorted set intersection between `a` and `b`.
@@ -776,7 +759,7 @@ library LibSort {
         pure
         returns (uint256[] memory c)
     {
-        c = new uint256[](_common(a, b));
+        c = new uint256[](a.length < b.length ? a.length : b.length);
         uint256 i;
         uint256 j;
         uint256 k;
@@ -794,6 +777,7 @@ library LibSort {
                 ++i;
             }
         }
+        Arrays.truncate(c, k);
     }
 
     /// @dev Returns the sorted set union of `a` and `b`.
@@ -803,7 +787,7 @@ library LibSort {
         pure
         returns (uint256[] memory c)
     {
-        c = new uint256[](a.length + b.length - _common(a, b));
+        c = new uint256[](a.length + b.length);
         uint256 i;
         uint256 j;
         uint256 k;
@@ -835,29 +819,12 @@ library LibSort {
             ++k;
             ++j;
         }
+        Arrays.truncate(c, k);
     }
 
     /// @dev Returns the number of values present in both `a` and `b`, walking
     /// them in the same order as the set operations below. Their result lengths
     /// are exact functions of this count, so each operation walks once.
-    function _common(int256[] memory a, int256[] memory b) private pure returns (uint256 n) {
-        uint256 i;
-        uint256 j;
-        while (i < a.length && j < b.length) {
-            int256 u = a[i];
-            int256 v = b[j];
-            if (u == v) {
-                ++n;
-                ++i;
-                ++j;
-            } else if (u > v) {
-                ++j;
-            } else {
-                ++i;
-            }
-        }
-    }
-
     /// @dev Returns the sorted set difference of `a` and `b`.
     /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
     function difference(int256[] memory a, int256[] memory b)
@@ -865,7 +832,7 @@ library LibSort {
         pure
         returns (int256[] memory c)
     {
-        c = new int256[](a.length - _common(a, b));
+        c = new int256[](a.length);
         uint256 i;
         uint256 j;
         uint256 k;
@@ -888,6 +855,7 @@ library LibSort {
             ++k;
             ++i;
         }
+        Arrays.truncate(c, k);
     }
 
     /// @dev Returns the sorted set intersection between `a` and `b`.
@@ -897,7 +865,7 @@ library LibSort {
         pure
         returns (int256[] memory c)
     {
-        c = new int256[](_common(a, b));
+        c = new int256[](a.length < b.length ? a.length : b.length);
         uint256 i;
         uint256 j;
         uint256 k;
@@ -915,12 +883,13 @@ library LibSort {
                 ++i;
             }
         }
+        Arrays.truncate(c, k);
     }
 
     /// @dev Returns the sorted set union of `a` and `b`.
     /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
     function union(int256[] memory a, int256[] memory b) internal pure returns (int256[] memory c) {
-        c = new int256[](a.length + b.length - _common(a, b));
+        c = new int256[](a.length + b.length);
         uint256 i;
         uint256 j;
         uint256 k;
@@ -952,29 +921,12 @@ library LibSort {
             ++k;
             ++j;
         }
+        Arrays.truncate(c, k);
     }
 
     /// @dev Returns the number of values present in both `a` and `b`, walking
     /// them in the same order as the set operations below. Their result lengths
     /// are exact functions of this count, so each operation walks once.
-    function _common(address[] memory a, address[] memory b) private pure returns (uint256 n) {
-        uint256 i;
-        uint256 j;
-        while (i < a.length && j < b.length) {
-            address u = a[i];
-            address v = b[j];
-            if (u == v) {
-                ++n;
-                ++i;
-                ++j;
-            } else if (u > v) {
-                ++j;
-            } else {
-                ++i;
-            }
-        }
-    }
-
     /// @dev Returns the sorted set difference of `a` and `b`.
     /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
     function difference(address[] memory a, address[] memory b)
@@ -982,7 +934,7 @@ library LibSort {
         pure
         returns (address[] memory c)
     {
-        c = new address[](a.length - _common(a, b));
+        c = new address[](a.length);
         uint256 i;
         uint256 j;
         uint256 k;
@@ -1005,6 +957,7 @@ library LibSort {
             ++k;
             ++i;
         }
+        Arrays.truncate(c, k);
     }
 
     /// @dev Returns the sorted set intersection between `a` and `b`.
@@ -1014,7 +967,7 @@ library LibSort {
         pure
         returns (address[] memory c)
     {
-        c = new address[](_common(a, b));
+        c = new address[](a.length < b.length ? a.length : b.length);
         uint256 i;
         uint256 j;
         uint256 k;
@@ -1032,6 +985,7 @@ library LibSort {
                 ++i;
             }
         }
+        Arrays.truncate(c, k);
     }
 
     /// @dev Returns the sorted set union of `a` and `b`.
@@ -1041,7 +995,7 @@ library LibSort {
         pure
         returns (address[] memory c)
     {
-        c = new address[](a.length + b.length - _common(a, b));
+        c = new address[](a.length + b.length);
         uint256 i;
         uint256 j;
         uint256 k;
@@ -1073,29 +1027,12 @@ library LibSort {
             ++k;
             ++j;
         }
+        Arrays.truncate(c, k);
     }
 
     /// @dev Returns the number of values present in both `a` and `b`, walking
     /// them in the same order as the set operations below. Their result lengths
     /// are exact functions of this count, so each operation walks once.
-    function _common(bytes32[] memory a, bytes32[] memory b) private pure returns (uint256 n) {
-        uint256 i;
-        uint256 j;
-        while (i < a.length && j < b.length) {
-            bytes32 u = a[i];
-            bytes32 v = b[j];
-            if (u == v) {
-                ++n;
-                ++i;
-                ++j;
-            } else if (u > v) {
-                ++j;
-            } else {
-                ++i;
-            }
-        }
-    }
-
     /// @dev Returns the sorted set difference of `a` and `b`.
     /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
     function difference(bytes32[] memory a, bytes32[] memory b)
@@ -1103,7 +1040,7 @@ library LibSort {
         pure
         returns (bytes32[] memory c)
     {
-        c = new bytes32[](a.length - _common(a, b));
+        c = new bytes32[](a.length);
         uint256 i;
         uint256 j;
         uint256 k;
@@ -1126,6 +1063,7 @@ library LibSort {
             ++k;
             ++i;
         }
+        Arrays.truncate(c, k);
     }
 
     /// @dev Returns the sorted set intersection between `a` and `b`.
@@ -1135,7 +1073,7 @@ library LibSort {
         pure
         returns (bytes32[] memory c)
     {
-        c = new bytes32[](_common(a, b));
+        c = new bytes32[](a.length < b.length ? a.length : b.length);
         uint256 i;
         uint256 j;
         uint256 k;
@@ -1153,6 +1091,7 @@ library LibSort {
                 ++i;
             }
         }
+        Arrays.truncate(c, k);
     }
 
     /// @dev Returns the sorted set union of `a` and `b`.
@@ -1162,7 +1101,7 @@ library LibSort {
         pure
         returns (bytes32[] memory c)
     {
-        c = new bytes32[](a.length + b.length - _common(a, b));
+        c = new bytes32[](a.length + b.length);
         uint256 i;
         uint256 j;
         uint256 k;
@@ -1194,6 +1133,7 @@ library LibSort {
             ++k;
             ++j;
         }
+        Arrays.truncate(c, k);
     }
 
     /// @dev Cleans the upper 96 bits of the addresses.
