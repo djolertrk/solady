@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import {Bytes} from "solar:core/v1/Bytes.sol";
+
 /// @notice Checked Solidity replacements for the value-oriented LibString APIs.
 /// @dev Storage reinterpretation and direct-return APIs are deliberately absent.
 library LibString {
@@ -9,6 +11,28 @@ library LibString {
     error StringNot7BitASCII();
     uint256 internal constant NOT_FOUND = type(uint256).max;
     bytes16 private constant HEX = "0123456789abcdef";
+
+    /// @dev Nibble-spreading masks, one per halving of the packing.
+    uint256 private constant MASK_64 =
+        0x0000000000000000ffffffffffffffff0000000000000000ffffffffffffffff;
+    uint256 private constant MASK_32 =
+        0x00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff;
+    uint256 private constant MASK_16 =
+        0x0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff;
+    uint256 private constant MASK_8 =
+        0x00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff;
+    uint256 private constant MASK_4 =
+        0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f;
+
+    /// @dev One copy of the value in every byte.
+    uint256 private constant SPREAD_1 =
+        0x0101010101010101010101010101010101010101010101010101010101010101;
+    uint256 private constant SPREAD_6 =
+        0x0606060606060606060606060606060606060606060606060606060606060606;
+    uint256 private constant SPREAD_ASCII_0 =
+        0x3030303030303030303030303030303030303030303030303030303030303030;
+    uint256 private constant LANES_7F =
+        0x7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f;
 
     /// @dev Set bit per byte value that `escapeHTML` rewrites: `"`, `&`, `'`,
     /// `<` and `>`. Testing membership with one shift keeps every other byte
@@ -70,17 +94,41 @@ library LibString {
         returns (string memory result)
     {
         bytes memory out = new bytes(byteCount * 2);
-        // The length is always even, so two digits are written per step and no
-        // odd remainder can be left over.
-        for (uint256 i = out.length; i > 1;) {
-            i -= 2;
-            out[i + 1] = HEX[value & 15];
+        // Sixteen bytes of the value are thirty-two characters, one word of
+        // output, so they are converted and stored together.
+        uint256 i = byteCount;
+        while (i >= 16) {
+            i -= 16;
+            Bytes.writeBytes32(out, i * 2, _hexWord(value & type(uint128).max));
+            value >>= 128;
+        }
+        // Whatever is left is under sixteen bytes: two digits per step, the
+        // low one first because the value is consumed from its low end.
+        while (i != 0) {
+            --i;
+            out[i * 2 + 1] = HEX[value & 15];
             value >>= 4;
-            out[i] = HEX[value & 15];
+            out[i * 2] = HEX[value & 15];
             value >>= 4;
         }
         if (value != 0) revert HexLengthInsufficient();
         return string(out);
+    }
+
+    /// @dev The thirty-two hex characters of the sixteen bytes in `x`, which
+    /// must be below `2 ** 128`.
+    function _hexWord(uint256 x) private pure returns (bytes32) {
+        // Spread the thirty-two nibbles one to a byte, halving the packing
+        // each step: eight bytes, four, two, one, then one nibble.
+        x = (x | (x << 64)) & MASK_64;
+        x = (x | (x << 32)) & MASK_32;
+        x = (x | (x << 16)) & MASK_16;
+        x = (x | (x << 8)) & MASK_8;
+        x = (x | (x << 4)) & MASK_4;
+        // Adding six carries every nibble above nine into the next bit, which
+        // marks the ones that become letters rather than digits.
+        uint256 letters = ((x + SPREAD_6) >> 4) & SPREAD_1;
+        return bytes32(x + SPREAD_ASCII_0 + letters * 39);
     }
 
     function toHexString(uint256 value, uint256 byteCount)
@@ -135,10 +183,17 @@ library LibString {
 
     function toHexStringNoPrefix(bytes memory raw) internal pure returns (string memory result) {
         bytes memory out = new bytes(raw.length * 2);
-        for (uint256 i; i < raw.length; ++i) {
+        uint256 i;
+        // Sixteen input bytes make one word of output.
+        while (i + 16 <= raw.length) {
+            uint256 chunk = uint256(uint128(Bytes.readBytes16(raw, i)));
+            Bytes.writeBytes32(out, i * 2, _hexWord(chunk));
+            i += 16;
+        }
+        for (; i < raw.length; ++i) {
             uint256 x = uint8(raw[i]);
-            out[2 * i] = HEX[x >> 4];
-            out[2 * i + 1] = HEX[x & 15];
+            out[i * 2] = HEX[x >> 4];
+            out[i * 2 + 1] = HEX[x & 15];
         }
         return string(out);
     }
@@ -252,22 +307,100 @@ library LibString {
         if (needleLength == 0) return from > length ? length : from;
         if (needleLength > length || from > length - needleLength) return NOT_FOUND;
         uint256 last = length - needleLength;
+        // A subject shorter than a word has no word to read.
+        if (length < 32) return _scan(s, n, from, last);
+        return _scanWords(s, n, from, last);
+    }
+
+    /// @dev The byte-at-a-time scan, for subjects too short to read a word of.
+    /// Two characters are tested before the rest, so a subject whose first
+    /// character repeats does not pay a call at every position it occupies.
+    function _scan(bytes memory s, bytes memory n, uint256 from, uint256 last)
+        private
+        pure
+        returns (uint256)
+    {
         bytes1 first = n[0];
-        if (needleLength == 1) {
+        if (n.length == 1) {
             for (uint256 i = from; i <= last; ++i) {
                 if (s[i] == first) return i;
             }
             return NOT_FOUND;
         }
-        // Two characters are tested before the rest, so a subject whose first
-        // character repeats does not pay a call at every position it occupies.
         bytes1 second = n[1];
         for (uint256 i = from; i <= last; ++i) {
-            if (s[i] == first && s[i + 1] == second && (needleLength == 2 || _matchAt(s, n, i))) {
+            if (s[i] == first && s[i + 1] == second && (n.length == 2 || _matchAt(s, n, i))) {
                 return i;
             }
         }
         return NOT_FOUND;
+    }
+
+    /// @dev Rejects thirty-two candidate positions at a time: the word holding
+    /// each position's first byte is compared against the needle's first byte
+    /// broadcast to a word, and a zero byte marks agreement. The second byte
+    /// is tested the same way, so only positions where both agree are worth
+    /// the full comparison.
+    function _scanWords(bytes memory s, bytes memory n, uint256 from, uint256 last)
+        private
+        pure
+        returns (uint256)
+    {
+        uint256 first = uint256(uint8(n[0])) * SPREAD_1;
+        uint256 second = n.length > 1 ? uint256(uint8(n[1])) * SPREAD_1 : 0;
+        uint256 i = from;
+        while (i <= last) {
+            // The last block is pulled back so the word stays inside the
+            // subject; the positions before `i` it then covers again are
+            // masked off, as are those past the last valid start.
+            uint256 at = i + 32 > s.length ? s.length - 32 : i;
+            uint256 word = uint256(Bytes.readBytes32(s, at));
+            uint256 found = _zeroBytes(word ^ first);
+            if (at < i) found &= type(uint256).max >> ((i - at) * 8);
+            if (last - at < 31) found &= ~(type(uint256).max >> ((last - at + 1) * 8));
+            if (n.length > 1 && found != 0) {
+                // Each position's second byte is the next byte of the word,
+                // and the last position's is the byte after the word.
+                uint256 next = at + 32 < s.length ? uint256(uint8(s[at + 32])) : 0;
+                found &= _zeroBytes(((word << 8) | next) ^ second);
+            }
+            while (found != 0) {
+                uint256 hit = at + _firstMarkedByte(found);
+                if (n.length < 3 || _matchAt(s, n, hit)) return hit;
+                found &= ~(uint256(0xff) << (248 - (hit - at) * 8));
+            }
+            i = at + 32;
+        }
+        return NOT_FOUND;
+    }
+
+    /// @dev `0x80` in every byte of `word` that is zero, and `0` elsewhere.
+    function _zeroBytes(uint256 word) private pure returns (uint256) {
+        // A byte carries into its own high bit exactly when it is not zero,
+        // and the high bits are all this reports.
+        return ~(word | ((word & LANES_7F) + LANES_7F) | LANES_7F);
+    }
+
+    /// @dev The index of the highest byte of `marks` that is not zero, which
+    /// is the earliest position it marks. `marks` must not be zero.
+    function _firstMarkedByte(uint256 marks) private pure returns (uint256 index) {
+        if (marks >> 128 == 0) {
+            index = 16;
+            marks <<= 128;
+        }
+        if (marks >> 192 == 0) {
+            index += 8;
+            marks <<= 64;
+        }
+        if (marks >> 224 == 0) {
+            index += 4;
+            marks <<= 32;
+        }
+        if (marks >> 240 == 0) {
+            index += 2;
+            marks <<= 16;
+        }
+        if (marks >> 248 == 0) index += 1;
     }
 
     /// @dev Returns `subject` all occurrences of `needle` replaced with `replacement`.
@@ -287,10 +420,11 @@ library LibString {
         bytes1 second = needleLength < 2 ? first : n[1];
         uint256 count;
         for (uint256 i; i + needleLength <= length;) {
-            if (s[i] == first
-                && (needleLength < 2
-                    || (s[i + 1] == second
-                        && (needleLength == 2 || _matchAt(s, n, i))))) {
+            if (
+                s[i] == first
+                    && (needleLength < 2
+                        || (s[i + 1] == second && (needleLength == 2 || _matchAt(s, n, i))))
+            ) {
                 ++count;
                 i += needleLength;
             } else {
@@ -302,10 +436,11 @@ library LibString {
         uint256 o;
         uint256 at;
         while (at + needleLength <= length) {
-            if (s[at] == first
-                && (needleLength < 2
-                    || (s[at + 1] == second
-                        && (needleLength == 2 || _matchAt(s, n, at))))) {
+            if (
+                s[at] == first
+                    && (needleLength < 2
+                        || (s[at + 1] == second && (needleLength == 2 || _matchAt(s, n, at))))
+            ) {
                 for (uint256 k; k < replacementLength; ++k) {
                     out[o + k] = r[k];
                 }
@@ -494,10 +629,11 @@ library LibString {
         bytes1 second = needleLength < 2 ? first : n[1];
         uint256 count;
         for (uint256 i; i + needleLength <= length;) {
-            if (s[i] == first
-                && (needleLength < 2
-                    || (s[i + 1] == second
-                        && (needleLength == 2 || _matchAt(s, n, i))))) {
+            if (
+                s[i] == first
+                    && (needleLength < 2
+                        || (s[i + 1] == second && (needleLength == 2 || _matchAt(s, n, i))))
+            ) {
                 ++count;
                 i += needleLength;
             } else {
@@ -507,10 +643,11 @@ library LibString {
         uint256[] memory found = new uint256[](count);
         uint256 k;
         for (uint256 i; i + needleLength <= length;) {
-            if (s[i] == first
-                && (needleLength < 2
-                    || (s[i + 1] == second
-                        && (needleLength == 2 || _matchAt(s, n, i))))) {
+            if (
+                s[i] == first
+                    && (needleLength < 2
+                        || (s[i + 1] == second && (needleLength == 2 || _matchAt(s, n, i))))
+            ) {
                 found[k] = i;
                 ++k;
                 i += needleLength;
