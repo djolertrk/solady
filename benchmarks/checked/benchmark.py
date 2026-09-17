@@ -182,8 +182,27 @@ def select_harness_apis(apis, api_filters, isolate):
     ]
 
 
-def prepare(solc, out, api_filters=(), isolate=False, core_dir=DEFAULT_CORE_MODULES):
+def prepare(
+    solc,
+    out,
+    api_filters=(),
+    isolate=False,
+    core_dir=DEFAULT_CORE_MODULES,
+    upstream_overrides=(),
+):
     archive = json.loads(gzip.decompress(ARCHIVE.read_bytes()))
+    # Upstream ships per-fork variants of some libraries (`src/utils/clz/`).
+    # An override measures against the variant a user of that fork imports,
+    # under the path the shared harness already names. The API check below
+    # still requires its declarations to match the port's.
+    overridden = {}
+    for item in upstream_overrides:
+        path, _, source = item.partition("=")
+        if path not in archive["sources"] or not source:
+            raise ValueError(f"bad --upstream-override: {item}")
+        content = Path(source).read_text()
+        archive["sources"][path] = {"content": content}
+        overridden[path] = digest(content.encode())
     safe = closure(
         {
             p.relative_to(ROOT).as_posix(): {"content": p.read_text()}
@@ -283,6 +302,7 @@ def prepare(solc, out, api_filters=(), isolate=False, core_dir=DEFAULT_CORE_MODU
             p: digest(v["content"].encode()) for p, v in safe.items() if p.startswith(CORE_PREFIX)
         },
         "port_only_sources": port_only,
+        "upstream_overrides": overridden,
         "source_sha256": {p: digest(v["content"].encode()) for p, v in safe.items()},
         "libraries": inventory,
         "implemented_apis": len(apis),
@@ -844,7 +864,12 @@ def run(args):
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=False)
     safe, upstream, apis, audit = prepare(
-        args.solc, out, args.api, args.isolate_api, core_dir=args.core_modules
+        args.solc,
+        out,
+        args.api,
+        args.isolate_api,
+        core_dir=args.core_modules,
+        upstream_overrides=args.upstream_override or (),
     )
     variants = [
         (
@@ -1196,6 +1221,12 @@ if __name__ == "__main__":
         type=Path,
         default=DEFAULT_CORE_MODULES,
         help="directory holding the compiler-owned solar:core/v1 module sources",
+    )
+    parser.add_argument(
+        "--upstream-override",
+        action="append",
+        metavar="PATH=FILE",
+        help="measure against FILE as the upstream source at PATH, e.g. a fork variant",
     )
     parser.add_argument("--output", type=Path, required=True)
     raise SystemExit(run(parser.parse_args()))
