@@ -1,60 +1,40 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import {Bits} from "solar:core/v1/Bits.sol";
+import {Bytes} from "solar:core/v1/Bytes.sol";
+
 /// @notice Checked Solidity implementation of the pinned Solady LibBit API.
 /// @dev Raw boolean operations require clean boolean inputs, as upstream does.
+/// The bit scans and the population count are `Bits`: a table search on a
+/// target without `clz`, the instruction on one that has it.
 library LibBit {
-    /// @dev Selector for the De Bruijn-style byte lookup that resolves the
-    /// bottom three bits of a bit index. Shifting it by a byte value and
-    /// masking to five bits yields that byte's slot in the tables below.
-    uint256 private constant _SELECTOR = 0x8421084210842108cc6318c6db6d54be;
+    /// @dev Nibble-spreading masks, one per halving of the packing.
+    uint256 private constant _MASK_64 =
+        0x0000000000000000ffffffffffffffff0000000000000000ffffffffffffffff;
+    uint256 private constant _MASK_32 =
+        0x00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff;
+    uint256 private constant _MASK_16 =
+        0x0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff;
+    uint256 private constant _MASK_8 =
+        0x00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff;
+    uint256 private constant _MASK_4 =
+        0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f;
 
-    /// @dev Highest set bit index per selector slot; slot 30 (a zero byte) is 0.
-    bytes32 private constant _FLS_LOW =
-        0x0706060506020504060203020504030106050205030304010505030400000000;
-
-    /// @dev The same table complemented to 255, so a leading-zero count is the
-    /// cascade result exclusive-ored with the slot.
-    bytes32 private constant _CLZ_LOW =
-        0xf8f9f9faf9fdfafbf9fdfcfdfafbfcfef9fafdfafcfcfbfefafafcfbffffffff;
-
-    /// @dev Narrows `x` to its top byte in five branch-free steps, then reads
-    /// that byte's highest set bit from a table. Zero keeps the 256 seeded in
-    /// the first step: every comparison below is then false and the table slot
-    /// for a zero byte contributes nothing.
     function fls(uint256 x) internal pure returns (uint256 r) {
-        r = (x == 0 ? 256 : 0) | (x > type(uint128).max ? 128 : 0);
-        r |= (x >> r) > type(uint64).max ? 64 : 0;
-        r |= (x >> r) > type(uint32).max ? 32 : 0;
-        r |= (x >> r) > type(uint16).max ? 16 : 0;
-        r |= (x >> r) > type(uint8).max ? 8 : 0;
-        r |= uint8(_FLS_LOW[(_SELECTOR >> (x >> r)) & 31]);
+        return Bits.highestSetBit(x);
     }
 
-    /// @dev Runs the same cascade as `fls` against the complemented table. The
-    /// cascade result only sets bits at or above three and the slot value has
-    /// every one of those bits set, so the exclusive-or subtracts it.
     function clz(uint256 x) internal pure returns (uint256 r) {
-        r = x > type(uint128).max ? 128 : 0;
-        r |= (x >> r) > type(uint64).max ? 64 : 0;
-        r |= (x >> r) > type(uint32).max ? 32 : 0;
-        r |= (x >> r) > type(uint16).max ? 16 : 0;
-        r |= (x >> r) > type(uint8).max ? 8 : 0;
-        r = (r ^ uint8(_CLZ_LOW[(_SELECTOR >> (x >> r)) & 31])) + (x == 0 ? 1 : 0);
+        return Bits.leadingZeros(x);
     }
 
     function ffs(uint256 x) internal pure returns (uint256 r) {
-        return x == 0 ? 256 : fls(x & (~x + 1));
+        return Bits.trailingZeros(x);
     }
 
     function popCount(uint256 x) internal pure returns (uint256 c) {
-        uint256 m1 = type(uint256).max / 3;
-        uint256 m2 = type(uint256).max / 5;
-        uint256 m4 = type(uint256).max / 17;
-        x -= (x >> 1) & m1;
-        x = (x & m2) + ((x >> 2) & m2);
-        x = (x + (x >> 4)) & m4;
-        return _sumBytes(x);
+        return Bits.popCount(x);
     }
 
     // Every input byte is at most eight. Pairing the halves bounds the
@@ -70,6 +50,9 @@ library LibBit {
         return _sumBytes(~(((x & m) + m) | x | m) >> 7);
     }
 
+    // The two loops below are left a byte at a time on purpose: the compiler
+    // recognizes the shape and counts a word per step, which a hand-written
+    // word loop over `Bytes.readBytes32` measured slower than.
     function countZeroBytes(bytes memory s) internal pure returns (uint256 c) {
         for (uint256 i; i < s.length; ++i) {
             if (s[i] == 0) ++c;
@@ -124,11 +107,69 @@ library LibBit {
     }
 
     function toNibbles(bytes memory s) internal pure returns (bytes memory result) {
-        result = new bytes(s.length * 2);
-        for (uint256 i; i < s.length; ++i) {
-            result[i * 2] = s[i] >> 4;
-            result[i * 2 + 1] = s[i] & 0x0f;
+        uint256 n = s.length;
+        result = new bytes(n * 2);
+        uint256 i;
+        uint256 o;
+        // Sixteen input bytes make one word of output. The spreading is
+        // written out here rather than called, so that the loop is straight
+        // code whose reads and writes the loop condition already bounds.
+        while (i + 16 <= n) {
+            uint256 x = uint128(Bytes.readBytes16(s, i));
+            x = (x | (x << 64)) & _MASK_64;
+            x = (x | (x << 32)) & _MASK_32;
+            x = (x | (x << 16)) & _MASK_16;
+            x = (x | (x << 8)) & _MASK_8;
+            Bytes.writeBytes32(result, o, bytes32((x | (x << 4)) & _MASK_4));
+            i += 16;
+            o += 32;
         }
+        if (i == n) return result;
+        // What is left is shorter than a block. One more block pulled back to
+        // end where the input ends covers it, rewriting the nibbles it shares
+        // with the block before; below sixteen bytes the same is done with
+        // the widest block that fits.
+        if (n >= 16) {
+            uint256 tail = uint128(Bytes.readBytes16(s, n - 16));
+            Bytes.writeBytes32(result, (n - 16) * 2, bytes32(_spread(tail)));
+        } else if (n >= 8) {
+            _nibbles8(s, 0, result, 0);
+            if (n != 8) _nibbles8(s, n - 8, result, (n - 8) * 2);
+        } else if (n >= 4) {
+            _nibbles4(s, 0, result, 0);
+            if (n != 4) _nibbles4(s, n - 4, result, (n - 4) * 2);
+        } else if (n >= 2) {
+            _nibbles2(s, 0, result, 0);
+            if (n != 2) _nibbles2(s, 1, result, 2);
+        } else {
+            uint256 one = uint8(Bytes.readBytes1(s, 0));
+            Bytes.writeBytes2(result, 0, bytes2(uint16(_spread(one))));
+        }
+    }
+
+    function _nibbles8(bytes memory s, uint256 i, bytes memory result, uint256 o) private pure {
+        uint256 x = uint64(Bytes.readBytes8(s, i));
+        Bytes.writeBytes16(result, o, bytes16(uint128(_spread(x))));
+    }
+
+    function _nibbles4(bytes memory s, uint256 i, bytes memory result, uint256 o) private pure {
+        uint256 x = uint32(Bytes.readBytes4(s, i));
+        Bytes.writeBytes8(result, o, bytes8(uint64(_spread(x))));
+    }
+
+    function _nibbles2(bytes memory s, uint256 i, bytes memory result, uint256 o) private pure {
+        uint256 x = uint16(Bytes.readBytes2(s, i));
+        Bytes.writeBytes4(result, o, bytes4(uint32(_spread(x))));
+    }
+
+    /// @dev The nibbles of `x`, which must be below `2 ** 128`, one to a byte:
+    /// eight bytes apart, then four, two, one, and finally one nibble.
+    function _spread(uint256 x) private pure returns (uint256) {
+        x = (x | (x << 64)) & _MASK_64;
+        x = (x | (x << 32)) & _MASK_32;
+        x = (x | (x << 16)) & _MASK_16;
+        x = (x | (x << 8)) & _MASK_8;
+        return (x | (x << 4)) & _MASK_4;
     }
 
     function rawAnd(bool x, bool y) internal pure returns (bool z) {
