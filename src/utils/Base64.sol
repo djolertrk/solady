@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import {Arrays} from "solar:core/v1/Arrays.sol";
 import {Bytes} from "solar:core/v1/Bytes.sol";
 
 /// @notice Checked Solidity implementation of the pinned Solady Base64 API.
@@ -200,7 +201,10 @@ library Base64 {
             if (input[n - 1] == "=") --length;
             if (input[n - 2] == "=") --length;
         }
-        result = new bytes(length);
+        // Each step writes its three bytes as a whole word. The 29 bytes past them are
+        // the zeros of the allocation until a later step writes them, and the last step's
+        // land in slack reserved for it that the length is cut back from at the end.
+        result = new bytes(length + 29);
         bytes memory table = DECODE;
         uint256 i;
         uint256 j;
@@ -212,7 +216,7 @@ library Base64 {
                 | (uint256(uint8(table[uint8(quad[1])])) << 12)
                 | (uint256(uint8(table[uint8(quad[2])])) << 6)
                 | uint256(uint8(table[uint8(quad[3])]));
-            Bytes.writeBytes3(result, j, bytes3(uint24(word)));
+            Bytes.writeBytes32(result, j, bytes32(word << 232));
             i += 4;
             j += 3;
         }
@@ -225,5 +229,6 @@ library Base64 {
             if (j + 1 < length) result[j + 1] = bytes1(uint8(word >> 8));
             if (j + 2 < length) result[j + 2] = bytes1(uint8(word));
         }
+        Arrays.truncate(result, length);
     }
 }
