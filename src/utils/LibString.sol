@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import {Arrays} from "solar:core/v1/Arrays.sol";
+import {Bits} from "solar:core/v1/Bits.sol";
 import {Bytes} from "solar:core/v1/Bytes.sol";
+import {Hash} from "solar:core/v1/Hash.sol";
+import {Math} from "solar:core/v1/Math.sol";
 
 /// @notice Checked Solidity replacements for the value-oriented LibString APIs.
 /// @dev Storage reinterpretation and direct-return APIs are deliberately absent.
@@ -31,6 +35,16 @@ library LibString {
         0x0606060606060606060606060606060606060606060606060606060606060606;
     uint256 private constant SPREAD_ASCII_0 =
         0x3030303030303030303030303030303030303030303030303030303030303030;
+    uint256 private constant SPREAD_1F =
+        0x1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f;
+    uint256 private constant SPREAD_ASCII_A =
+        0x4141414141414141414141414141414141414141414141414141414141414141;
+    uint256 private constant SPREAD_20 =
+        0x2020202020202020202020202020202020202020202020202020202020202020;
+    uint256 private constant SPREAD_22 =
+        0x2222222222222222222222222222222222222222222222222222222222222222;
+    uint256 private constant SPREAD_5C =
+        0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c;
     uint256 private constant LANES_7F =
         0x7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f;
 
@@ -43,6 +57,16 @@ library LibString {
     /// @dev Set bit per byte value that `escapeJSON` rewrites: every control
     /// byte below 0x20, plus `"` and `\`.
     uint256 private constant _JSON_ESCAPED = 0xffffffff | (1 << 0x22) | (1 << 0x5c);
+
+
+    /// @dev The top bit of every byte lane.
+    uint256 private constant _HIGH_BITS =
+        0x8080808080808080808080808080808080808080808080808080808080808080;
+
+    /// @dev The length of the rune a high lead byte starts, indexed by its top six bits
+    /// less 32: two for 0x80 to 0xdf, then three, four, five and six.
+    bytes32 private constant _RUNE_LENGTHS =
+        0x0202020202020202020202020202020202020202020202020303030304040506;
 
     function toString(uint256 value) internal pure returns (string memory result) {
         // Halving the remaining magnitude costs at most seven steps, where
@@ -129,6 +153,17 @@ library LibString {
         // marks the ones that become letters rather than digits.
         uint256 letters = ((x + SPREAD_6) >> 4) & SPREAD_1;
         return bytes32(x + SPREAD_ASCII_0 + letters * 39);
+    }
+
+    /// @dev Spreads the thirty-two nibbles of the low sixteen bytes of `x` one to a byte,
+    /// the highest nibble first, as `_hexWord` does before it turns them into digits. Kept
+    /// apart from it so that the hex formatters' loops keep their inlined body.
+    function _nibbles(uint256 x) private pure returns (uint256) {
+        x = (x | (x << 64)) & MASK_64;
+        x = (x | (x << 32)) & MASK_32;
+        x = (x | (x << 16)) & MASK_16;
+        x = (x | (x << 8)) & MASK_8;
+        return (x | (x << 4)) & MASK_4;
     }
 
     function toHexString(uint256 value, uint256 byteCount)
@@ -228,11 +263,44 @@ library LibString {
 
     function runeCount(string memory s) internal pure returns (uint256 result) {
         bytes memory b = bytes(s);
-        for (uint256 i; i < b.length; ++result) {
+        uint256 n = b.length;
+        for (uint256 i; i < n;) {
+            // Every byte below 0x80 is one rune, so a word of them is thirty-two runes, and
+            // the bytes before the first high byte of a mixed word are one rune each too.
+            // Past the last full word, the last word of the string is read instead, with the
+            // bytes already counted shifted out of it.
+            if (n >= 32) {
+                uint256 high;
+                if (i + 32 <= n) {
+                    high = uint256(Bytes.readBytes32(b, i)) & _HIGH_BITS;
+                    if (high == 0) {
+                        i += 32;
+                        result += 32;
+                        continue;
+                    }
+                } else {
+                    high = (uint256(Bytes.readBytes32(b, n - 32)) << ((i + 32 - n) << 3))
+                        & _HIGH_BITS;
+                    if (high == 0) {
+                        result += n - i;
+                        break;
+                    }
+                }
+                uint256 ascii = Bits.leadingZeros(high) >> 3;
+                i += ascii;
+                result += ascii;
+            }
+            // A high byte leads a rune of the length its top six bits declare, the same
+            // length for a stray continuation byte as for a two-byte lead. A run of them is
+            // stepped through here before the next word is probed.
             uint256 c = uint8(b[i]);
-            // Counting the thresholds `c` reaches instead is branch-free but
-            // measured worse: the first test already settles every ASCII byte.
-            i += c < 0xc0 ? 1 : c < 0xe0 ? 2 : c < 0xf0 ? 3 : c < 0xf8 ? 4 : c < 0xfc ? 5 : 6;
+            while (true) {
+                i += c < 0x80 ? 1 : uint8(_RUNE_LENGTHS[(c >> 2) - 32]);
+                ++result;
+                if (i >= n) break;
+                c = uint8(b[i]);
+                if (c < 0x80) break;
+            }
         }
     }
 
@@ -274,15 +342,35 @@ library LibString {
     /// and the alphabets are capitalized conditionally according to
     /// https://eips.ethereum.org/EIPS/eip-55
     function toHexStringChecksummed(address value) internal pure returns (string memory result) {
-        bytes memory hexed = bytes(toHexStringNoPrefix(value));
-        bytes32 hash = keccak256(hexed);
-        for (uint256 i; i < 40; ++i) {
-            uint8 c = uint8(hexed[i]);
-            uint8 nibble = uint8(hash[i / 2]);
-            if (i % 2 == 0) nibble >>= 4;
-            if (c >= 97 && (nibble & 15) >= 8) hexed[i] = bytes1(c - 32);
-        }
-        return string.concat("0x", string(hexed));
+        bytes memory out = new bytes(42);
+        out[0] = "0";
+        out[1] = "x";
+        // The top sixteen bytes make one word of characters; the low four make the top eight
+        // characters of another.
+        uint256 raw = uint160(value);
+        uint256 head = uint256(_hexWord(raw >> 32));
+        uint256 tail = uint256(_hexWord((raw & 0xffffffff) << 96));
+        Bytes.writeBytes32(out, 2, bytes32(head));
+        Bytes.writeBytes8(out, 34, bytes8(bytes32(tail)));
+        // A character is uppercased when it is a letter and its nibble of the hash of the
+        // lowercase digits is at least eight: nibble by nibble, the hash's top sixteen bytes
+        // line up with the head and the next four with the tail.
+        uint256 hash = uint256(Hash.keccak256Range(out, 2, 40));
+        Bytes.writeBytes32(out, 2, bytes32(_checksumCase(head, _nibbles(hash >> 128))));
+        Bytes.writeBytes8(
+            out, 34, bytes8(bytes32(_checksumCase(tail, _nibbles(hash & type(uint128).max))))
+        );
+        return string(out);
+    }
+
+    /// @dev Uppercases every letter of the hex `chars` whose lane of `nibbles` is at least
+    /// eight. Adding 0x1f sets the top bit of a letter's lane, 0x61 to 0x66, and of no digit's
+    /// or empty lane; the nibble's bit three shifted up is the other condition, and taking
+    /// 0x20 off a marked lane is the case change.
+    function _checksumCase(uint256 chars, uint256 nibbles) private pure returns (uint256) {
+        uint256 letters = (chars + SPREAD_1F) & _HIGH_BITS;
+        uint256 marked = letters & ((nibbles << 4) & _HIGH_BITS);
+        return chars - (marked >> 2);
     }
 
     /// @dev Returns whether `needle` occurs in `subject` at byte offset `i`.
@@ -791,35 +879,88 @@ library LibString {
         returns (string memory result)
     {
         bytes memory b = bytes(s);
-        uint256 length = addDoubleQuotes ? 2 : 0;
-        for (uint256 i; i < b.length; ++i) {
-            if ((_JSON_ESCAPED >> uint8(b[i])) & 1 == 0) {
-                ++length;
+        uint256 n = b.length;
+        // Six bytes is the longest escape, so six a byte always suffice; the buffer is cut to
+        // what one pass writes rather than sized by a pass that counts first.
+        bytes memory out = new bytes((addDoubleQuotes ? 2 : 0) + n * 6);
+        uint256 o;
+        if (addDoubleQuotes) {
+            out[0] = "\"";
+            o = 1;
+        }
+        // A word without a control character, quote or backslash is copied whole, and so is
+        // a tail without one, probed through the last word of the string; the bytes of any
+        // other word or tail are written one at a time.
+        for (uint256 i; i < n;) {
+            (uint256 end, uint256 word, bool probed) = _jsonWindow(b, i);
+            if (probed && _jsonPlain(word)) {
+                Bytes.copyInto(out, o, b, i, end - i);
+                o += end - i;
+                i = end;
                 continue;
             }
-            (, uint256 escaped) = _jsonEscape(b[i]);
-            length += escaped;
+            while (i < end) {
+                if ((_JSON_ESCAPED >> uint8(b[i])) & 1 == 0) {
+                    out[o] = b[i];
+                    ++o;
+                } else {
+                    (bytes32 seq, uint256 escaped) = _jsonEscape(b[i]);
+                    if (escaped == 2) {
+                        Bytes.writeBytes2(out, o, bytes2(seq));
+                    } else {
+                        Bytes.writeBytes6(out, o, bytes6(seq));
+                    }
+                    o += escaped;
+                }
+                ++i;
+            }
         }
-        bytes memory out = new bytes(length);
-        uint256 o;
         if (addDoubleQuotes) {
             out[o] = "\"";
             ++o;
         }
-        for (uint256 i; i < b.length; ++i) {
-            if ((_JSON_ESCAPED >> uint8(b[i])) & 1 == 0) {
-                out[o] = b[i];
-                ++o;
-                continue;
-            }
-            (bytes32 seq, uint256 escaped) = _jsonEscape(b[i]);
-            for (uint256 k; k < escaped; ++k) {
-                out[o + k] = seq[k];
-            }
-            o += escaped;
-        }
-        if (addDoubleQuotes) out[o] = "\"";
+        Arrays.truncate(out, o);
         return string(out);
+    }
+
+    /// @dev The next window of `b` from `i`: the end of the word starting there and that word
+    /// when a whole one remains; otherwise the end of `b` and, when `b` has thirty-two bytes
+    /// for it to be read through, the tail as `_jsonTail` gives it. A window of fewer than
+    /// thirty-two bytes at the front of a shorter `b` has no word to probe.
+    function _jsonWindow(bytes memory b, uint256 i)
+        private
+        pure
+        returns (uint256 end, uint256 word, bool probed)
+    {
+        uint256 n = b.length;
+        end = i + 32;
+        if (end <= n) return (end, uint256(Bytes.readBytes32(b, i)), true);
+        if (n >= 32) return (n, _jsonTail(b, i), true);
+        return (n, 0, false);
+    }
+
+    /// @dev The bytes of `b` from `i`, fewer than thirty-two of them, read through the last
+    /// word of `b`, where they are its low lanes; the lanes above them are given a letter, so
+    /// that `_jsonPlain` answers for the tail alone. Only for `b` of at least thirty-two bytes.
+    function _jsonTail(bytes memory b, uint256 i) private pure returns (uint256) {
+        uint256 tail = b.length - i;
+        uint256 word = uint256(Bytes.readBytes32(b, b.length - 32));
+        uint256 above = (32 - tail) << 3;
+        return ((word << above) >> above) | (SPREAD_ASCII_A << (tail << 3));
+    }
+
+    /// @dev Whether no byte of `word` needs escaping in JSON: none below 0x20, none a quote
+    /// and none a backslash. A lane below 0x20 borrows when 0x20 is taken from it, and a
+    /// lane equal to a byte is zero after xor with it and borrows when one is taken; either
+    /// leaves a top bit that the lane itself did not have. Borrows can spill into higher
+    /// lanes, so the result tells only whether some lane matched, which is all that is asked.
+    function _jsonPlain(uint256 word) private pure returns (bool) {
+        uint256 low = Math.wrappingSub(word, SPREAD_20) & ~word;
+        uint256 quote = word ^ SPREAD_22;
+        quote = Math.wrappingSub(quote, SPREAD_1) & ~quote;
+        uint256 backslash = word ^ SPREAD_5C;
+        backslash = Math.wrappingSub(backslash, SPREAD_1) & ~backslash;
+        return (low | quote | backslash) & _HIGH_BITS == 0;
     }
 
     /// @dev Escapes the string to be used within double-quotes in a JSON.

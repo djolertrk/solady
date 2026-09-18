@@ -204,14 +204,15 @@ library Base64 {
         bytes memory table = DECODE;
         uint256 i;
         uint256 j;
-        while (i + 3 < n && j + 2 < length) {
-            uint256 word = (uint256(uint8(table[uint8(input[i])])) << 18)
-                | (uint256(uint8(table[uint8(input[i + 1])])) << 12)
-                | (uint256(uint8(table[uint8(input[i + 2])])) << 6)
-                | uint256(uint8(table[uint8(input[i + 3])]));
-            result[j] = bytes1(uint8(word >> 16));
-            result[j + 1] = bytes1(uint8(word >> 8));
-            result[j + 2] = bytes1(uint8(word));
+        // Four characters are read and three bytes written at a time; the guards are the
+        // bounds the reads and writes check, so those checks fold into them.
+        while (i + 4 <= n && j + 3 <= length) {
+            bytes4 quad = Bytes.readBytes4(input, i);
+            uint256 word = (uint256(uint8(table[uint8(quad[0])])) << 18)
+                | (uint256(uint8(table[uint8(quad[1])])) << 12)
+                | (uint256(uint8(table[uint8(quad[2])])) << 6)
+                | uint256(uint8(table[uint8(quad[3])]));
+            Bytes.writeBytes3(result, j, bytes3(uint24(word)));
             i += 4;
             j += 3;
         }
