@@ -96,6 +96,24 @@ Artifacts are retained in
 `solar/target/safe-solady/close-gaps/replace-core-stream-20260922/` and
 `solar/target/safe-solady/close-gaps/replace-core-stream-1000000-20260922/`.
 
+## Shared string-index update
+
+`LibString.indicesOf` now calls `Strings.indicesOf`. Solar lowers it to one
+shared MIR search kernel with the same masked short-needle and hash-confirmed
+long-needle matching as replacement. Match offsets are streamed at the
+free-memory pointer and the exact word array is reserved only after the scan.
+
+All 72 published calls match the oracle at both optimizer settings. In the
+complete 224-API harness at 200 runs, 64 calls win and eight no-match searches
+trail by at most 254 opcode gas; the LibString runtime falls from 13,521 to
+13,239 bytes. In the isolated 1,000,000-run harness, 46 calls win and 26 trail
+by at most 304 gas. This is a large aggregate and size improvement, while the
+strict per-call gate remains open for no-match searches.
+
+Artifacts are retained in
+`solar/target/safe-solady/close-gaps/indices-core-20260922/` and
+`solar/target/safe-solady/close-gaps/indices-core-1000000-20260922/`.
+
 ## Zero-byte scan integration update
 
 The compiler's word-at-a-time zero counter now recognizes the raw memory

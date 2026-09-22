@@ -638,39 +638,7 @@ library LibString {
         pure
         returns (uint256[] memory)
     {
-        bytes memory s = bytes(subject);
-        bytes memory n = bytes(needle);
-        uint256 needleLength = n.length;
-        uint256 length = s.length;
-        if (needleLength > length) return new uint256[](0);
-        if (needleLength == 0) {
-            uint256[] memory every = new uint256[](length + 1);
-            for (uint256 i; i <= length; ++i) {
-                every[i] = i;
-            }
-            return every;
-        }
-        bytes1 first = n[0];
-        bytes1 second = needleLength < 2 ? first : n[1];
-        // A non-overlapping match consumes at least `needleLength` bytes.
-        // Allocate that safe upper bound, populate in one scan and shorten.
-        uint256[] memory found = new uint256[](length / needleLength);
-        uint256 count;
-        for (uint256 i; i + needleLength <= length;) {
-            if (
-                s[i] == first
-                    && (needleLength < 2
-                        || (s[i + 1] == second && (needleLength == 2 || _matchAt(s, n, i))))
-            ) {
-                found[count] = i;
-                ++count;
-                i += needleLength;
-            } else {
-                ++i;
-            }
-        }
-        Arrays.truncate(found, count);
-        return found;
+        return Strings.indicesOf(subject, needle);
     }
 
     /// @dev Returns an arrays of strings based on the `delimiter` inside of the `subject` string.
