@@ -94,8 +94,8 @@ def safety_violations(output):
 
 def core_sources(core_dir):
     return {
-        CORE_PREFIX + path.name: {"content": path.read_text()}
-        for path in sorted(Path(core_dir).glob("*.sol"))
+        CORE_PREFIX + path.relative_to(core_dir).as_posix(): {"content": path.read_text()}
+        for path in sorted(Path(core_dir).rglob("*.sol"))
     }
 
 

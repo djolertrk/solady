@@ -1,9 +1,27 @@
 """Guard against counting incorrect executions as optimization wins."""
 
 import copy
+import tempfile
 import unittest
+from pathlib import Path
 
 import benchmark
+
+
+class CoreSourcesTests(unittest.TestCase):
+    def test_nested_modules_keep_their_import_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "codecs").mkdir()
+            (root / "Bytes.sol").write_text("library Bytes {}")
+            (root / "codecs" / "Base64.sol").write_text("library Base64 {}")
+            self.assertEqual(
+                benchmark.core_sources(root),
+                {
+                    "solar:core/v1/Bytes.sol": {"content": "library Bytes {}"},
+                    "solar:core/v1/codecs/Base64.sol": {"content": "library Base64 {}"},
+                },
+            )
 
 
 class ComparisonTests(unittest.TestCase):

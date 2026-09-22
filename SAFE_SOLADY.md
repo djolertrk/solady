@@ -27,6 +27,13 @@ LibSort and LibString have reduced APIs, so the whole upstream suite and
 consumers of missing functions are not expected to compile on this branch.
 Use the scoped runner commands below for the published subset.
 
+## Base64 core update
+
+The Base64 wrapper now uses the compiler-owned codec, with a checked portable
+fallback. The latest [Base64 measurements](benchmarks/checked/base64-core.md)
+show substantially lower gas for larger inputs, but short-input and bytecode
+size gaps remain. Historical measurements below predate this change.
+
 ## Implemented surface
 
 | Library | Implemented non-private functions | Pinned function surface |
