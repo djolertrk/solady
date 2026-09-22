@@ -5,6 +5,7 @@ import {Arrays} from "solar:core/v1/Arrays.sol";
 import {Bits} from "solar:core/v1/Bits.sol";
 import {Bytes} from "solar:core/v1/Bytes.sol";
 import {Hash} from "solar:core/v1/Hash.sol";
+import {Hex} from "solar:core/v1/codecs/Hex.sol";
 import {Math} from "solar:core/v1/Math.sol";
 import {Strings} from "solar:core/v1/Strings.sol";
 
@@ -120,26 +121,7 @@ library LibString {
         pure
         returns (string memory result)
     {
-        bytes memory out = new bytes(byteCount * 2);
-        // Sixteen bytes of the value are thirty-two characters, one word of
-        // output, so they are converted and stored together.
-        uint256 i = byteCount;
-        while (i >= 16) {
-            i -= 16;
-            Bytes.writeBytes32(out, i * 2, _hexWord(value & type(uint128).max));
-            value >>= 128;
-        }
-        // Whatever is left is under sixteen bytes: two digits per step, the
-        // low one first because the value is consumed from its low end.
-        while (i != 0) {
-            --i;
-            out[i * 2 + 1] = HEX[value & 15];
-            value >>= 4;
-            out[i * 2] = HEX[value & 15];
-            value >>= 4;
-        }
-        if (value != 0) revert HexLengthInsufficient();
-        return string(out);
+        return Strings.toHexStringNoPrefix(value, byteCount);
     }
 
     /// @dev The thirty-two hex characters of the sixteen bytes in `x`, which
@@ -174,19 +156,15 @@ library LibString {
         pure
         returns (string memory result)
     {
-        return string.concat("0x", toHexStringNoPrefix(value, byteCount));
+        return Strings.toHexString(value, byteCount);
     }
 
     function toHexStringNoPrefix(uint256 value) internal pure returns (string memory result) {
-        uint256 length = 1;
-        for (uint256 x = value; x > 255; x >>= 8) {
-            ++length;
-        }
-        return toHexStringNoPrefix(value, length);
+        return Strings.toHexStringNoPrefix(value);
     }
 
     function toHexString(uint256 value) internal pure returns (string memory result) {
-        return string.concat("0x", toHexStringNoPrefix(value));
+        return Strings.toHexString(value);
     }
 
     function toMinimalHexStringNoPrefix(uint256 value)
@@ -210,24 +188,11 @@ library LibString {
     }
 
     function toHexStringNoPrefix(bytes memory raw) internal pure returns (string memory result) {
-        bytes memory out = new bytes(raw.length * 2);
-        uint256 i;
-        // Sixteen input bytes make one word of output.
-        while (i + 16 <= raw.length) {
-            uint256 chunk = uint256(uint128(Bytes.readBytes16(raw, i)));
-            Bytes.writeBytes32(out, i * 2, _hexWord(chunk));
-            i += 16;
-        }
-        for (; i < raw.length; ++i) {
-            uint256 x = uint8(raw[i]);
-            out[i * 2] = HEX[x >> 4];
-            out[i * 2 + 1] = HEX[x & 15];
-        }
-        return string(out);
+        return Hex.encode(raw);
     }
 
     function toHexString(bytes memory raw) internal pure returns (string memory result) {
-        return string.concat("0x", toHexStringNoPrefix(raw));
+        return Hex.encodePrefixed(raw);
     }
 
     function is7BitASCII(string memory s) internal pure returns (bool result) {
