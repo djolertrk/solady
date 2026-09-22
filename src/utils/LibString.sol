@@ -33,6 +33,8 @@ library LibString {
     /// @dev One copy of the value in every byte.
     uint256 private constant SPREAD_1 =
         0x0101010101010101010101010101010101010101010101010101010101010101;
+    uint256 private constant SPREAD_5 =
+        0x0505050505050505050505050505050505050505050505050505050505050505;
     uint256 private constant SPREAD_6 =
         0x0606060606060606060606060606060606060606060606060606060606060606;
     uint256 private constant SPREAD_ASCII_0 =
@@ -279,15 +281,43 @@ library LibString {
         returns (string memory result)
     {
         bytes memory b = bytes(subject);
-        bytes memory out = new bytes(b.length);
-        // The two cases differ only in which letter range is converted, and
-        // either direction is the same single bit flip.
-        uint256 lower = toUpper ? 97 : 65;
-        for (uint256 i; i < b.length; ++i) {
-            uint256 c = uint8(b[i]);
-            out[i] = bytes1(uint8(c ^ (c >= lower && c <= lower + 25 ? 0x20 : 0)));
+        uint256 n = b.length;
+        if (n == 0) return result;
+        // Either direction is the same single bit flip, applied a word at a
+        // time. Flipping that bit in every byte first maps uppercase letters
+        // onto the lowercase range, so both directions test one range. A
+        // shorter string is one zero-padded word.
+        uint256 flip = toUpper ? 0 : SPREAD_20;
+        if (n < 32) {
+            uint256 word = uint256(bytes32(b));
+            bytes memory short = abi.encodePacked(bytes32(word ^ _caseFlips(word, flip)));
+            Arrays.truncate(short, n);
+            return string(short);
+        }
+        bytes memory out = new bytes(n);
+        uint256 i;
+        for (; i + 32 <= n; i += 32) {
+            uint256 word = uint256(Bytes.readBytes32(b, i));
+            Bytes.writeBytes32(out, i, bytes32(word ^ _caseFlips(word, flip)));
+        }
+        // The last word ends at the end of the string, repeating bytes already
+        // converted with the same result.
+        if (i < n) {
+            uint256 word = uint256(Bytes.readBytes32(b, n - 32));
+            Bytes.writeBytes32(out, n - 32, bytes32(word ^ _caseFlips(word, flip)));
         }
         return string(out);
+    }
+
+    /// @dev `0x20` in each byte of `word` that is a lowercase letter once
+    /// `flip` is applied. A byte's low seven bits plus `0x80 - x` reach its
+    /// high bit exactly when they are at least `x`, and never carry into the
+    /// next byte; bytes of `0x80` and above are no letters.
+    function _caseFlips(uint256 word, uint256 flip) private pure returns (uint256) {
+        uint256 low = (word ^ flip) & LANES_7F;
+        // `a` through `z` are 0x61 through 0x7a.
+        uint256 letters = (low + SPREAD_1F) ^ (low + SPREAD_5);
+        return (letters & ~word & _HIGH_BITS) >> 2;
     }
 
     function lower(string memory subject) internal pure returns (string memory result) {
