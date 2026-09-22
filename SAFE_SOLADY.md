@@ -100,19 +100,39 @@ Artifacts are retained in
 
 `LibString.indicesOf` now calls `Strings.indicesOf`. Solar lowers it to one
 shared MIR search kernel with the same masked short-needle and hash-confirmed
-long-needle matching as replacement. Match offsets are streamed at the
-free-memory pointer and the exact word array is reserved only after the scan.
+long-needle matching as replacement. Match offsets are streamed with pointer
+induction at the free-memory pointer and the exact word array is reserved only
+after the scan. The same kernel also feeds `split`.
 
 All 72 published calls match the oracle at both optimizer settings. In the
-complete 224-API harness at 200 runs, 64 calls win and eight no-match searches
-trail by at most 254 opcode gas; the LibString runtime falls from 13,521 to
-13,239 bytes. In the isolated 1,000,000-run harness, 46 calls win and 26 trail
-by at most 304 gas. This is a large aggregate and size improvement, while the
-strict per-call gate remains open for no-match searches.
+complete 224-API harness at 200 runs, the result is net 30,653 opcode gas ahead
+with a 69-gas worst tail. At 1,000,000 runs it is net 31,994 gas ahead with a
+55-gas worst tail. The strict per-call gate remains open for those short
+searches.
 
 Artifacts are retained in
 `solar/target/safe-solady/close-gaps/indices-core-20260922/` and
 `solar/target/safe-solady/close-gaps/indices-core-1000000-20260922/`.
+
+## Shared string-split update
+
+`LibString.split` now calls `Strings.split`. Solar uses the shared search
+kernel to leave one spare result word, appends the subject end, and turns the
+offset array into the returned string array in place. Both the search and the
+rewrite loop use pointer induction; nonempty pieces are copied in bulk and
+empty pieces use Solidity's canonical empty-memory object.
+
+All 61 comparable calls beat the per-call original-Solady solc envelope at
+both optimizer settings. The margin is 190 to 12,249 opcode gas at 200 runs and
+48 to 11,915 gas at 1,000,000 runs. The four excluded inputs are the existing
+upstream Solady empty-delimiter discrepancy in each upstream compiler leg; the
+safe source and Solar result agree with the independent oracle. The complete
+LibString harness is 13,074 runtime bytes at 200 runs, down from 13,239 before
+the fused split kernel.
+
+Artifacts are retained in
+`solar/target/safe-solady/close-gaps/string-search-core-closure-20260922/` and
+`solar/target/safe-solady/close-gaps/string-search-core-closure-1000000-20260922/`.
 
 ## Zero-byte scan integration update
 

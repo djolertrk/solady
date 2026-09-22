@@ -645,25 +645,9 @@ library LibString {
     function split(string memory subject, string memory delimiter)
         internal
         pure
-        returns (string[] memory result)
+        returns (string[] memory)
     {
-        bytes memory s = bytes(subject);
-        uint256 d = bytes(delimiter).length;
-        if (d == 0) {
-            result = new string[](s.length);
-            for (uint256 i; i < s.length; ++i) {
-                result[i] = slice(subject, i, i + 1);
-            }
-            return result;
-        }
-        uint256[] memory indices = indicesOf(subject, delimiter);
-        result = new string[](indices.length + 1);
-        uint256 previous;
-        for (uint256 k; k < indices.length; ++k) {
-            result[k] = slice(subject, previous, indices[k]);
-            previous = indices[k] + d;
-        }
-        result[indices.length] = slice(subject, previous, s.length);
+        return Strings.split(subject, delimiter);
     }
 
     /// @dev Returns the length of the small string `s` up to its first null byte.
