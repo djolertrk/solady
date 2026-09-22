@@ -77,6 +77,20 @@ completed parity claim. Artifacts are retained in
 `solar/target/safe-solady/close-gaps/full-20260922/` and
 `solar/target/safe-solady/close-gaps/strings-1000000-20260922/`.
 
+The follow-up compiler pass proves the output-cursor relation for these
+maximum-capacity builders. It removes the per-write overflow and bounds
+branches only when a zero-based input cursor advances by one, the output step
+has a finite maximum, the checked allocation reserves at least that many bytes
+per input item, and alias analysis keeps both lengths stable. Wider writes and
+loop-local length mutations retain their checks.
+
+On the same complete matrix, eight calls improve by another 6,586 opcode gas,
+20,597 calls are unchanged, and none regress. The LibString harness shrinks by
+another 75 runtime bytes, from 14,276 to 14,201. Focused HTML and URI escaping
+retain zero mismatches at both optimizer-run settings. Artifacts are in
+`solar/target/safe-solady/close-gaps/full-scaled-cursor-20260922/` and
+`solar/target/safe-solady/close-gaps/scaled-cursor-1000000-20260922/`.
+
 ## Implemented surface
 
 | Library | Implemented non-private functions | Pinned function surface |
