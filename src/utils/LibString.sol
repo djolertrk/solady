@@ -47,6 +47,8 @@ library LibString {
         0x2222222222222222222222222222222222222222222222222222222222222222;
     uint256 private constant SPREAD_5C =
         0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c;
+    uint256 private constant LANES_7F =
+        0x7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f;
 
     /// @dev Set bit per byte value that `escapeHTML` rewrites: `"`, `&`, `'`,
     /// `<` and `>`. Testing membership with one shift keeps every other byte
@@ -476,18 +478,24 @@ library LibString {
     }
 
     /// @dev Returns the length of the small string `s` up to its first null byte.
-    function _smallStringLength(bytes32 s) private pure returns (uint256 n) {
-        while (n < 32 && s[n] != 0) ++n;
+    function _smallStringLength(bytes32 s) private pure returns (uint256) {
+        // `0x80` marks each zero byte: a byte carries into its own high bit
+        // exactly when it is not zero, and only the high bits are kept. The
+        // first zero byte is the highest mark.
+        uint256 x = uint256(s);
+        uint256 zeros = ~(x | ((x & LANES_7F) + LANES_7F) | LANES_7F);
+        return zeros == 0 ? 32 : Bits.leadingZeros(zeros) >> 3;
     }
 
     /// @dev Returns a string from a small bytes32 string.
     /// `s` must be null-terminated, or behavior will be undefined.
     function fromSmallString(bytes32 s) internal pure returns (string memory result) {
+        // The word is written whole, with the bytes from the null on cleared,
+        // and the string then shortened to them.
         uint256 n = _smallStringLength(s);
-        bytes memory out = new bytes(n);
-        for (uint256 i; i < n; ++i) {
-            out[i] = s[i];
-        }
+        bytes32 kept = n == 32 ? s : s & bytes32(type(uint256).max << ((32 - n) * 8));
+        bytes memory out = abi.encodePacked(kept);
+        Arrays.truncate(out, n);
         return string(out);
     }
 
@@ -502,9 +510,7 @@ library LibString {
     function toSmallString(string memory s) internal pure returns (bytes32 result) {
         bytes memory b = bytes(s);
         if (b.length > 32) revert TooBigForSmallString();
-        for (uint256 i; i < b.length; ++i) {
-            result |= bytes32(uint256(uint8(b[i])) << ((31 - i) * 8));
-        }
+        return bytes32(b);
     }
 
     /// @dev Returns the HTML escape of the byte `c`, or an empty string when it needs none.
@@ -703,10 +709,9 @@ library LibString {
         bytes memory s = bytes(a);
         uint256 n = _smallStringLength(b);
         if (s.length != n) return false;
-        for (uint256 i; i < n; ++i) {
-            if (s[i] != b[i]) return false;
-        }
-        return true;
+        // Both sides keep only their first `n` bytes.
+        uint256 shift = (32 - n) * 8;
+        return uint256(bytes32(s)) >> shift == uint256(b) >> shift;
     }
 
     /// @dev Returns 0 if `a == b`, -1 if `a < b`, +1 if `a > b`.
