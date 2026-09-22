@@ -47,8 +47,6 @@ library LibString {
         0x2222222222222222222222222222222222222222222222222222222222222222;
     uint256 private constant SPREAD_5C =
         0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c;
-    uint256 private constant LANES_7F =
-        0x7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f;
 
     /// @dev Set bit per byte value that `escapeHTML` rewrites: `"`, `&`, `'`,
     /// `<` and `>`. Testing membership with one shift keeps every other byte
@@ -346,112 +344,6 @@ library LibString {
         return true;
     }
 
-    /// @dev Returns the byte offset of the first occurrence of `needle` in
-    /// `subject` at or after `from`, or `NOT_FOUND`.
-    /// Comparing the first byte in the scan rejects nearly every offset without
-    /// entering the full comparison, so a scan costs one byte read per offset.
-    function _find(bytes memory s, bytes memory n, uint256 from) private pure returns (uint256) {
-        uint256 needleLength = n.length;
-        uint256 length = s.length;
-        if (needleLength == 0) return from > length ? length : from;
-        if (needleLength > length || from > length - needleLength) return NOT_FOUND;
-        uint256 last = length - needleLength;
-        // A subject shorter than a word has no word to read.
-        if (length < 32) return _scan(s, n, from, last);
-        return _scanWords(s, n, from, last);
-    }
-
-    /// @dev The byte-at-a-time scan, for subjects too short to read a word of.
-    /// Two characters are tested before the rest, so a subject whose first
-    /// character repeats does not pay a call at every position it occupies.
-    function _scan(bytes memory s, bytes memory n, uint256 from, uint256 last)
-        private
-        pure
-        returns (uint256)
-    {
-        bytes1 first = n[0];
-        if (n.length == 1) {
-            for (uint256 i = from; i <= last; ++i) {
-                if (s[i] == first) return i;
-            }
-            return NOT_FOUND;
-        }
-        bytes1 second = n[1];
-        for (uint256 i = from; i <= last; ++i) {
-            if (s[i] == first && s[i + 1] == second && (n.length == 2 || _matchAt(s, n, i))) {
-                return i;
-            }
-        }
-        return NOT_FOUND;
-    }
-
-    /// @dev Rejects thirty-two candidate positions at a time: the word holding
-    /// each position's first byte is compared against the needle's first byte
-    /// broadcast to a word, and a zero byte marks agreement. The second byte
-    /// is tested the same way, so only positions where both agree are worth
-    /// the full comparison.
-    function _scanWords(bytes memory s, bytes memory n, uint256 from, uint256 last)
-        private
-        pure
-        returns (uint256)
-    {
-        uint256 first = uint256(uint8(n[0])) * SPREAD_1;
-        uint256 second = n.length > 1 ? uint256(uint8(n[1])) * SPREAD_1 : 0;
-        uint256 i = from;
-        while (i <= last) {
-            // The last block is pulled back so the word stays inside the
-            // subject; the positions before `i` it then covers again are
-            // masked off, as are those past the last valid start.
-            uint256 at = i + 32 > s.length ? s.length - 32 : i;
-            uint256 word = uint256(Bytes.readBytes32(s, at));
-            uint256 found = _zeroBytes(word ^ first);
-            if (at < i) found &= type(uint256).max >> ((i - at) * 8);
-            if (last - at < 31) found &= ~(type(uint256).max >> ((last - at + 1) * 8));
-            if (n.length > 1 && found != 0) {
-                // Each position's second byte is the next byte of the word,
-                // and the last position's is the byte after the word.
-                uint256 next = at + 32 < s.length ? uint256(uint8(s[at + 32])) : 0;
-                found &= _zeroBytes(((word << 8) | next) ^ second);
-            }
-            while (found != 0) {
-                uint256 hit = at + _firstMarkedByte(found);
-                if (n.length < 3 || _matchAt(s, n, hit)) return hit;
-                found &= ~(uint256(0xff) << (248 - (hit - at) * 8));
-            }
-            i = at + 32;
-        }
-        return NOT_FOUND;
-    }
-
-    /// @dev `0x80` in every byte of `word` that is zero, and `0` elsewhere.
-    function _zeroBytes(uint256 word) private pure returns (uint256) {
-        // A byte carries into its own high bit exactly when it is not zero,
-        // and the high bits are all this reports.
-        return ~(word | ((word & LANES_7F) + LANES_7F) | LANES_7F);
-    }
-
-    /// @dev The index of the highest byte of `marks` that is not zero, which
-    /// is the earliest position it marks. `marks` must not be zero.
-    function _firstMarkedByte(uint256 marks) private pure returns (uint256 index) {
-        if (marks >> 128 == 0) {
-            index = 16;
-            marks <<= 128;
-        }
-        if (marks >> 192 == 0) {
-            index += 8;
-            marks <<= 64;
-        }
-        if (marks >> 224 == 0) {
-            index += 4;
-            marks <<= 32;
-        }
-        if (marks >> 240 == 0) {
-            index += 2;
-            marks <<= 16;
-        }
-        if (marks >> 248 == 0) index += 1;
-    }
-
     /// @dev Returns `subject` all occurrences of `needle` replaced with `replacement`.
     function replace(string memory subject, string memory needle, string memory replacement)
         internal
@@ -469,7 +361,7 @@ library LibString {
         pure
         returns (uint256)
     {
-        return _find(bytes(subject), bytes(needle), from);
+        return Strings.indexOf(subject, needle, from);
     }
 
     /// @dev Returns the byte index of the first location of `needle` in `subject`,
@@ -487,29 +379,7 @@ library LibString {
         pure
         returns (uint256)
     {
-        bytes memory s = bytes(subject);
-        bytes memory n = bytes(needle);
-        uint256 needleLength = n.length;
-        if (needleLength > s.length) return NOT_FOUND;
-        uint256 fromMax = s.length - needleLength;
-        if (from > fromMax) from = fromMax;
-        if (needleLength == 0) return from;
-        bytes1 first = n[0];
-        if (needleLength == 1) {
-            for (uint256 i = from + 1; i != 0;) {
-                --i;
-                if (s[i] == first) return i;
-            }
-            return NOT_FOUND;
-        }
-        bytes1 second = n[1];
-        for (uint256 i = from + 1; i != 0;) {
-            --i;
-            if (s[i] == first && s[i + 1] == second && (needleLength == 2 || _matchAt(s, n, i))) {
-                return i;
-            }
-        }
-        return NOT_FOUND;
+        return Strings.lastIndexOf(subject, needle, from);
     }
 
     /// @dev Returns the byte index of the first location of `needle` in `subject`,
