@@ -134,6 +134,32 @@ Artifacts are retained in
 `solar/target/safe-solady/close-gaps/string-search-core-closure-20260922/` and
 `solar/target/safe-solady/close-gaps/string-search-core-closure-1000000-20260922/`.
 
+## Minimal hexadecimal update
+
+The two minimal hexadecimal APIs now call compiler-owned `Strings` operations.
+Solar reserves one bounded memory region, writes two digits per iteration from
+right to left through a scratch lookup table, then exposes the minimal slice by
+adjusting its typed memory-object pointer. The checked Solidity fallback stays
+portable and contains no assembly or `unchecked` block.
+
+All 38 isolated calls match the oracle and beat the per-call original-Solady
+solc envelope at both optimizer settings. At 200 runs the margins are 34 gas
+for the prefixed form and 42 gas for the unprefixed form. At 1,000,000 runs the
+margins range from 23 to 165 gas. The 200-run Solar harness is 348 runtime
+bytes, 26 bytes above solc via IR; at 1,000,000 runs it remains 348 bytes and
+is smaller than both solc builds at 473 and 542 bytes.
+
+In the complete 224-API harness, both APIs win at 1,000,000 runs. At 200 runs
+the unprefixed API wins every call while the prefixed selector has a fixed
+21-gas dispatch-layout tail. The encoder kernel therefore closes its isolated
+M4 gate; the integrated dispatch tail and the 200-run size difference remain
+part of M6.
+
+Artifacts are retained in
+`solar/target/safe-solady/close-gaps/minimal-hex-core-v4-isolated-20260922/`,
+`minimal-hex-core-1000000-20260922/`, and
+`minimal-hex-core-full-1000000-20260922/`.
+
 ## Zero-byte scan integration update
 
 The compiler's word-at-a-time zero counter now recognizes the raw memory

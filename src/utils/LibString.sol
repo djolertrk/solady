@@ -194,21 +194,11 @@ library LibString {
         pure
         returns (string memory result)
     {
-        uint256 length = 1;
-        for (uint256 x = value; x > 15; x >>= 4) {
-            ++length;
-        }
-        bytes memory out = new bytes(length);
-        while (length != 0) {
-            --length;
-            out[length] = HEX[value & 15];
-            value >>= 4;
-        }
-        return string(out);
+        return Strings.toMinimalHexStringNoPrefix(value);
     }
 
     function toMinimalHexString(uint256 value) internal pure returns (string memory result) {
-        return string.concat("0x", toMinimalHexStringNoPrefix(value));
+        return Strings.toMinimalHexString(value);
     }
 
     function toHexStringNoPrefix(address value) internal pure returns (string memory result) {
