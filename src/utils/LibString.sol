@@ -890,42 +890,20 @@ library LibString {
     /// @dev Packs a single string with its length into a single word.
     /// Returns `bytes32(0)` if the length is zero or greater than 31.
     function packOne(string memory a) internal pure returns (bytes32 result) {
-        bytes memory s = bytes(a);
-        if (s.length == 0 || s.length > 31) return 0;
-        result = bytes32(s.length << 248);
-        for (uint256 i; i < s.length; ++i) {
-            result |= bytes32(uint256(uint8(s[i])) << ((30 - i) * 8));
-        }
+        return Strings.packOne(a);
     }
 
     /// @dev Unpacks a string packed using {packOne}.
     /// Returns the empty string if `packed` is `bytes32(0)`.
     /// If `packed` is not an output of {packOne}, the output behavior is undefined.
     function unpackOne(bytes32 packed) internal pure returns (string memory result) {
-        uint256 n = uint8(packed[0]);
-        if (n > 31) n = 31;
-        bytes memory out = new bytes(n);
-        for (uint256 i; i < n; ++i) {
-            out[i] = packed[i + 1];
-        }
-        return string(out);
+        return Strings.unpackOne(packed);
     }
 
     /// @dev Packs two strings with their lengths into a single word.
     /// Returns `bytes32(0)` if combined length is zero or greater than 30.
     function packTwo(string memory a, string memory b) internal pure returns (bytes32 result) {
-        bytes memory x = bytes(a);
-        bytes memory y = bytes(b);
-        uint256 total = x.length + y.length;
-        if (total == 0 || total > 30) return 0;
-        result = bytes32(x.length << 248);
-        for (uint256 i; i < x.length; ++i) {
-            result |= bytes32(uint256(uint8(x[i])) << ((30 - i) * 8));
-        }
-        result |= bytes32(y.length << ((30 - x.length) * 8));
-        for (uint256 i; i < y.length; ++i) {
-            result |= bytes32(uint256(uint8(y[i])) << ((29 - x.length - i) * 8));
-        }
+        return Strings.packTwo(a, b);
     }
 
     /// @dev Unpacks strings packed using {packTwo}.
@@ -936,18 +914,6 @@ library LibString {
         pure
         returns (string memory resultA, string memory resultB)
     {
-        uint256 n = uint8(packed[0]);
-        if (n > 30) n = 30;
-        bytes memory x = new bytes(n);
-        for (uint256 i; i < n; ++i) {
-            x[i] = packed[i + 1];
-        }
-        uint256 m = uint8(packed[n + 1]);
-        if (m > 30 - n) m = 30 - n;
-        bytes memory y = new bytes(m);
-        for (uint256 i; i < m; ++i) {
-            y[i] = packed[n + 2 + i];
-        }
-        return (string(x), string(y));
+        return Strings.unpackTwo(packed);
     }
 }

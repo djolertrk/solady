@@ -1097,3 +1097,31 @@ reproduction data are preserved.
 `narrow(int256)` and `popCount(uint256)` reported bounded compiler agreement
 locally. This compares the two compilers on the same checked source; it is
 not a proof of equivalence to the original assembly implementation.
+
+## Checkpoint — 2026-09-22: packed short strings
+
+Solar and the checked LibString now route `packOne`, `unpackOne`,
+`packTwo`, and `unpackTwo` through compiler-owned `Strings` entry points.
+The portable bodies remain ordinary checked Solidity. The intrinsic packers
+replace per-byte loops with bounded word loads, masks, and shifts; the
+unpackers use word stores and preserve the two-value return ABI.
+
+The full UI suite passes 4,044 cases. The 200-run full 224-API harness covers
+45 packing cases with zero mismatches. Against the cheaper upstream solc
+legacy/via-IR result per call:
+
+- `packOne` wins all five cases by 30–33 opcode gas.
+- `packTwo` wins all twenty cases by 331–334 opcode gas.
+- `unpackOne` is still 67 opcode gas behind in all four cases.
+- `unpackTwo` is still 114–120 opcode gas behind in all sixteen cases.
+
+Artifacts are in
+`solar/target/safe-solady/close-gaps/string-packing-core-20260922/`.
+
+**Stop point:** packing is closed. Unpacking is correct but has not met the gas
+gate. Its MIR still uses the general dynamic-bytes allocator, including
+rounding and overflow checks even though the decoded lengths are bounded by
+31 and 30. The next experiment is an exact 64-byte allocation for
+`unpackOne` and one 128-byte allocation split into two 64-byte objects for
+`unpackTwo`, followed by the full 200- and 1,000,000-run gas/size matrices.
+Do not mark the unpacking APIs complete until every case reaches parity.
