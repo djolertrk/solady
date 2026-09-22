@@ -750,9 +750,26 @@ library LibString {
         bytes memory x = bytes(a);
         bytes memory y = bytes(b);
         uint256 n = x.length < y.length ? x.length : y.length;
-        for (uint256 i; i < n; ++i) {
-            if (x[i] != y[i]) return x[i] < y[i] ? int256(-1) : int256(1);
+        // Words compare as big-endian integers, so the first differing word
+        // orders the strings. A common prefix shorter than a word is masked to
+        // its length; a longer one ends with the word ending at its end, whose
+        // bytes already compared are equal.
+        uint256 u;
+        uint256 v;
+        if (n < 32) {
+            uint256 mask = ~(type(uint256).max >> (n << 3));
+            u = uint256(bytes32(x)) & mask;
+            v = uint256(bytes32(y)) & mask;
+        } else {
+            for (uint256 i; i + 32 < n; i += 32) {
+                uint256 p = uint256(Bytes.readBytes32(x, i));
+                uint256 q = uint256(Bytes.readBytes32(y, i));
+                if (p != q) return p < q ? int256(-1) : int256(1);
+            }
+            u = uint256(Bytes.readBytes32(x, n - 32));
+            v = uint256(Bytes.readBytes32(y, n - 32));
         }
+        if (u != v) return u < v ? int256(-1) : int256(1);
         if (x.length == y.length) return 0;
         return x.length < y.length ? int256(-1) : int256(1);
     }
