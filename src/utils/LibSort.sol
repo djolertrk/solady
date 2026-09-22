@@ -9,86 +9,11 @@ import {WordArrays} from "solar:core/v1/WordArrays.sol";
 /// that do it go through the compiler-owned `Arrays.truncate`.
 library LibSort {
     function insertionSort(uint256[] memory a) internal pure {
-        uint256 order = _presorted(a);
-        if (order == 1) return;
-        if (order == 2) {
-            reverse(a);
-            return;
-        }
-        if (a.length > 16) {
-            _sort(a, 0, a.length);
-            return;
-        }
-        for (uint256 i = 1; i < a.length; ++i) {
-            uint256 value = a[i];
-            uint256 j = i;
-            while (j != 0 && a[j - 1] > value) {
-                a[j] = a[j - 1];
-                --j;
-            }
-            a[j] = value;
-        }
+        WordArrays.sort(a);
     }
 
     function sort(uint256[] memory a) internal pure {
-        uint256 order = _presorted(a);
-        if (order == 1) return;
-        if (order == 2) {
-            reverse(a);
-            return;
-        }
-        _sort(a, 0, a.length);
-    }
-
-    function _presorted(uint256[] memory a) private pure returns (uint256 order) {
-        bool ascending = true;
-        bool descending = true;
-        for (uint256 i = 1; i < a.length; ++i) {
-            uint256 previous = a[i - 1];
-            uint256 current = a[i];
-            if (previous > current) ascending = false;
-            if (previous < current) descending = false;
-            if (!ascending && !descending) return 0;
-        }
-        return ascending ? 1 : 2;
-    }
-
-    // Three-way partitioning bounds recursion on equal elements.
-    function _sort(uint256[] memory a, uint256 lo, uint256 hi) private pure {
-        while (hi - lo > 16) {
-            uint256 pivot = a[lo + (hi - lo) / 2];
-            uint256 left = lo;
-            uint256 i = lo;
-            uint256 right = hi;
-            while (i < right) {
-                if (a[i] < pivot) {
-                    (a[left], a[i]) = (a[i], a[left]);
-                    ++left;
-                    ++i;
-                } else if (a[i] > pivot) {
-                    --right;
-                    (a[i], a[right]) = (a[right], a[i]);
-                } else {
-                    ++i;
-                }
-            }
-            if (left - lo < hi - right) {
-                _sort(a, lo, left);
-                lo = right;
-            } else {
-                _sort(a, right, hi);
-                hi = left;
-            }
-        }
-        for (uint256 i = lo + 1; i < hi; ++i) {
-            uint256 value = a[i];
-            uint256 j = i;
-            while (j > lo && a[j - 1] > value) {
-                a[j] = a[j - 1];
-                --j;
-            }
-            a[j] = value;
-        }
+        WordArrays.sort(a);
     }
 
     function reverse(uint256[] memory a) internal pure {
@@ -139,86 +64,11 @@ library LibSort {
     }
 
     function insertionSort(int256[] memory a) internal pure {
-        uint256 order = _presorted(a);
-        if (order == 1) return;
-        if (order == 2) {
-            reverse(a);
-            return;
-        }
-        if (a.length > 16) {
-            _sort(a, 0, a.length);
-            return;
-        }
-        for (uint256 i = 1; i < a.length; ++i) {
-            int256 value = a[i];
-            uint256 j = i;
-            while (j != 0 && a[j - 1] > value) {
-                a[j] = a[j - 1];
-                --j;
-            }
-            a[j] = value;
-        }
+        WordArrays.sort(a);
     }
 
     function sort(int256[] memory a) internal pure {
-        uint256 order = _presorted(a);
-        if (order == 1) return;
-        if (order == 2) {
-            reverse(a);
-            return;
-        }
-        _sort(a, 0, a.length);
-    }
-
-    function _presorted(int256[] memory a) private pure returns (uint256 order) {
-        bool ascending = true;
-        bool descending = true;
-        for (uint256 i = 1; i < a.length; ++i) {
-            int256 previous = a[i - 1];
-            int256 current = a[i];
-            if (previous > current) ascending = false;
-            if (previous < current) descending = false;
-            if (!ascending && !descending) return 0;
-        }
-        return ascending ? 1 : 2;
-    }
-
-    // Three-way partitioning bounds recursion on equal elements.
-    function _sort(int256[] memory a, uint256 lo, uint256 hi) private pure {
-        while (hi - lo > 16) {
-            int256 pivot = a[lo + (hi - lo) / 2];
-            uint256 left = lo;
-            uint256 i = lo;
-            uint256 right = hi;
-            while (i < right) {
-                if (a[i] < pivot) {
-                    (a[left], a[i]) = (a[i], a[left]);
-                    ++left;
-                    ++i;
-                } else if (a[i] > pivot) {
-                    --right;
-                    (a[i], a[right]) = (a[right], a[i]);
-                } else {
-                    ++i;
-                }
-            }
-            if (left - lo < hi - right) {
-                _sort(a, lo, left);
-                lo = right;
-            } else {
-                _sort(a, right, hi);
-                hi = left;
-            }
-        }
-        for (uint256 i = lo + 1; i < hi; ++i) {
-            int256 value = a[i];
-            uint256 j = i;
-            while (j > lo && a[j - 1] > value) {
-                a[j] = a[j - 1];
-                --j;
-            }
-            a[j] = value;
-        }
+        WordArrays.sort(a);
     }
 
     function reverse(int256[] memory a) internal pure {
@@ -269,86 +119,11 @@ library LibSort {
     }
 
     function insertionSort(address[] memory a) internal pure {
-        uint256 order = _presorted(a);
-        if (order == 1) return;
-        if (order == 2) {
-            reverse(a);
-            return;
-        }
-        if (a.length > 16) {
-            _sort(a, 0, a.length);
-            return;
-        }
-        for (uint256 i = 1; i < a.length; ++i) {
-            address value = a[i];
-            uint256 j = i;
-            while (j != 0 && a[j - 1] > value) {
-                a[j] = a[j - 1];
-                --j;
-            }
-            a[j] = value;
-        }
+        WordArrays.sort(a);
     }
 
     function sort(address[] memory a) internal pure {
-        uint256 order = _presorted(a);
-        if (order == 1) return;
-        if (order == 2) {
-            reverse(a);
-            return;
-        }
-        _sort(a, 0, a.length);
-    }
-
-    function _presorted(address[] memory a) private pure returns (uint256 order) {
-        bool ascending = true;
-        bool descending = true;
-        for (uint256 i = 1; i < a.length; ++i) {
-            address previous = a[i - 1];
-            address current = a[i];
-            if (previous > current) ascending = false;
-            if (previous < current) descending = false;
-            if (!ascending && !descending) return 0;
-        }
-        return ascending ? 1 : 2;
-    }
-
-    // Three-way partitioning bounds recursion on equal elements.
-    function _sort(address[] memory a, uint256 lo, uint256 hi) private pure {
-        while (hi - lo > 16) {
-            address pivot = a[lo + (hi - lo) / 2];
-            uint256 left = lo;
-            uint256 i = lo;
-            uint256 right = hi;
-            while (i < right) {
-                if (a[i] < pivot) {
-                    (a[left], a[i]) = (a[i], a[left]);
-                    ++left;
-                    ++i;
-                } else if (a[i] > pivot) {
-                    --right;
-                    (a[i], a[right]) = (a[right], a[i]);
-                } else {
-                    ++i;
-                }
-            }
-            if (left - lo < hi - right) {
-                _sort(a, lo, left);
-                lo = right;
-            } else {
-                _sort(a, right, hi);
-                hi = left;
-            }
-        }
-        for (uint256 i = lo + 1; i < hi; ++i) {
-            address value = a[i];
-            uint256 j = i;
-            while (j > lo && a[j - 1] > value) {
-                a[j] = a[j - 1];
-                --j;
-            }
-            a[j] = value;
-        }
+        WordArrays.sort(a);
     }
 
     function reverse(address[] memory a) internal pure {
@@ -399,86 +174,11 @@ library LibSort {
     }
 
     function insertionSort(bytes32[] memory a) internal pure {
-        uint256 order = _presorted(a);
-        if (order == 1) return;
-        if (order == 2) {
-            reverse(a);
-            return;
-        }
-        if (a.length > 16) {
-            _sort(a, 0, a.length);
-            return;
-        }
-        for (uint256 i = 1; i < a.length; ++i) {
-            bytes32 value = a[i];
-            uint256 j = i;
-            while (j != 0 && a[j - 1] > value) {
-                a[j] = a[j - 1];
-                --j;
-            }
-            a[j] = value;
-        }
+        WordArrays.sort(a);
     }
 
     function sort(bytes32[] memory a) internal pure {
-        uint256 order = _presorted(a);
-        if (order == 1) return;
-        if (order == 2) {
-            reverse(a);
-            return;
-        }
-        _sort(a, 0, a.length);
-    }
-
-    function _presorted(bytes32[] memory a) private pure returns (uint256 order) {
-        bool ascending = true;
-        bool descending = true;
-        for (uint256 i = 1; i < a.length; ++i) {
-            bytes32 previous = a[i - 1];
-            bytes32 current = a[i];
-            if (previous > current) ascending = false;
-            if (previous < current) descending = false;
-            if (!ascending && !descending) return 0;
-        }
-        return ascending ? 1 : 2;
-    }
-
-    // Three-way partitioning bounds recursion on equal elements.
-    function _sort(bytes32[] memory a, uint256 lo, uint256 hi) private pure {
-        while (hi - lo > 16) {
-            bytes32 pivot = a[lo + (hi - lo) / 2];
-            uint256 left = lo;
-            uint256 i = lo;
-            uint256 right = hi;
-            while (i < right) {
-                if (a[i] < pivot) {
-                    (a[left], a[i]) = (a[i], a[left]);
-                    ++left;
-                    ++i;
-                } else if (a[i] > pivot) {
-                    --right;
-                    (a[i], a[right]) = (a[right], a[i]);
-                } else {
-                    ++i;
-                }
-            }
-            if (left - lo < hi - right) {
-                _sort(a, lo, left);
-                lo = right;
-            } else {
-                _sort(a, right, hi);
-                hi = left;
-            }
-        }
-        for (uint256 i = lo + 1; i < hi; ++i) {
-            bytes32 value = a[i];
-            uint256 j = i;
-            while (j > lo && a[j - 1] > value) {
-                a[j] = a[j - 1];
-                --j;
-            }
-            a[j] = value;
-        }
+        WordArrays.sort(a);
     }
 
     function reverse(bytes32[] memory a) internal pure {

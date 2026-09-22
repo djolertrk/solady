@@ -54,6 +54,29 @@ Artifacts are retained in
 `solar/target/safe-solady/close-gaps/duplicate-core-pointer-20260922/` and
 `solar/target/safe-solady/close-gaps/duplicate-core-pointer-1000000-20260922/`.
 
+## Shared sorting update
+
+The eight typed `sort` and `insertionSort` entry points now use
+`WordArrays.sort`. Solar shares one unsigned and one signed kernel. Each kernel
+first recognizes sorted and descending input, then uses median-of-three Hoare
+partitioning with insertion-sort leaves. It recurses into the smaller partition
+and iterates over the larger one. The insertion leaves temporarily replace the
+array length with a type-correct minimum sentinel and restore it before return;
+this removes the lower-bound branch from every element shift without changing
+the checked source contract.
+
+At 200 optimizer runs, all 368 published calls match the oracle and the safe
+Solar build records 364 wins, four ties, and no losses against the per-call
+original-Solady solc envelope. At 1,000,000 runs all 368 calls win, with the
+closest result still 23 opcode gas ahead. The isolated eight-API harness is
+2,022 runtime bytes at 200 runs, down from 4,693 before this work; the original
+Solady solc builds are 1,508 and 1,465 bytes. This closes the published sorting
+gas gate at both run settings and makes the remaining size difference explicit.
+
+Artifacts are retained in
+`solar/target/safe-solady/close-gaps/sort-core-sentinel-20260922/` and
+`solar/target/safe-solady/close-gaps/sort-core-sentinel-1000000-20260922/`.
+
 ## Zero-byte scan integration update
 
 The compiler's word-at-a-time zero counter now recognizes the raw memory
