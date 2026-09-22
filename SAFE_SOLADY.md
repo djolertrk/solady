@@ -34,6 +34,21 @@ fallback. The latest [Base64 measurements](benchmarks/checked/base64-core.md)
 show substantially lower gas for larger inputs, but short-input and bytecode
 size gaps remain. Historical measurements below predate this change.
 
+## Zero-byte scan integration update
+
+The compiler's word-at-a-time zero counter now recognizes the raw memory
+payload pointer and length left after an ordinary checked helper is inlined
+into its ABI wrapper. This closes the integration gap that kept the safe
+`LibBit` source on its byte loop even though the reduced MIR shape optimized.
+
+At 200 runs on Cancun, the isolated memory and calldata APIs pass all 44
+differential cases and beat the cheaper original-Solady solc pipeline in every
+case. `countZeroBytes(bytes)` is ahead by 126 to 1,748 opcode gas and
+`countZeroBytesCalldata(bytes)` by 97 to 1,711 gas. The two-API Solar harness
+is still larger than solc, so this closes the M3 gas gate rather than the M6
+size gate. The retained artifacts are in
+`solar/target/safe-solady/close-gaps/zero-count-20260922/`.
+
 ## Implemented surface
 
 | Library | Implemented non-private functions | Pinned function surface |
