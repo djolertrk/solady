@@ -34,6 +34,26 @@ fallback. The latest [Base64 measurements](benchmarks/checked/base64-core.md)
 show substantially lower gas for larger inputs, but short-input and bytecode
 size gaps remain. Historical measurements below predate this change.
 
+## Shared duplicate-check update
+
+The four `LibSort.hasDuplicate` overloads now call the compiler-owned
+`WordArrays` primitive. Its source fallback is ordinary checked Solidity; Solar
+lowers every supported one-word array type to one shared open-addressed table
+helper. Table entries retain input element addresses, which avoids a second
+index calculation and preserves zero as the empty-slot marker.
+
+In the isolated 200-run comparison, the Solar harness shrinks from 1,091 to 614
+runtime bytes, below both original-Solady solc builds at 759 and 873 bytes. It
+wins 101 of 184 calls against the per-call solc envelope, with zero execution
+mismatches. At 1,000,000 optimizer runs it wins 98 calls, ties one, and loses
+85; the worst residual is 3,109 gas for `address[]`, while the other three types
+are within 675 gas. This closes the duplicate-check sharing and size problem,
+but the remaining large-input gas losses keep the per-case M5 gate open.
+
+Artifacts are retained in
+`solar/target/safe-solady/close-gaps/duplicate-core-pointer-20260922/` and
+`solar/target/safe-solady/close-gaps/duplicate-core-pointer-1000000-20260922/`.
+
 ## Zero-byte scan integration update
 
 The compiler's word-at-a-time zero counter now recognizes the raw memory

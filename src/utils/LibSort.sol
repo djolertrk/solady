@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import {Arrays} from "solar:core/v1/Arrays.sol";
+import {WordArrays} from "solar:core/v1/WordArrays.sol";
 
 /// @notice Checked Solidity sorting without type punning or sentinel reads.
 /// @dev Shrinking an array in place has no Solidity spelling, so the APIs
@@ -119,23 +120,7 @@ library LibSort {
     }
 
     function hasDuplicate(uint256[] memory a) internal pure returns (bool result) {
-        if (a.length < 2) return false;
-        uint256 capacity = 1;
-        while (capacity < a.length * 2) capacity *= 2;
-        uint256[] memory seen = new uint256[](capacity);
-        uint256 mask = capacity - 1;
-        for (uint256 i = a.length; i != 0;) {
-            --i;
-            // Use the upstream LibPRNG hash with checked array indexing.
-            uint256 slot =
-                mulmod(uint256(a[i]), 0x100000000000000000000000000000051, ~uint256(0xbc)) & mask;
-            while (seen[slot] != 0) {
-                if (a[seen[slot] - 1] == a[i]) return true;
-                slot = (slot + 1) & mask;
-            }
-            seen[slot] = i + 1;
-        }
-        return false;
+        return WordArrays.hasDuplicate(a);
     }
 
     /// @dev Removes duplicate elements from a ascendingly sorted memory array.
@@ -265,23 +250,7 @@ library LibSort {
     }
 
     function hasDuplicate(int256[] memory a) internal pure returns (bool result) {
-        if (a.length < 2) return false;
-        uint256 capacity = 1;
-        while (capacity < a.length * 2) capacity *= 2;
-        uint256[] memory seen = new uint256[](capacity);
-        uint256 mask = capacity - 1;
-        for (uint256 i = a.length; i != 0;) {
-            --i;
-            // Use the upstream LibPRNG hash with checked array indexing.
-            uint256 slot =
-                mulmod(uint256(a[i]), 0x100000000000000000000000000000051, ~uint256(0xbc)) & mask;
-            while (seen[slot] != 0) {
-                if (a[seen[slot] - 1] == a[i]) return true;
-                slot = (slot + 1) & mask;
-            }
-            seen[slot] = i + 1;
-        }
-        return false;
+        return WordArrays.hasDuplicate(a);
     }
 
     /// @dev Removes duplicate elements from a ascendingly sorted memory array.
@@ -411,24 +380,7 @@ library LibSort {
     }
 
     function hasDuplicate(address[] memory a) internal pure returns (bool result) {
-        if (a.length < 2) return false;
-        uint256 capacity = 1;
-        while (capacity < a.length * 2) capacity *= 2;
-        uint256[] memory seen = new uint256[](capacity);
-        uint256 mask = capacity - 1;
-        for (uint256 i = a.length; i != 0;) {
-            --i;
-            // Use the upstream LibPRNG hash with checked array indexing.
-            uint256 slot = mulmod(
-                uint256(uint160(a[i])), 0x100000000000000000000000000000051, ~uint256(0xbc)
-            ) & mask;
-            while (seen[slot] != 0) {
-                if (a[seen[slot] - 1] == a[i]) return true;
-                slot = (slot + 1) & mask;
-            }
-            seen[slot] = i + 1;
-        }
-        return false;
+        return WordArrays.hasDuplicate(a);
     }
 
     /// @dev Removes duplicate elements from a ascendingly sorted memory array.
@@ -558,23 +510,7 @@ library LibSort {
     }
 
     function hasDuplicate(bytes32[] memory a) internal pure returns (bool result) {
-        if (a.length < 2) return false;
-        uint256 capacity = 1;
-        while (capacity < a.length * 2) capacity *= 2;
-        uint256[] memory seen = new uint256[](capacity);
-        uint256 mask = capacity - 1;
-        for (uint256 i = a.length; i != 0;) {
-            --i;
-            // Use the upstream LibPRNG hash with checked array indexing.
-            uint256 slot =
-                mulmod(uint256(a[i]), 0x100000000000000000000000000000051, ~uint256(0xbc)) & mask;
-            while (seen[slot] != 0) {
-                if (a[seen[slot] - 1] == a[i]) return true;
-                slot = (slot + 1) & mask;
-            }
-            seen[slot] = i + 1;
-        }
-        return false;
+        return WordArrays.hasDuplicate(a);
     }
 
     /// @dev Removes duplicate elements from a ascendingly sorted memory array.
