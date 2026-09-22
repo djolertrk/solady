@@ -49,6 +49,34 @@ is still larger than solc, so this closes the M3 gas gate rather than the M6
 size gate. The retained artifacts are in
 `solar/target/safe-solady/close-gaps/zero-count-20260922/`.
 
+## Bulk string construction update
+
+The checked string port now avoids redundant full passes where the final
+capacity has a cheap safe upper bound. HTML and URI escaping allocate their
+maximum output once, emit fixed-width chunks through `solar:core/Bytes`, and
+truncate the logical length. `indicesOf` similarly allocates the maximum
+non-overlapping result count and truncates it after one scan. `replace` copies
+unmatched runs and replacements in bulk, while both `slice` overloads use the
+same checked bulk-copy primitive. The URI character test is one constant
+bitset lookup, and the ASCII lookup builder validates the accumulated word
+once after the loop.
+
+On the complete 20,605-case matrix at 200 optimizer runs, these changes reduce
+candidate opcode gas from 42,843,556 to 41,332,421. LibString falls from
+7,157,296 gas (1.149x its original-Solady envelope) to 6,414,885 gas (1.030x),
+and its identical-harness runtime size falls from 15,053 to 14,276 bytes. The
+checked implementations still match the oracle in every case; the same 44
+cases remain excluded because of 132 known upstream-source mismatches.
+
+The focused 1,000,000-run rerun covers 879 cases across the eight changed
+APIs. The three `slice`/ASCII APIs reach or nearly reach parity, while
+`replace`, `split`, `indicesOf`, HTML escaping, and URI escaping retain
+per-case gaps. Those residuals are dominated by checked output writes and are
+therefore an open compiler bounds-proof/code-generation item rather than a
+completed parity claim. Artifacts are retained in
+`solar/target/safe-solady/close-gaps/full-20260922/` and
+`solar/target/safe-solady/close-gaps/strings-1000000-20260922/`.
+
 ## Implemented surface
 
 | Library | Implemented non-private functions | Pinned function surface |

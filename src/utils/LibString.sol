@@ -58,6 +58,8 @@ library LibString {
     /// byte below 0x20, plus `"` and `\`.
     uint256 private constant _JSON_ESCAPED = 0xffffffff | (1 << 0x22) | (1 << 0x5c);
 
+    /// @dev Set bit per byte accepted unchanged by `encodeURIComponent`.
+    uint256 private constant _URI_UNRESERVED = 0x47fffffe87fffffe03ff678200000000;
 
     /// @dev The top bit of every byte lane.
     uint256 private constant _HIGH_BITS =
@@ -255,10 +257,13 @@ library LibString {
 
     function to7BitASCIIAllowedLookup(string memory s) internal pure returns (uint128 result) {
         bytes memory b = bytes(s);
+        if (b.length == 0) return 0;
+        uint256 lookup;
         for (uint256 i; i < b.length; ++i) {
-            if (b[i] > 0x7f) revert StringNot7BitASCII();
-            result |= uint128(1) << uint8(b[i]);
+            lookup |= uint256(1) << uint8(b[i]);
         }
+        if (lookup > type(uint128).max) revert StringNot7BitASCII();
+        return uint128(lookup);
     }
 
     function runeCount(string memory s) internal pure returns (uint256 result) {
@@ -279,8 +284,8 @@ library LibString {
                         continue;
                     }
                 } else {
-                    high = (uint256(Bytes.readBytes32(b, n - 32)) << ((i + 32 - n) << 3))
-                        & _HIGH_BITS;
+                    high =
+                        (uint256(Bytes.readBytes32(b, n - 32)) << ((i + 32 - n) << 3)) & _HIGH_BITS;
                     if (high == 0) {
                         result += n - i;
                         break;
@@ -523,28 +528,24 @@ library LibString {
         bytes memory out = new bytes(length + count * replacementLength - count * needleLength);
         uint256 o;
         uint256 at;
+        uint256 copied;
         while (at + needleLength <= length) {
             if (
                 s[at] == first
                     && (needleLength < 2
                         || (s[at + 1] == second && (needleLength == 2 || _matchAt(s, n, at))))
             ) {
-                for (uint256 k; k < replacementLength; ++k) {
-                    out[o + k] = r[k];
-                }
+                Bytes.copyInto(out, o, s, copied, at - copied);
+                o += at - copied;
+                Bytes.copyInto(out, o, r, 0, replacementLength);
                 o += replacementLength;
                 at += needleLength;
+                copied = at;
             } else {
-                out[o] = s[at];
-                ++o;
                 ++at;
             }
         }
-        while (at < length) {
-            out[o] = s[at];
-            ++o;
-            ++at;
-        }
+        Bytes.copyInto(out, o, s, copied, length - copied);
         return string(out);
     }
 
@@ -682,9 +683,7 @@ library LibString {
         if (start > s.length) start = s.length;
         if (start >= end) return "";
         bytes memory out = new bytes(end - start);
-        for (uint256 k; k < out.length; ++k) {
-            out[k] = s[start + k];
-        }
+        Bytes.copyInto(out, 0, s, start, end - start);
         return string(out);
     }
 
@@ -715,6 +714,9 @@ library LibString {
         }
         bytes1 first = n[0];
         bytes1 second = needleLength < 2 ? first : n[1];
+        // A non-overlapping match consumes at least `needleLength` bytes.
+        // Allocate that safe upper bound, populate in one scan and shorten.
+        uint256[] memory found = new uint256[](length / needleLength);
         uint256 count;
         for (uint256 i; i + needleLength <= length;) {
             if (
@@ -722,27 +724,14 @@ library LibString {
                     && (needleLength < 2
                         || (s[i + 1] == second && (needleLength == 2 || _matchAt(s, n, i))))
             ) {
+                found[count] = i;
                 ++count;
                 i += needleLength;
             } else {
                 ++i;
             }
         }
-        uint256[] memory found = new uint256[](count);
-        uint256 k;
-        for (uint256 i; i + needleLength <= length;) {
-            if (
-                s[i] == first
-                    && (needleLength < 2
-                        || (s[i + 1] == second && (needleLength == 2 || _matchAt(s, n, i))))
-            ) {
-                found[k] = i;
-                ++k;
-                i += needleLength;
-            } else {
-                ++i;
-            }
-        }
+        Arrays.truncate(found, count);
         return found;
     }
 
@@ -820,16 +809,9 @@ library LibString {
     /// @dev Escapes the string to be used within HTML tags.
     function escapeHTML(string memory s) internal pure returns (string memory result) {
         bytes memory b = bytes(s);
-        uint256 length;
-        for (uint256 i; i < b.length; ++i) {
-            if ((_HTML_ESCAPED >> uint8(b[i])) & 1 == 0) {
-                ++length;
-                continue;
-            }
-            (, uint256 escaped) = _htmlEscape(b[i]);
-            length += escaped;
-        }
-        bytes memory out = new bytes(length);
+        // Six bytes is the longest entity. Write into that capacity once and
+        // hand the used prefix back, avoiding a complete counting pass.
+        bytes memory out = new bytes(b.length * 6);
         uint256 o;
         for (uint256 i; i < b.length; ++i) {
             if ((_HTML_ESCAPED >> uint8(b[i])) & 1 == 0) {
@@ -838,11 +820,12 @@ library LibString {
                 continue;
             }
             (bytes32 seq, uint256 escaped) = _htmlEscape(b[i]);
-            for (uint256 k; k < escaped; ++k) {
-                out[o + k] = seq[k];
-            }
+            if (escaped == 4) Bytes.writeBytes4(out, o, bytes4(seq));
+            else if (escaped == 5) Bytes.writeBytes5(out, o, bytes5(seq));
+            else Bytes.writeBytes6(out, o, bytes6(seq));
             o += escaped;
         }
+        Arrays.truncate(out, o);
         return string(out);
     }
 
@@ -970,11 +953,7 @@ library LibString {
 
     /// @dev Returns whether the byte `c` is unreserved by `encodeURIComponent`.
     function _uriUnreserved(uint8 c) private pure returns (bool) {
-        if (c >= 48 && c <= 57) return true;
-        if (c >= 65 && c <= 90) return true;
-        if (c >= 97 && c <= 122) return true;
-        return c == 45 || c == 95 || c == 46 || c == 33 || c == 126 || c == 42 || c == 39 || c == 40
-            || c == 41;
+        return ((_URI_UNRESERVED >> c) & 1) != 0;
     }
 
     /// @dev Encodes `s` so that it can be safely used in a URI,
@@ -985,23 +964,22 @@ library LibString {
     function encodeURIComponent(string memory s) internal pure returns (string memory result) {
         bytes memory b = bytes(s);
         bytes16 upperHex = "0123456789ABCDEF";
-        uint256 length;
-        for (uint256 i; i < b.length; ++i) {
-            length += _uriUnreserved(uint8(b[i])) ? 1 : 3;
-        }
-        bytes memory out = new bytes(length);
+        // Every input byte needs at most `%XX`. Write once into that capacity
+        // and truncate the logical length instead of scanning twice.
+        bytes memory out = new bytes(b.length * 3);
         uint256 o;
         for (uint256 i; i < b.length; ++i) {
             uint8 c = uint8(b[i]);
             if (_uriUnreserved(c)) {
                 out[o++] = b[i];
             } else {
-                out[o] = "%";
-                out[o + 1] = upperHex[c >> 4];
-                out[o + 2] = upperHex[c & 15];
+                uint24 encoded = (uint24(uint8(bytes1("%"))) << 16)
+                    | (uint24(uint8(upperHex[c >> 4])) << 8) | uint24(uint8(upperHex[c & 15]));
+                Bytes.writeBytes3(out, o, bytes3(encoded));
                 o += 3;
             }
         }
+        Arrays.truncate(out, o);
         return string(out);
     }
 
