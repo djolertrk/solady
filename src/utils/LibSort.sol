@@ -50,17 +50,7 @@ library LibSort {
 
     /// @dev Removes duplicate elements from a ascendingly sorted memory array.
     function uniquifySorted(uint256[] memory a) internal pure {
-        if (a.length < 2) return;
-        // Every element is compared with the last one kept, so a run of equal
-        // values collapses onto its first occurrence.
-        uint256 w = 1;
-        for (uint256 r = 1; r < a.length; ++r) {
-            if (a[r] != a[w - 1]) {
-                a[w] = a[r];
-                ++w;
-            }
-        }
-        Arrays.truncate(a, w);
+        WordArrays.uniquifySorted(a);
     }
 
     function insertionSort(int256[] memory a) internal pure {
@@ -105,17 +95,7 @@ library LibSort {
 
     /// @dev Removes duplicate elements from a ascendingly sorted memory array.
     function uniquifySorted(int256[] memory a) internal pure {
-        if (a.length < 2) return;
-        // Every element is compared with the last one kept, so a run of equal
-        // values collapses onto its first occurrence.
-        uint256 w = 1;
-        for (uint256 r = 1; r < a.length; ++r) {
-            if (a[r] != a[w - 1]) {
-                a[w] = a[r];
-                ++w;
-            }
-        }
-        Arrays.truncate(a, w);
+        WordArrays.uniquifySorted(a);
     }
 
     function insertionSort(address[] memory a) internal pure {
@@ -160,17 +140,7 @@ library LibSort {
 
     /// @dev Removes duplicate elements from a ascendingly sorted memory array.
     function uniquifySorted(address[] memory a) internal pure {
-        if (a.length < 2) return;
-        // Every element is compared with the last one kept, so a run of equal
-        // values collapses onto its first occurrence.
-        uint256 w = 1;
-        for (uint256 r = 1; r < a.length; ++r) {
-            if (a[r] != a[w - 1]) {
-                a[w] = a[r];
-                ++w;
-            }
-        }
-        Arrays.truncate(a, w);
+        WordArrays.uniquifySorted(a);
     }
 
     function insertionSort(bytes32[] memory a) internal pure {
@@ -215,17 +185,7 @@ library LibSort {
 
     /// @dev Removes duplicate elements from a ascendingly sorted memory array.
     function uniquifySorted(bytes32[] memory a) internal pure {
-        if (a.length < 2) return;
-        // Every element is compared with the last one kept, so a run of equal
-        // values collapses onto its first occurrence.
-        uint256 w = 1;
-        for (uint256 r = 1; r < a.length; ++r) {
-            if (a[r] != a[w - 1]) {
-                a[w] = a[r];
-                ++w;
-            }
-        }
-        Arrays.truncate(a, w);
+        WordArrays.uniquifySorted(a);
     }
 
     /// @dev Returns whether `a` contains `needle`, and the index of `needle`.

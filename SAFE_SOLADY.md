@@ -77,6 +77,24 @@ Artifacts are retained in
 `solar/target/safe-solady/close-gaps/sort-core-sentinel-20260922/` and
 `solar/target/safe-solady/close-gaps/sort-core-sentinel-1000000-20260922/`.
 
+## Shared sorted-array compaction update
+
+The four `LibSort.uniquifySorted` overloads now call one compiler-owned
+`WordArrays` operation. Solar lowers them to a branchless pointer loop that
+stores the current canonical word, advances the output pointer only when it
+differs from the preceding word, and truncates the array once. The portable
+fallback remains ordinary checked Solidity.
+
+All 184 calls match the oracle and beat the per-call original-Solady solc
+envelope at both optimizer settings. At 200 runs the closest win is 126 opcode
+gas and the largest is 11,665 gas. At 1,000,000 runs the margins are 204 to
+10,743 gas. In the complete harness this also reduces Solar runtime size from
+9,326 to 9,174 bytes at 200 runs.
+
+Artifacts are retained in
+`solar/target/safe-solady/close-gaps/uniquify-core-20260922/` and
+`uniquify-core-1000000-20260922/`.
+
 ## Shared string replacement update
 
 `LibString.replace` now calls the compiler-owned `Strings.replace` primitive.
