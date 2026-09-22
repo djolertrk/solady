@@ -1,4 +1,55 @@
-# Base64 core builtin measurement — 22 September 2026
+# Base64 core builtin measurements — 22 September 2026
+
+## Follow-up: shared, unified word kernels
+
+Compiler commit `e249725a6` shares the encoder across overloads, uses the same
+word kernel for full groups and tails, and isolates the decoder kernel from
+loop state to reduce spills. It reserves owned output capacity for final word
+stores; strict validation and the checked portable fallback are unchanged.
+
+Same Cancun / solc 0.8.37 / 200 runs / six-leg comparison as below:
+
+| API | Previous builtin gas | Latest gas | Solc envelope | Latest wins / losses |
+|---|---:|---:|---:|---:|
+| `encode(bytes)` | 46,063 | 47,267 | 68,788 | 12 / 4 |
+| `encode(bytes,bool)` | 98,766 | 96,710 | 141,116 | 24 / 8 |
+| `encode(bytes,bool,bool)` | 203,790 | 191,428 | 283,220 | 48 / 16 |
+| `decode(string)` | 356,917 | 278,786 | 312,712 | 35 / 30 |
+
+Decoding now beats the aggregate solc envelope by **10.8%**, with 35 of 65
+cases winning. Encoding totals are **31.3–32.4%** lower than the envelope.
+The 177 cases have zero disagreements across all six legs. This does not
+mean every input wins: the worst decoder deficit is still 854 opcode gas.
+
+Runtime size falls **55.8%**, from 6,247 to **2,764 bytes**, and is below the
+pre-builtin 3,783-byte safe harness. **It still exceeds upstream solc
+(1,300 legacy / 1,673 via IR). The requested solc-size target remains open.**
+
+The composed harness shrinks from 12,375 to 11,189 bytes. `tokenURI` uses
+79,952 total opcode gas (previously 75,587; solc envelope 114,061), and
+`decodeAndScan` uses 107,764 (previously 114,258; solc 153,635). Thus sharing
+has a measured gas tradeoff in tokenURI despite the overall size reduction.
+All 18 composed calls agree; the untouched `mergeLists` still trails solc.
+
+Ablations rejected: the compact scalar decoder reduced the harness to
+2,192 bytes but lost badly on gas; splitting the encoder word kernel into
+a separate call increased both gas and size. These alternatives are not
+selected in the shipped implementation.
+
+Validation: 4,022 UI tests and 359 codegen/sema unit tests pass. Added Paris
+coverage and a check that malformed input still reverts when its decoded
+result is discarded. Final-build bytecode matches the benchmark artifact.
+The 20,605-case matrix retains the same 132 upstream disagreements outside
+Base64, with none in checked implementations. The 33-entry ordinary corpus
+preserves bytecode, gas and runtime results, including the known Uniswap
+parse failure. Clippy passes with the previously documented unrelated
+`too_many_arguments` lint allowed; formatting and whitespace checks pass.
+
+Local evidence: `../solar/target/core-base64/v10/`; earlier candidates are
+retained in `v5` through `v11`. The previous measurements below are historical.
+
+## Initial builtin
+
 
 The checked Solady wrapper now calls the compiler-owned
 `solar:core/v1/codecs/Base64.sol` API. Solar lowers these calls to a codec;
