@@ -77,6 +77,25 @@ Artifacts are retained in
 `solar/target/safe-solady/close-gaps/sort-core-sentinel-20260922/` and
 `solar/target/safe-solady/close-gaps/sort-core-sentinel-1000000-20260922/`.
 
+## Shared string replacement update
+
+`LibString.replace` now calls the compiler-owned `Strings.replace` primitive.
+Solar lowers it to one shared MIR kernel that scans once, compares short
+needles with a masked word, confirms long matches with a hash, and copies
+unmatched runs in bulk. It streams output at the free-memory pointer and
+reserves the exact object after the scan, avoiding both a counting pass and
+the later memory cost of a conservative allocation.
+
+All 216 published calls match the oracle and beat the per-call original-Solady
+solc envelope at both optimizer settings. At 200 runs the margin ranges from
+45 to 2,809 opcode gas; at 1,000,000 runs it ranges from 60 to 2,824 gas. In
+the complete 224-API harness, this change also reduces the Solar LibString
+runtime from 14,197 to 13,521 bytes at 200 runs.
+
+Artifacts are retained in
+`solar/target/safe-solady/close-gaps/replace-core-stream-20260922/` and
+`solar/target/safe-solady/close-gaps/replace-core-stream-1000000-20260922/`.
+
 ## Zero-byte scan integration update
 
 The compiler's word-at-a-time zero counter now recognizes the raw memory

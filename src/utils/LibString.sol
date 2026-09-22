@@ -6,6 +6,7 @@ import {Bits} from "solar:core/v1/Bits.sol";
 import {Bytes} from "solar:core/v1/Bytes.sol";
 import {Hash} from "solar:core/v1/Hash.sol";
 import {Math} from "solar:core/v1/Math.sol";
+import {Strings} from "solar:core/v1/Strings.sol";
 
 /// @notice Checked Solidity replacements for the value-oriented LibString APIs.
 /// @dev Storage reinterpretation and direct-return APIs are deliberately absent.
@@ -502,70 +503,7 @@ library LibString {
         pure
         returns (string memory)
     {
-        bytes memory s = bytes(subject);
-        bytes memory n = bytes(needle);
-        bytes memory r = bytes(replacement);
-        uint256 needleLength = n.length;
-        uint256 length = s.length;
-        if (needleLength > length) return subject;
-        if (needleLength == 0) return _replaceEmpty(s, r);
-        bytes1 first = n[0];
-        bytes1 second = needleLength < 2 ? first : n[1];
-        uint256 count;
-        for (uint256 i; i + needleLength <= length;) {
-            if (
-                s[i] == first
-                    && (needleLength < 2
-                        || (s[i + 1] == second && (needleLength == 2 || _matchAt(s, n, i))))
-            ) {
-                ++count;
-                i += needleLength;
-            } else {
-                ++i;
-            }
-        }
-        uint256 replacementLength = r.length;
-        bytes memory out = new bytes(length + count * replacementLength - count * needleLength);
-        uint256 o;
-        uint256 at;
-        uint256 copied;
-        while (at + needleLength <= length) {
-            if (
-                s[at] == first
-                    && (needleLength < 2
-                        || (s[at + 1] == second && (needleLength == 2 || _matchAt(s, n, at))))
-            ) {
-                Bytes.copyInto(out, o, s, copied, at - copied);
-                o += at - copied;
-                Bytes.copyInto(out, o, r, 0, replacementLength);
-                o += replacementLength;
-                at += needleLength;
-                copied = at;
-            } else {
-                ++at;
-            }
-        }
-        Bytes.copyInto(out, o, s, copied, length - copied);
-        return string(out);
-    }
-
-    /// @dev `replace` with an empty needle: `replacement` is inserted before
-    /// every byte of `s` and once more at the end.
-    function _replaceEmpty(bytes memory s, bytes memory r) private pure returns (string memory) {
-        uint256 length = s.length;
-        bytes memory out = new bytes(length + (length + 1) * r.length);
-        uint256 o;
-        for (uint256 i; i <= length; ++i) {
-            for (uint256 k; k < r.length; ++k) {
-                out[o + k] = r[k];
-            }
-            o += r.length;
-            if (i < length) {
-                out[o] = s[i];
-                ++o;
-            }
-        }
-        return string(out);
+        return Strings.replace(subject, needle, replacement);
     }
 
     /// @dev Returns the byte index of the first location of `needle` in `subject`,
