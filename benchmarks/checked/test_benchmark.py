@@ -132,6 +132,43 @@ class HarnessSelectionTests(unittest.TestCase):
             benchmark.select_harness_apis(self.apis, ["Lib.missing()"], isolate=True)
 
 
+class DispatchGasTests(unittest.TestCase):
+    SELECTOR = bytes.fromhex("12345678")
+
+    def trace(self, steps):
+        # steps: (pc, op, gas); code holds the selector after PUSH4s at pc 10.
+        return [{"pc": pc, "op": op, "gasCost": gas} for pc, op, gas in steps]
+
+    def code(self):
+        code = bytearray(64)
+        code[11:15] = self.SELECTOR
+        code[31:35] = bytes.fromhex("87654321")
+        return bytes(code)
+
+    def test_taken_equality_jump_ends_the_dispatch(self):
+        logs = self.trace([
+            (30, "PUSH4", 3), (35, "EQ", 3), (36, "PUSH2", 3), (39, "JUMPI", 10),
+            (40, "PUSH4", 3), (10, "PUSH4", 3), (15, "EQ", 3), (16, "PUSH2", 3),
+            (19, "JUMPI", 10), (50, "JUMPDEST", 1), (51, "STOP", 0),
+        ])
+        # The first comparison is a different selector and falls through.
+        self.assertEqual(benchmark.dispatch_gas(logs, self.code(), self.SELECTOR), 41)
+
+    def test_mismatch_branch_falls_through_on_the_selector(self):
+        logs = self.trace([
+            (10, "PUSH4", 3), (15, "XOR", 3), (16, "PUSH2", 3), (19, "JUMPI", 10),
+            (20, "JUMPDEST", 1),
+        ])
+        self.assertEqual(benchmark.dispatch_gas(logs, self.code(), self.SELECTOR), 19)
+
+    def test_split_on_the_selector_is_not_the_match(self):
+        logs = self.trace([
+            (10, "PUSH4", 3), (15, "GT", 3), (16, "PUSH2", 3), (19, "JUMPI", 10),
+            (50, "JUMPDEST", 1),
+        ])
+        self.assertIsNone(benchmark.dispatch_gas(logs, self.code(), self.SELECTOR))
+
+
 class WrapperNameTests(unittest.TestCase):
     def test_name_depends_only_on_the_api(self):
         name = benchmark.wrapper_name("LibSort", "sort(uint256[])")

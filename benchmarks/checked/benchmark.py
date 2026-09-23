@@ -166,6 +166,43 @@ def closure(sources, roots):
     return result
 
 
+def dispatch_gas(logs, code: bytes, selector: bytes) -> int | None:
+    """Opcode gas spent before the selector dispatch enters the wrapper.
+
+    The dispatch ends at the jump decided by comparing the call's selector
+    with its own `PUSH4` immediate: taken after `EQ`, or not taken after
+    `SUB`/`XOR`, with every `ISZERO` in between flipping the sense. A jump is
+    taken when the next step does not follow it. Other shapes return None.
+    Each compiler's shared prologue, such as free-memory setup or call-value
+    checks, counts on whichever side of the dispatch it places it.
+    """
+    spent = 0
+    state = None  # "armed", or whether a taken jump means the selector matched
+    for index, step in enumerate(logs):
+        spent += int(step["gasCost"])
+        op = step["op"]
+        if op == "PUSH4":
+            pc = step["pc"]
+            state = "armed" if code[pc + 1 : pc + 5] == selector else None
+            continue
+        if state is None or op.startswith(("DUP", "SWAP")):
+            continue
+        if state == "armed":
+            state = True if op == "EQ" else False if op in ("SUB", "XOR") else None
+            continue
+        if op == "ISZERO":
+            state = not state
+            continue
+        if op.startswith("PUSH"):
+            continue
+        if op == "JUMPI":
+            taken = index + 1 < len(logs) and logs[index + 1]["pc"] != step["pc"] + 1
+            if taken == state:
+                return spent
+        state = None
+    return None
+
+
 def wrapper_name(library: str, signature: str) -> str:
     """Names an API's harness wrapper after the API alone.
 
@@ -987,8 +1024,10 @@ def run(args):
     failures = []
     try:
         addresses = {}
+        runtime_code = {}
         for label, contracts in binaries.items():
             addresses[label] = {}
+            runtime_code[label] = {}
             for name, artifact in contracts.items():
                 bytecode = artifact["evm"]["bytecode"]["object"]
                 tx = rpc(
@@ -1010,6 +1049,7 @@ def run(args):
                 runtime = rpc(
                     url, "eth_getCode", [receipt["contractAddress"], "latest"]
                 )
+                runtime_code[label][name] = bytes.fromhex(runtime.removeprefix("0x"))
                 artifacts[label]["contracts"][name] = {
                     "creation_bytes": len(bytecode) // 2,
                     "runtime_bytes": (len(runtime) - 2) // 2,
@@ -1070,6 +1110,11 @@ def run(args):
                             and actual.lower() == expected_bytes.hex()
                         ),
                         "opcode_gas": sum(int(x["gasCost"]) for x in logs),
+                        "dispatch_gas": dispatch_gas(
+                            logs,
+                            runtime_code[label][row["library"] + "Harness"],
+                            calldata[:4],
+                        ),
                         "trace_gas": trace.get("gas"),
                         "failed": failed,
                         "return_data": "0x" + actual,
@@ -1147,6 +1192,18 @@ def comparison_delta(case):
     return case["variants"]["solar-safe"]["opcode_gas"] - reference
 
 
+def body_delta(case):
+    """`comparison_delta` over the gas spent after each selector dispatch."""
+    if comparison_delta(case) is None:
+        return None
+    variants = case["variants"]
+    labels = ["solar-safe", "solc-upstream-ir", "solc-upstream-legacy"]
+    if any(variants[x].get("dispatch_gas") is None for x in labels):
+        return None
+    body = {x: variants[x]["opcode_gas"] - variants[x]["dispatch_gas"] for x in labels}
+    return body["solar-safe"] - min(body["solc-upstream-ir"], body["solc-upstream-legacy"])
+
+
 def write_report(report, path):
     comparable = [r for r in report["cases"] if comparison_delta(r) is not None]
     lines = [
@@ -1184,6 +1241,29 @@ def write_report(report, path):
         deltas = [d for r in cases if (d := comparison_delta(r)) is not None]
         lines.append(
             f"| {library} | {len(deltas)} / {len(cases) - len(deltas)} | "
+            f"{sum(d < 0 for d in deltas)} / {deltas.count(0)} / {sum(d > 0 for d in deltas)} | "
+            + (f"{max(deltas):+d}" if deltas else "n/a")
+            + " |"
+        )
+    lines += [
+        "",
+        (
+            "The same comparison after each selector dispatch enters its wrapper, which "
+            "separates library code from the selector's place in each compiler's dispatch. "
+            "Shared prologues count on whichever side each compiler places them: solc sets the "
+            "free-memory pointer before dispatching, so the first memory expansion counts against "
+            "its dispatch, while solar checks the call value there. Cases whose dispatch shape is "
+            "not recognized are left out."
+        ),
+        "",
+        "| Library | Measured cases | Safe Solar wins / ties / losses after dispatch | Worst gas delta |",
+        "|---|---:|---:|---:|",
+    ]
+    for library in sorted({r["library"] for r in report["cases"]}):
+        cases = [r for r in report["cases"] if r["library"] == library]
+        deltas = [d for r in cases if (d := body_delta(r)) is not None]
+        lines.append(
+            f"| {library} | {len(deltas)} | "
             f"{sum(d < 0 for d in deltas)} / {deltas.count(0)} / {sum(d > 0 for d in deltas)} | "
             + (f"{max(deltas):+d}" if deltas else "n/a")
             + " |"
