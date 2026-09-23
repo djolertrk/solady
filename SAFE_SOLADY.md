@@ -27,6 +27,67 @@ LibSort and LibString have reduced APIs, so the whole upstream suite and
 consumers of missing functions are not expected to compile on this branch.
 Use the scoped runner commands below for the published subset.
 
+## Reverts, dispatch tables and core set operations, 2026-09-24
+
+Port commit: `82cbd9b` (`LibSort`'s `union`, `intersection` and
+`difference` call the compiler-owned `WordArrays` versions, whose checked
+bodies are the loops they replace).
+
+Solar commits (unpushed): `c68609001` stages a custom error's payload in
+scratch memory like a panic (`mstore(0, selector)`, `revert(28, 4 + 32n)`) for
+up to three word arguments, and encodes longer ones and error strings at the
+free-memory pointer without advancing it; `3f5d5694f` bounds decoded array
+lengths by `2^64 - 1`, as solc does, instead of checking the byte size and the
+header size for wrap; `7c47307b0` moves a bucket's first case comparison into
+its dispatch-table entry and pads every entry to one stride when the expected
+calls repay the padding; `42465ddcf` admits bucket tables up to 128 cases;
+`9092bb771` returns a fresh array or string by writing the ABI offset in the
+word below it instead of moving it up a word; `3e1f9415a` lowers the
+`WordArrays` set operations to a branch-free merge with `mcopy` tails, leaving
+out the bodies' index and truncation checks, which cannot fail.
+
+| Harness | Runs | Before (`ec86751ca`, port `bed4f3b`) | After (`3e1f9415a`, port `82cbd9b`) |
+|---|---:|---:|---:|
+| Combined | 200 | 0.5293x, 139 losses | 0.4946x, 21 losses |
+| Combined | 1,000,000 | 0.5054x, 803 losses | 0.4641x, 4 losses |
+| Isolated | 200 | 0.5350x, 854 losses | 0.4971x, 386 losses |
+| Isolated | 1,000,000 | 0.5449x, 757 losses | 0.5020x, 352 losses |
+
+Per change, in the combined harnesses:
+
+- The revert payload takes a reverting `toUint8` call from 96 gas after
+  dispatch to 44, and a passing one from 74 to 65, since its entry no longer
+  stores the free-memory pointer: 129 of SafeCastLib's 660 calls lost at 200
+  runs, 12 now, and none after dispatch.
+- The table entries take `popCount`'s dispatch from 94 gas to 80 at
+  1,000,000 runs, from 3 gas above the reference to 11 below (776 calls). A
+  bucket's first case skips the entry's jump; the padding of empty buckets is
+  priced against the saved gas over the expected calls, so 200-run builds
+  keep plain entries.
+- The bucket cap lets SafeCastLib's 95 selectors use a modulo table at
+  1,000,000 runs: 0.589x to 0.380x, no losses (18 before).
+- LibSort goes from 0.5044x to 0.4638x at 200 runs, most of it from the set
+  operations (0.4997x with every other change in place).
+
+Outside Solady, the runtime corpus against `ec86751ca`: runtime gas
+-0.01%, runtime bytes -1.25%, creation bytes -1.05%, deployment gas -0.95%,
+no case worse; the byte savings are mostly custom-error reverts.
+
+What still loses in the combined harnesses: SafeCastLib selectors whose
+position in the 200-run binary search costs more than solc's (12 calls, up
+to 10 gas), one-byte fixed-width `toHexString` (5 calls: the checked sizing
+of a fixed-width string costs more than two digits), and
+`normalizeSmallString` below five bytes (4 calls, the constant-time design).
+
+In the isolated harnesses, LibSort goes from 764 losing calls to 302 at 200
+runs. What remains is fixed cost on inputs of at most one element per side:
+the set operations on two empty word arrays (15 calls each, 28 to 39 gas at
+200 runs and 1 gas at 1,000,000), the address set operations, whose decoding
+validates every element (up to 137 gas), empty `copy` and `reverse`, and small
+address inputs of `hasDuplicate` and `isSorted`. Decoding an array still
+builds `2^64 - 1` three times; comparing through a shift would drop it.
+LibString's isolated losses are those listed in the previous section.
+
 ## String scans, stepped cursors and deterministic codegen, 2026-09-23
 
 Port commits: `f39884e` (`repeat` allocates its result once and doubles the
