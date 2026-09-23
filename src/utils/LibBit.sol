@@ -37,12 +37,11 @@ library LibBit {
         return Bits.popCount(x);
     }
 
-    // Every input byte is at most eight. Pairing the halves bounds the
-    // product below 2**256; the extracted byte is the sum modulo 256.
+    // Every input byte is zero or one, so the sum is at most 32 and fits the
+    // extracted byte. Pairing the halves bounds the product below 2**256.
     function _sumBytes(uint256 x) private pure returns (uint256) {
         uint256 paired = (x & type(uint128).max) + (x >> 128);
-        uint256 c = uint8((paired * (uint256(type(uint128).max) / 255)) >> 120);
-        return c == 0 && x != 0 ? 256 : c;
+        return uint8((paired * (uint256(type(uint128).max) / 255)) >> 120);
     }
 
     function countZeroBytes(uint256 x) internal pure returns (uint256 c) {
