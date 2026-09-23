@@ -2,7 +2,6 @@
 pragma solidity ^0.8.20;
 
 import {Arrays} from "solar:core/v1/Arrays.sol";
-import {Bits} from "solar:core/v1/Bits.sol";
 import {Bytes} from "solar:core/v1/Bytes.sol";
 import {Hash} from "solar:core/v1/Hash.sol";
 import {Hex} from "solar:core/v1/codecs/Hex.sol";
@@ -415,12 +414,30 @@ library LibString {
 
     /// @dev Returns the length of the small string `s` up to its first null byte.
     function _smallStringLength(bytes32 s) private pure returns (uint256) {
-        // `0x80` marks each zero byte: a byte carries into its own high bit
-        // exactly when it is not zero, and only the high bits are kept. The
-        // first zero byte is the highest mark.
+        // One mark for each byte from the first zero byte on; the bytes before
+        // it are the string. The marks are one per byte, so the byte sums the
+        // folds build stay below 33 and never carry into their neighbours.
+        uint256 c = _nullTail(s) >> 7;
+        c += c >> 8;
+        c += c >> 16;
+        c += c >> 32;
+        c += c >> 64;
+        c += c >> 128;
+        return 32 - (c & 0xff);
+    }
+
+    /// @dev `0x80` in every byte of `s` from its first zero byte on. A byte
+    /// carries into its own high bit exactly when it is not zero, so the kept
+    /// high bits mark the zero bytes; each mark then spreads to every lower
+    /// byte, which the first zero byte's mark reaches first.
+    function _nullTail(bytes32 s) private pure returns (uint256 marks) {
         uint256 x = uint256(s);
-        uint256 zeros = ~(x | ((x & LANES_7F) + LANES_7F) | LANES_7F);
-        return zeros == 0 ? 32 : Bits.leadingZeros(zeros) >> 3;
+        marks = ~(x | ((x & LANES_7F) + LANES_7F) | LANES_7F);
+        marks |= marks >> 8;
+        marks |= marks >> 16;
+        marks |= marks >> 32;
+        marks |= marks >> 64;
+        marks |= marks >> 128;
     }
 
     /// @dev Returns a string from a small bytes32 string.
@@ -437,9 +454,13 @@ library LibString {
 
     /// @dev Returns the small string, with all bytes after the first null byte zeroized.
     function normalizeSmallString(bytes32 s) internal pure returns (bytes32 result) {
-        uint256 n = _smallStringLength(s);
-        if (n == 32) return s;
-        return s & bytes32(type(uint256).max << ((32 - n) * 8));
+        // Each byte from the first zero byte on is cleared: its mark fills the
+        // byte downwards without leaving it.
+        uint256 tail = _nullTail(s);
+        tail |= tail >> 1;
+        tail |= tail >> 2;
+        tail |= tail >> 4;
+        return s & bytes32(~tail);
     }
 
     /// @dev Returns the string as a normalized null-terminated small string.
