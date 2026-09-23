@@ -377,7 +377,12 @@ library LibString {
     /// @dev Returns a copy of `subject` sliced from `start` to the end of the string.
     /// `start` is a byte offset.
     function slice(string memory subject, uint256 start) internal pure returns (string memory) {
-        return slice(subject, start, NOT_FOUND);
+        // The end is the length itself, so only the start needs a bound.
+        bytes memory s = bytes(subject);
+        if (start >= s.length) return "";
+        bytes memory out = new bytes(s.length - start);
+        Bytes.copyInto(out, 0, s, start, s.length - start);
+        return string(out);
     }
 
     /// @dev Returns all the indices of `needle` in `subject`.
