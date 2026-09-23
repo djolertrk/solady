@@ -269,18 +269,6 @@ library LibString {
         return chars - (marked >> 2);
     }
 
-    /// @dev Returns whether `needle` occurs in `subject` at byte offset `i`.
-    function _matchAt(bytes memory subject, bytes memory needle, uint256 i)
-        private
-        pure
-        returns (bool)
-    {
-        for (uint256 k; k < needle.length; ++k) {
-            if (subject[i + k] != needle[k]) return false;
-        }
-        return true;
-    }
-
     /// @dev Returns `subject` all occurrences of `needle` replaced with `replacement`.
     function replace(string memory subject, string memory needle, string memory replacement)
         internal
@@ -339,14 +327,14 @@ library LibString {
     function startsWith(string memory subject, string memory needle) internal pure returns (bool) {
         bytes memory s = bytes(subject);
         bytes memory n = bytes(needle);
-        return n.length <= s.length && _matchAt(s, n, 0);
+        return n.length <= s.length && Bytes.equalsAt(s, 0, n);
     }
 
     /// @dev Returns whether `subject` ends with `needle`.
     function endsWith(string memory subject, string memory needle) internal pure returns (bool) {
         bytes memory s = bytes(subject);
         bytes memory n = bytes(needle);
-        return n.length <= s.length && _matchAt(s, n, s.length - n.length);
+        return n.length <= s.length && Bytes.equalsAt(s, s.length - n.length, n);
     }
 
     /// @dev Returns `subject` repeated `times`.
