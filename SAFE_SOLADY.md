@@ -27,6 +27,50 @@ LibSort and LibString have reduced APIs, so the whole upstream suite and
 consumers of missing functions are not expected to compile on this branch.
 Use the scoped runner commands below for the published subset.
 
+## Combined matrix and code size, 2026-09-23
+
+With Solar `fd44d3aae`, the combined five-harness matrix (21,001 calls, the
+132 original-source mismatches excluded as before) stands at:
+
+| Runs | Ratio to per-call solc envelope | Wins | Losses | LibSort losses |
+|---|---:|---:|---:|---:|
+| 200 | 0.535x | 20,789 | 168 | 1 |
+| 1,000,000 | 0.511x | 20,140 | 817 | 0 |
+
+At 1,000,000 runs, 776 of the 817 are `popCount`, whose body is 9 gas
+cheaper than via-IR's but whose selector costs 12 gas more: the hashed
+dispatch jumps through a table entry that jumps again to the bucket's
+comparison. At 200 runs, 129 of the 168 are SafeCastLib calls under the
+size-weighted dispatch. The rest are `toNibbles`, `startsWith`/`endsWith`
+on long matches, `normalizeSmallString` (a software leading-zero count on
+Cancun) and scattered single cases. Each API alone in its harness loses
+more, because via-IR inlines a single entry point completely; the set
+operations lose on inputs of up to two elements.
+
+Runtime bytes of each combined harness, with deployment gas:
+
+| Harness | Solar 200 | solc legacy | solc via-IR | Solar 1M | solc legacy | solc via-IR |
+|---|---:|---:|---:|---:|---:|---:|
+| Base64 | 5,440 | 1,300 | 1,673 | 6,808 | 1,443 | 2,063 |
+| LibBit | 4,766 | 3,334 | 3,057 | 5,479 | 4,335 | 4,558 |
+| LibSort | 9,197 | 5,791 | 6,374 | 9,818 | 6,098 | 8,203 |
+| LibString | 15,584 | 7,531 | 8,176 | 18,635 | 8,447 | 10,979 |
+| SafeCastLib | 4,212 | 7,352 | 6,597 | 5,572 | 8,943 | 10,755 |
+
+The size gap is the price of the gas result, not of the checked source: solc
+compiling the same checked port produces 10,526 (via-IR) and 18,124 (legacy)
+bytes for LibSort, 6,624 and 7,547 for Base64, and about Solar's size for
+LibString. At 200 runs the LibSort harness costs 736,495 more deployment gas
+than original Solady under solc legacy and saves 28.2 million gas over the
+matrix's 10,628 calls, about 2,650 a call, so it pays back after roughly 280
+calls of this mix; Base64 costs 888,523 more and saves about 1,643 a call,
+paying back after roughly 540. Every harness stays far below the EIP-170
+limit. These are the documented trade-offs the size milestone asks for; the
+sizes are not closed.
+
+Artifacts: `solar/target/safe-solady/close-gaps/combined-v105-200-20260923/`
+and `combined-v105-1000000-20260923/`.
+
 ## Search and length-bound update, 2026-09-23
 
 `searchSorted` now tests `l <= h` before each probe and returns from the loop
