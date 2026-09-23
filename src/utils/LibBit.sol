@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import {Arrays} from "solar:core/v1/Arrays.sol";
 import {Bits} from "solar:core/v1/Bits.sol";
 import {Bytes} from "solar:core/v1/Bytes.sol";
 
@@ -107,6 +108,13 @@ library LibBit {
 
     function toNibbles(bytes memory s) internal pure returns (bytes memory result) {
         uint256 n = s.length;
+        // Below one block the input fits one word, zero-padded by the
+        // conversion: its nibbles fill one word, cut down to the output.
+        if (n < 16) {
+            result = abi.encodePacked(bytes32(_spread(uint256(bytes32(s)) >> 128)));
+            Arrays.truncate(result, n * 2);
+            return result;
+        }
         result = new bytes(n * 2);
         uint256 i;
         uint256 o;
@@ -126,39 +134,9 @@ library LibBit {
         if (i == n) return result;
         // What is left is shorter than a block. One more block pulled back to
         // end where the input ends covers it, rewriting the nibbles it shares
-        // with the block before; below sixteen bytes the same is done with
-        // the widest block that fits.
-        if (n >= 16) {
-            uint256 tail = uint128(Bytes.readBytes16(s, n - 16));
-            Bytes.writeBytes32(result, (n - 16) * 2, bytes32(_spread(tail)));
-        } else if (n >= 8) {
-            _nibbles8(s, 0, result, 0);
-            if (n != 8) _nibbles8(s, n - 8, result, (n - 8) * 2);
-        } else if (n >= 4) {
-            _nibbles4(s, 0, result, 0);
-            if (n != 4) _nibbles4(s, n - 4, result, (n - 4) * 2);
-        } else if (n >= 2) {
-            _nibbles2(s, 0, result, 0);
-            if (n != 2) _nibbles2(s, 1, result, 2);
-        } else {
-            uint256 one = uint8(Bytes.readBytes1(s, 0));
-            Bytes.writeBytes2(result, 0, bytes2(uint16(_spread(one))));
-        }
-    }
-
-    function _nibbles8(bytes memory s, uint256 i, bytes memory result, uint256 o) private pure {
-        uint256 x = uint64(Bytes.readBytes8(s, i));
-        Bytes.writeBytes16(result, o, bytes16(uint128(_spread(x))));
-    }
-
-    function _nibbles4(bytes memory s, uint256 i, bytes memory result, uint256 o) private pure {
-        uint256 x = uint32(Bytes.readBytes4(s, i));
-        Bytes.writeBytes8(result, o, bytes8(uint64(_spread(x))));
-    }
-
-    function _nibbles2(bytes memory s, uint256 i, bytes memory result, uint256 o) private pure {
-        uint256 x = uint16(Bytes.readBytes2(s, i));
-        Bytes.writeBytes4(result, o, bytes4(uint32(_spread(x))));
+        // with the block before.
+        uint256 tail = uint128(Bytes.readBytes16(s, n - 16));
+        Bytes.writeBytes32(result, (n - 16) * 2, bytes32(_spread(tail)));
     }
 
     /// @dev The nibbles of `x`, which must be below `2 ** 128`, one to a byte:
