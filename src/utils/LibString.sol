@@ -50,47 +50,11 @@ library LibString {
         0x8080808080808080808080808080808080808080808080808080808080808080;
 
     function toString(uint256 value) internal pure returns (string memory result) {
-        // Halving the remaining magnitude costs at most seven steps, where
-        // dividing by ten once per digit costs up to seventy-eight.
-        uint256 length = 1;
-        uint256 x = value;
-        if (x >= 1e64) {
-            x /= 1e64;
-            length += 64;
-        }
-        if (x >= 1e32) {
-            x /= 1e32;
-            length += 32;
-        }
-        if (x >= 1e16) {
-            x /= 1e16;
-            length += 16;
-        }
-        if (x >= 1e8) {
-            x /= 1e8;
-            length += 8;
-        }
-        if (x >= 1e4) {
-            x /= 1e4;
-            length += 4;
-        }
-        if (x >= 1e2) {
-            x /= 1e2;
-            length += 2;
-        }
-        if (x >= 10) ++length;
-        bytes memory out = new bytes(length);
-        do {
-            --length;
-            out[length] = bytes1(uint8(48 + value % 10));
-            value /= 10;
-        } while (length != 0);
-        return string(out);
+        return Strings.toString(value);
     }
 
     function toString(int256 value) internal pure returns (string memory result) {
-        if (value >= 0) return toString(uint256(value));
-        return string.concat("-", toString(uint256(-(value + 1)) + 1));
+        return Strings.toString(value);
     }
 
     function toHexStringNoPrefix(uint256 value, uint256 byteCount)
