@@ -27,6 +27,30 @@ LibSort and LibString have reduced APIs, so the whole upstream suite and
 consumers of missing functions are not expected to compile on this branch.
 Use the scoped runner commands below for the published subset.
 
+## Search and length-bound update, 2026-09-23
+
+`searchSorted` now tests `l <= h` before each probe and returns from the loop
+on a match; an absent needle ends at `l == h + 1`, where the original's last
+probe reads `h`, so the result is `(false, h - 1)` or `(false, 0)`. A model of
+the original assembly agrees with the new loop on 13,071,869 searches over
+sorted, reversed, unsorted and duplicate-heavy arrays, including needles equal
+to the length word the original reads at probe 0.
+
+With Solar `c3574e26e` the loop keeps no check at all: memory-object lengths
+stay below the allocation limit in a module without inline assembly, a loop
+header's range leaves out the paths that carry it unchanged, a halved sum lies
+between its ordered addends, and `h = mid - 1` keeps `h` at or below the
+length. Each API alone in its harness, the eight `inSorted` and `searchSorted`
+APIs lose none of their 6,506 calls at 200 runs (0.491x of the per-call solc
+envelope) or at 1,000,000 runs (0.512x); they lost 816 before.
+
+The same length bound removes wrap checks from sums and small multiples of
+lengths elsewhere: `union(uint256[])` loses 69 of 184 calls instead of 76,
+`difference(uint256[])` 44 instead of 65 and `intersection(uint256[])` 42
+instead of 53. What remains of those losses is fixed cost on inputs of up to
+two elements per side. Artifacts are in
+`solar/target/safe-solady/probe/v101-search-*` and `v103-sets-200/`.
+
 ## Base64 core update
 
 The Base64 wrapper now uses the compiler-owned codec, with a checked portable
@@ -242,7 +266,7 @@ retain zero mismatches at both optimizer-run settings. Artifacts are in
 | SafeCastLib | 95 | 95 |
 | LibBit | 24 | 24 |
 | Base64 | 4 | 4 |
-| LibSort | 49 | 57 |
+| LibSort | 57 | 57 |
 | LibString | 48 | 57 |
 
 These are function-declaration counts, not a claim of complete source or
@@ -253,14 +277,39 @@ the missing functions across the archive in `api-coverage.json`.
 
 The port currently covers checked casts, bit operations, Base64, four typed
 array overloads for sorting, copying, reversing, duplicate checks, sorted
-search, and the sorted set operations, and the value-oriented string
-functions (conversion, inspection, search, slicing, splitting, small
-strings, escaping, and packing). The 17 declarations still absent need an
-in-place memory resize, raw storage references, or a nonlocal return, which
-ordinary checked Solidity cannot express with the original signature.
+search, the sorted set operations, in-place compaction and grouped sums, and
+the value-oriented string functions (conversion, inspection, search, slicing,
+splitting, small strings, escaping, and packing): 228 of the 237 non-private
+declarations. The in-place resizing of `uniquifySorted` and `groupSum` goes
+through the compiler-owned `Arrays.truncate` and `WordArrays` primitives,
+which the AST audit lists as the trusted primitive layer. The nine
+declarations still absent are out of scope by decision (see
+[Scope decision](#scope-decision-2026-09-23)).
 Tokens, authentication, proxies, cryptography, storage utilities, and other
 libraries remain outside this port. Missing constants and user-defined
 types are also outside the function audit.
+
+## Scope decision, 2026-09-23
+
+The nine missing declarations stay outside the checked target:
+
+- The eight `StringStorage` functions (`set`, `setCalldata`, `clear`,
+  `isEmpty`, `length`, `get`, `uint8At`, `bytesStorage`) define a storage
+  format of their own: a short string is packed with its length into the
+  struct's slot and a longer one continues in slots derived from it, and
+  `bytesStorage` retypes the struct as a `bytes storage` reference. Ordinary
+  Solidity cannot address storage by a computed slot or retype a storage
+  reference, and a port onto a native `string` field would change the stored
+  representation that existing deployments and upgrades depend on. A core
+  primitive for raw slots would reintroduce exactly the unchecked storage
+  writes the experiment excludes.
+- `directReturn` ends the external call from inside a library function. A
+  `return` in an internal helper returns from the helper; halting the call
+  would need a new control-flow primitive rather than a checked formulation.
+
+Both stay listed as missing in `api-coverage.json` and outside every ranking.
+Adding either later means a disclosed compiler primitive and a matching change
+to the safe-solc leg, not a silent substitution.
 
 ## Run the comparison
 
@@ -282,6 +331,22 @@ uv run benchmarks/checked/benchmark.py \
   --runs 1000000 --evm-version cancun \
   --output target/safe-solady/run-1000000
 ```
+
+To measure one API's code alone, without the other wrappers sharing its
+dispatcher, pass `--api` and `--isolate-api`; the per-API sweep in the latest
+update runs this once for each of the 228 APIs in `api-coverage.json`:
+
+```sh
+uv run benchmarks/checked/benchmark.py \
+  --solc "$BENCH_SOLC" --solar ../solar/target/debug/solar \
+  --runs 200 --evm-version cancun \
+  --api 'LibSort.inSorted(uint256[],uint256)' --isolate-api \
+  --output target/safe-solady/iso/inSorted-uint256
+```
+
+The runner reads `src/` and the compiler's core modules when it runs, so a long
+sweep uses a frozen copy: a `git worktree add --detach` of this repository and
+`--core-modules` pointing at a copy of `solar/crates/sema/src/core/v1`.
 
 Output directories must be fresh. **The current comparison exits 1** because
 of the compatibility discrepancies below; it still writes the full results.
