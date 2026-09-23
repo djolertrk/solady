@@ -16,7 +16,6 @@ library LibString {
     error TooBigForSmallString();
     error StringNot7BitASCII();
     uint256 internal constant NOT_FOUND = type(uint256).max;
-    bytes16 private constant HEX = "0123456789abcdef";
 
     /// @dev Nibble-spreading masks, one per halving of the packing.
     uint256 private constant MASK_64 =
@@ -41,29 +40,10 @@ library LibString {
         0x3030303030303030303030303030303030303030303030303030303030303030;
     uint256 private constant SPREAD_1F =
         0x1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f;
-    uint256 private constant SPREAD_ASCII_A =
-        0x4141414141414141414141414141414141414141414141414141414141414141;
     uint256 private constant SPREAD_20 =
         0x2020202020202020202020202020202020202020202020202020202020202020;
-    uint256 private constant SPREAD_22 =
-        0x2222222222222222222222222222222222222222222222222222222222222222;
-    uint256 private constant SPREAD_5C =
-        0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c;
     uint256 private constant LANES_7F =
         0x7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f;
-
-    /// @dev Set bit per byte value that `escapeHTML` rewrites: `"`, `&`, `'`,
-    /// `<` and `>`. Testing membership with one shift keeps every other byte
-    /// out of the escape helper.
-    uint256 private constant _HTML_ESCAPED =
-        (1 << 0x22) | (1 << 0x26) | (1 << 0x27) | (1 << 0x3c) | (1 << 0x3e);
-
-    /// @dev Set bit per byte value that `escapeJSON` rewrites: every control
-    /// byte below 0x20, plus `"` and `\`.
-    uint256 private constant _JSON_ESCAPED = 0xffffffff | (1 << 0x22) | (1 << 0x5c);
-
-    /// @dev Set bit per byte accepted unchanged by `encodeURIComponent`.
-    uint256 private constant _URI_UNRESERVED = 0x47fffffe87fffffe03ff678200000000;
 
     /// @dev The top bit of every byte lane.
     uint256 private constant _HIGH_BITS =
@@ -505,66 +485,9 @@ library LibString {
         return bytes32(b);
     }
 
-    /// @dev Returns the HTML escape of the byte `c`, or an empty string when it needs none.
-    /// @dev Returns the HTML escape of the byte `c` left-aligned in a word,
-    /// with its length, or a zero length when `c` needs none.
-    /// A word costs nothing to return, where a `bytes` would allocate once per
-    /// scanned byte.
-    function _htmlEscape(bytes1 c) private pure returns (bytes32 seq, uint256 len) {
-        if (c == "\"") return (bytes32("&quot;"), 6);
-        if (c == "&") return (bytes32("&amp;"), 5);
-        if (c == "'") return (bytes32("&#39;"), 5);
-        if (c == "<") return (bytes32("&lt;"), 4);
-        if (c == ">") return (bytes32("&gt;"), 4);
-        return (bytes32(0), 0);
-    }
-
     /// @dev Escapes the string to be used within HTML tags.
     function escapeHTML(string memory s) internal pure returns (string memory result) {
-        bytes memory b = bytes(s);
-        // Six bytes is the longest entity. Write into that capacity once and
-        // hand the used prefix back, avoiding a complete counting pass.
-        bytes memory out = new bytes(b.length * 6);
-        uint256 o;
-        for (uint256 i; i < b.length; ++i) {
-            if ((_HTML_ESCAPED >> uint8(b[i])) & 1 == 0) {
-                out[o] = b[i];
-                ++o;
-                continue;
-            }
-            (bytes32 seq, uint256 escaped) = _htmlEscape(b[i]);
-            if (escaped == 4) Bytes.writeBytes4(out, o, bytes4(seq));
-            else if (escaped == 5) Bytes.writeBytes5(out, o, bytes5(seq));
-            else Bytes.writeBytes6(out, o, bytes6(seq));
-            o += escaped;
-        }
-        Arrays.truncate(out, o);
-        return string(out);
-    }
-
-    /// @dev Returns the JSON escape of the byte `c`, or an empty string when it needs none.
-    /// @dev Returns the JSON escape of the byte `c` left-aligned in a word,
-    /// with its length, or a zero length when `c` needs none.
-    function _jsonEscape(bytes1 c) private pure returns (bytes32 seq, uint256 len) {
-        if (c >= 0x20) {
-            if (c == "\"") return (bytes32("\\\""), 2);
-            if (c == "\\") return (bytes32("\\\\"), 2);
-            return (bytes32(0), 0);
-        }
-        if (c == 0x08) return (bytes32("\\b"), 2);
-        if (c == 0x09) return (bytes32("\\t"), 2);
-        if (c == 0x0a) return (bytes32("\\n"), 2);
-        if (c == 0x0c) return (bytes32("\\f"), 2);
-        if (c == 0x0d) return (bytes32("\\r"), 2);
-        // "\u00" with the two hex digits of `c` written into bytes four and five.
-        uint256 x = uint8(c);
-        return (
-            bytes32(
-                uint256(bytes32("\\u00")) | (uint256(uint8(HEX[x >> 4])) << 216)
-                    | (uint256(uint8(HEX[x & 15])) << 208)
-            ),
-            6
-        );
+        return Strings.escapeHTML(s);
     }
 
     /// @dev Escapes the string to be used within double-quotes in a JSON.
@@ -574,99 +497,12 @@ library LibString {
         pure
         returns (string memory result)
     {
-        bytes memory b = bytes(s);
-        uint256 n = b.length;
-        // Six bytes is the longest escape, so six a byte always suffice; the buffer is cut to
-        // what one pass writes rather than sized by a pass that counts first.
-        bytes memory out = new bytes((addDoubleQuotes ? 2 : 0) + n * 6);
-        uint256 o;
-        if (addDoubleQuotes) {
-            out[0] = "\"";
-            o = 1;
-        }
-        // A word without a control character, quote or backslash is copied whole, and so is
-        // a tail without one, probed through the last word of the string; the bytes of any
-        // other word or tail are written one at a time.
-        for (uint256 i; i < n;) {
-            (uint256 end, uint256 word, bool probed) = _jsonWindow(b, i);
-            if (probed && _jsonPlain(word)) {
-                Bytes.copyInto(out, o, b, i, end - i);
-                o += end - i;
-                i = end;
-                continue;
-            }
-            while (i < end) {
-                if ((_JSON_ESCAPED >> uint8(b[i])) & 1 == 0) {
-                    out[o] = b[i];
-                    ++o;
-                } else {
-                    (bytes32 seq, uint256 escaped) = _jsonEscape(b[i]);
-                    if (escaped == 2) {
-                        Bytes.writeBytes2(out, o, bytes2(seq));
-                    } else {
-                        Bytes.writeBytes6(out, o, bytes6(seq));
-                    }
-                    o += escaped;
-                }
-                ++i;
-            }
-        }
-        if (addDoubleQuotes) {
-            out[o] = "\"";
-            ++o;
-        }
-        Arrays.truncate(out, o);
-        return string(out);
-    }
-
-    /// @dev The next window of `b` from `i`: the end of the word starting there and that word
-    /// when a whole one remains; otherwise the end of `b` and, when `b` has thirty-two bytes
-    /// for it to be read through, the tail as `_jsonTail` gives it. A window of fewer than
-    /// thirty-two bytes at the front of a shorter `b` has no word to probe.
-    function _jsonWindow(bytes memory b, uint256 i)
-        private
-        pure
-        returns (uint256 end, uint256 word, bool probed)
-    {
-        uint256 n = b.length;
-        end = i + 32;
-        if (end <= n) return (end, uint256(Bytes.readBytes32(b, i)), true);
-        if (n >= 32) return (n, _jsonTail(b, i), true);
-        return (n, 0, false);
-    }
-
-    /// @dev The bytes of `b` from `i`, fewer than thirty-two of them, read through the last
-    /// word of `b`, where they are its low lanes; the lanes above them are given a letter, so
-    /// that `_jsonPlain` answers for the tail alone. Only for `b` of at least thirty-two bytes.
-    function _jsonTail(bytes memory b, uint256 i) private pure returns (uint256) {
-        uint256 tail = b.length - i;
-        uint256 word = uint256(Bytes.readBytes32(b, b.length - 32));
-        uint256 above = (32 - tail) << 3;
-        return ((word << above) >> above) | (SPREAD_ASCII_A << (tail << 3));
-    }
-
-    /// @dev Whether no byte of `word` needs escaping in JSON: none below 0x20, none a quote
-    /// and none a backslash. A lane below 0x20 borrows when 0x20 is taken from it, and a
-    /// lane equal to a byte is zero after xor with it and borrows when one is taken; either
-    /// leaves a top bit that the lane itself did not have. Borrows can spill into higher
-    /// lanes, so the result tells only whether some lane matched, which is all that is asked.
-    function _jsonPlain(uint256 word) private pure returns (bool) {
-        uint256 low = Math.wrappingSub(word, SPREAD_20) & ~word;
-        uint256 quote = word ^ SPREAD_22;
-        quote = Math.wrappingSub(quote, SPREAD_1) & ~quote;
-        uint256 backslash = word ^ SPREAD_5C;
-        backslash = Math.wrappingSub(backslash, SPREAD_1) & ~backslash;
-        return (low | quote | backslash) & _HIGH_BITS == 0;
+        return Strings.escapeJSON(s, addDoubleQuotes);
     }
 
     /// @dev Escapes the string to be used within double-quotes in a JSON.
     function escapeJSON(string memory s) internal pure returns (string memory result) {
-        result = escapeJSON(s, false);
-    }
-
-    /// @dev Returns whether the byte `c` is unreserved by `encodeURIComponent`.
-    function _uriUnreserved(uint8 c) private pure returns (bool) {
-        return ((_URI_UNRESERVED >> c) & 1) != 0;
+        return Strings.escapeJSON(s);
     }
 
     /// @dev Encodes `s` so that it can be safely used in a URI,
@@ -675,25 +511,7 @@ library LibString {
     /// See: https://datatracker.ietf.org/doc/html/rfc2396
     /// See: https://datatracker.ietf.org/doc/html/rfc3986
     function encodeURIComponent(string memory s) internal pure returns (string memory result) {
-        bytes memory b = bytes(s);
-        bytes16 upperHex = "0123456789ABCDEF";
-        // Every input byte needs at most `%XX`. Write once into that capacity
-        // and truncate the logical length instead of scanning twice.
-        bytes memory out = new bytes(b.length * 3);
-        uint256 o;
-        for (uint256 i; i < b.length; ++i) {
-            uint8 c = uint8(b[i]);
-            if (_uriUnreserved(c)) {
-                out[o++] = b[i];
-            } else {
-                uint24 encoded = (uint24(uint8(bytes1("%"))) << 16)
-                    | (uint24(uint8(upperHex[c >> 4])) << 8) | uint24(uint8(upperHex[c & 15]));
-                Bytes.writeBytes3(out, o, bytes3(encoded));
-                o += 3;
-            }
-        }
-        Arrays.truncate(out, o);
-        return string(out);
+        return Strings.encodeURIComponent(s);
     }
 
     /// @dev Returns whether `a` equals `b`, where `b` is a null-terminated small string.
