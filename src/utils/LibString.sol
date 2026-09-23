@@ -206,7 +206,13 @@ library LibString {
     }
 
     function is7BitASCII(string memory s, uint128 allowed) internal pure returns (bool result) {
-        bytes memory b = bytes(s);
+        // With every 7-bit byte allowed, only the high bits matter.
+        if (allowed == type(uint128).max) return is7BitASCII(s);
+        return _allowedBytes(bytes(s), allowed);
+    }
+
+    /// @dev Whether every byte of `b` has its bit set in `allowed`.
+    function _allowedBytes(bytes memory b, uint256 allowed) private pure returns (bool) {
         for (uint256 i; i < b.length; ++i) {
             if (((allowed >> uint8(b[i])) & 1) == 0) return false;
         }
