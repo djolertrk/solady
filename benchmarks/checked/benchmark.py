@@ -166,6 +166,15 @@ def closure(sources, roots):
     return result
 
 
+def wrapper_name(library: str, signature: str) -> str:
+    """Names an API's harness wrapper after the API alone.
+
+    The name fixes the wrapper's selector and so its dispatch position, which
+    then stays put when other APIs join or leave the harness.
+    """
+    return "f" + keccak(f"{library}.{signature}".encode())[:4].hex()
+
+
 def select_harness_apis(apis, api_filters, isolate):
     requested = set(api_filters or ())
     found = {row["library"] + "." + row["signature"] for row in apis}
@@ -249,8 +258,11 @@ def prepare(
             }
         )
     apis.sort(key=lambda x: (x["library"], x["signature"]))
-    for index, row in enumerate(apis):
-        row["wrapper"] = f"f{index}"
+    for row in apis:
+        row["wrapper"] = wrapper_name(row["library"], row["signature"])
+    if len({row["wrapper"] for row in apis}) != len(apis):
+        raise ValueError("harness wrapper names collide")
+    for row in apis:
         returns = list(row["returns"])
         # Observe in-place updates through the identical wrapper in both sources:
         # a function without results returns every memory argument it may update.

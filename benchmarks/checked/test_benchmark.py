@@ -132,6 +132,15 @@ class HarnessSelectionTests(unittest.TestCase):
             benchmark.select_harness_apis(self.apis, ["Lib.missing()"], isolate=True)
 
 
+class WrapperNameTests(unittest.TestCase):
+    def test_name_depends_only_on_the_api(self):
+        name = benchmark.wrapper_name("LibSort", "sort(uint256[])")
+        self.assertEqual(name, benchmark.wrapper_name("LibSort", "sort(uint256[])"))
+        self.assertRegex(name, "^f[0-9a-f]{8}$")
+        self.assertNotEqual(name, benchmark.wrapper_name("LibSort", "sort(int256[])"))
+        self.assertNotEqual(name, benchmark.wrapper_name("LibBit", "sort(uint256[])"))
+
+
 class CaseIdentityTests(unittest.TestCase):
     def test_identity_covers_input_source_and_compiler(self):
         artifact = {"input_sha256": "safe", "compiler_sha256": "solar"}
