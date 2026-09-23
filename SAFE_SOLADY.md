@@ -27,6 +27,84 @@ LibSort and LibString have reduced APIs, so the whole upstream suite and
 consumers of missing functions are not expected to compile on this branch.
 Use the scoped runner commands below for the published subset.
 
+## String scans, stepped cursors and deterministic codegen, 2026-09-23
+
+Port commits: `f39884e` (`repeat` allocates its result once and doubles the
+filled prefix in place), `971dad7` (`toNibbles` spreads inputs shorter than
+sixteen bytes from one zero-padded word instead of cascading through 8-, 4-,
+2- and 1-byte blocks), `8baf20d` (`slice(subject, start)` takes the length as
+its end instead of clamping `NOT_FOUND` at run time), `bed4f3b` (small strings
+are masked from their null marks; `eqs` compares where `b`'s null marks start
+with `a`'s length instead of counting `b`).
+
+Solar commits (unpushed): `e65b86592` proves differences under ordering
+facts, checked products whose zero test covers a zero divisor, loops that
+step their input by a constant (`i + 16 <= n`) against a scaled capacity,
+and rereads of unwritten parameter lengths; `a3eeaf50b` scans `replace`,
+`indicesOf` and `split` with pointer cursors in separate loops for short
+and long needles; `43d2007e2` spells minimal hex wider than two bytes a
+word at a time; `b1c58dc1c` packs two strings from the words that already
+hold each length byte ahead of its payload; `9e1872629` ties a fresh
+object's reread length to its allocation; `ec86751ca` creates merge phis in
+declaration order.
+
+The last one matters for every comparison in this file. Phis were created
+in the hash order of variable ids, which are numbered across the whole
+compilation, so editing one library moved the bytecode of the others:
+before it, a LibBit-only port change moved LibSort's isolated harnesses by
+33,000 gas. After it, 227 of the 228 isolated harnesses compile to identical
+bytecode from two snapshots that differ only in `LibBit.sol`; the 228th
+exercises the changed function.
+
+| Harness | Runs | Before (`c4dea32af`, port `d2202a2`) | After (`ec86751ca`, port `bed4f3b`) |
+|---|---:|---:|---:|
+| Combined | 200 | 0.5339x, 156 losses | 0.5293x, 139 losses |
+| Combined | 1,000,000 | 0.5102x, 815 losses | 0.5054x, 803 losses |
+| Isolated | 200 | 0.5403x, 1,053 losses | 0.5350x, 854 losses |
+| Isolated | 1,000,000 | 0.5503x, 933 losses | 0.5449x, 757 losses |
+
+Ratios are solar-safe gas over the per-call minimum of solc legacy and via-IR
+on upstream Solady, summed over every comparable case (21,001 combined; each
+isolated harness compiles one API alone). At 200 runs the isolated losses are
+LibSort 764, LibString 87 and LibBit 3; Base64 and SafeCastLib lose none. At
+1,000,000 runs they are LibSort 635, LibString 110, Base64 10 and LibBit 2.
+
+Per API, at 200 runs: `replace` wins all 216 calls (69 losses before,
+0.919x -> 0.819x), `indicesOf` all 72 (14 before), `packTwo` all 20 (20
+before, 1.042x -> 0.910x), `slice(string,uint256)` all 63 (25 before),
+`eqs` all 35 (6 before), `toHexString(uint256)` all 19 (19 before, 1.016x
+-> 0.386x; a full word costs 987 gas against solc's 3,106) and `toNibbles`
+loses 3 of 15 (15 before, 1.198x -> 0.950x).
+
+What still loses, and why:
+
+- The set operations on inputs of up to two elements per side. Their cost
+  is fixed: decoding both arrays, the checked allocation, three loop headers
+  with their setup, and the truncation. Two empty inputs cost `union` 194
+  gas more than the original for `uint256[]` and 292 for `address[]`.
+  Removing the per-store and truncation checks needs the invariant
+  `k <= i + j` across three loops, which the compiler cannot state yet.
+- `fromSmallString` and `normalizeSmallString` on strings of up to two
+  bytes: their constant cost beats the original's byte scan from about five
+  bytes up.
+- `toString` by 1 to 3 gas a digit: the digit loop keeps the pointer on top
+  of the stack, which costs one more stack operation per digit than via-IR's
+  loop.
+- Fixed-width `toHexString` of one byte, where the checked sizing (doubling
+  overflow, length limit and allocation checks) costs more than the
+  conversion.
+- `repeat` with one to three copies of one or two bytes.
+- In the combined harnesses, selectors whose dispatch position costs more
+  than solc's: the lifetime-priced switch matches solc legacy's mean
+  dispatch cost at 200 runs (220 against 223 gas) and beats it at 1,000,000
+  (139 against 215), but individual selectors spread from 94 gas cheaper to
+  128 dearer. SafeCastLib's small bodies cannot absorb the dearer positions
+  at 200 runs, and `popCount` loses 3 gas at 1,000,000 through its table
+  entry's extra jump.
+- SafeCastLib's overflow reverts, by up to 7 gas after dispatch: the
+  `Overflow()` payload is allocated at the free-memory pointer, which also
+  makes every entry initialize that pointer.
+
 ## Combined matrix and code size, 2026-09-23
 
 With Solar `fd44d3aae`, the combined five-harness matrix (21,001 calls, the
