@@ -43,6 +43,8 @@ library LibString {
         0x2020202020202020202020202020202020202020202020202020202020202020;
     uint256 private constant LANES_7F =
         0x7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f;
+    uint256 private constant LANES_01 =
+        0x0101010101010101010101010101010101010101010101010101010101010101;
 
     /// @dev The top bit of every byte lane.
     uint256 private constant _HIGH_BITS =
@@ -408,29 +410,34 @@ library LibString {
     /// from the string's `_nullTail` marks.
     function _smallStringLength(uint256 tail) private pure returns (uint256) {
         // One mark for each byte from the first zero byte on; the bytes before
-        // it are the string. The marks are one per byte, so the byte sums the
-        // folds build stay below 33 and never carry into their neighbours.
-        uint256 c = tail >> 7;
-        c += c >> 8;
-        c += c >> 16;
-        c += c >> 32;
-        c += c >> 64;
-        c += c >> 128;
-        return 32 - (c & 0xff);
+        // it are the string. Multiplying the marks, one per byte, by a one in
+        // every byte sums them into the top byte, modulo `2**256` on purpose:
+        // no byte of the product exceeds 32, so no sum carries into another.
+        return 32 - (Math.wrappingMul(tail >> 7, LANES_01) >> 248);
     }
 
-    /// @dev `0x80` in every byte of `s` from its first zero byte on. A byte
-    /// carries into its own high bit exactly when it is not zero, so the kept
-    /// high bits mark the zero bytes; each mark then spreads to every lower
-    /// byte, which the first zero byte's mark reaches first.
-    function _nullTail(bytes32 s) private pure returns (uint256 marks) {
+    /// @dev `0x80` in every zero byte of `s`. A byte carries into its own high
+    /// bit exactly when it is not zero, so the kept high bits mark the zero
+    /// bytes.
+    function _nullMarks(bytes32 s) private pure returns (uint256) {
         uint256 x = uint256(s);
-        marks = ~(x | ((x & LANES_7F) + LANES_7F) | LANES_7F);
+        return ~(x | ((x & LANES_7F) + LANES_7F) | LANES_7F);
+    }
+
+    /// @dev `0x80` in every byte from the first marked one on: each of the
+    /// `_nullMarks` spreads to every lower byte, which the first zero byte's
+    /// mark reaches first.
+    function _spreadNullMarks(uint256 marks) private pure returns (uint256) {
         marks |= marks >> 8;
         marks |= marks >> 16;
         marks |= marks >> 32;
         marks |= marks >> 64;
-        marks |= marks >> 128;
+        return marks | (marks >> 128);
+    }
+
+    /// @dev `0x80` in every byte of `s` from its first zero byte on.
+    function _nullTail(bytes32 s) private pure returns (uint256) {
+        return _spreadNullMarks(_nullMarks(s));
     }
 
     /// @dev Keeps the bytes before the first null byte, from the string's
@@ -445,18 +452,42 @@ library LibString {
     /// @dev Returns a string from a small bytes32 string.
     /// `s` must be null-terminated, or behavior will be undefined.
     function fromSmallString(bytes32 s) internal pure returns (string memory result) {
+        // A null in the first eight bytes is found by testing them in turn,
+        // which costs less than spreading and counting its marks. After eight
+        // tests, spreading the marks still costs less than scanning to the
+        // null a byte at a time, so no length pays more than a scan.
+        if (s[0] == 0) return "";
+        bytes32 word;
+        uint256 length;
+        if (s[1] == 0) (word, length) = (s & bytes32(bytes1(0xff)), 1);
+        else if (s[2] == 0) (word, length) = (s & bytes32(bytes2(0xffff)), 2);
+        else if (s[3] == 0) (word, length) = (s & bytes32(bytes3(0xffffff)), 3);
+        else if (s[4] == 0) (word, length) = (s & bytes32(bytes4(0xffffffff)), 4);
+        else if (s[5] == 0) (word, length) = (s & bytes32(bytes5(0xffffffffff)), 5);
+        else if (s[6] == 0) (word, length) = (s & bytes32(bytes6(0xffffffffffff)), 6);
+        else if (s[7] == 0) (word, length) = (s & bytes32(bytes7(0xffffffffffffff)), 7);
+        else {
+            uint256 tail = _nullTail(s);
+            (word, length) = (s & bytes32(_smallStringMask(tail)), _smallStringLength(tail));
+        }
         // The word is written whole, with the bytes from the null on cleared,
         // and the string then shortened to them.
-        uint256 tail = _nullTail(s);
-        bytes memory out = abi.encodePacked(s & bytes32(_smallStringMask(tail)));
-        Arrays.truncate(out, _smallStringLength(tail));
+        bytes memory out = abi.encodePacked(word);
+        Arrays.truncate(out, length);
         return string(out);
     }
 
     /// @dev Returns the small string, with all bytes after the first null byte zeroized.
     function normalizeSmallString(bytes32 s) internal pure returns (bytes32 result) {
-        // Each byte from the first zero byte on is cleared.
-        return s & bytes32(_smallStringMask(_nullTail(s)));
+        // A null in the first four bytes picks its mask from its mark directly,
+        // which costs less than spreading the marks to clear each byte from
+        // the first zero byte on.
+        uint256 marks = _nullMarks(s);
+        if (marks >> 248 != 0) return 0;
+        if (marks >> 240 != 0) return s & bytes32(bytes1(0xff));
+        if (marks >> 232 != 0) return s & bytes32(bytes2(0xffff));
+        if (marks >> 224 != 0) return s & bytes32(bytes3(0xffffff));
+        return s & bytes32(_smallStringMask(_spreadNullMarks(marks)));
     }
 
     /// @dev Returns the string as a normalized null-terminated small string.
