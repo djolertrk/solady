@@ -195,23 +195,22 @@ library LibSort {
         pure
         returns (bool found, uint256 index)
     {
-        // The upstream probe sequence: a one-based binary search whose last
-        // probe decides the nearest index when the needle is absent.
+        // The upstream probe sequence: a one-based binary search. An absent
+        // needle ends it at `l == h + 1`, where the upstream's last probe reads
+        // `h`, the nearest element below the needle when there is one.
         uint256 l = 1;
         uint256 h = a.length;
-        uint256 t;
-        while (true) {
-            index = (l + h) / 2;
-            if (index != 0) t = a[index - 1];
-            if (l > h || (index != 0 && t == needle)) break;
+        while (l <= h) {
+            uint256 m = (l + h) / 2;
+            uint256 t = a[m - 1];
+            if (t == needle) return (true, m - 1);
             if (needle <= t) {
-                h = index - 1;
+                h = m - 1;
             } else {
-                l = index + 1;
+                l = m + 1;
             }
         }
-        found = index != 0 && t == needle;
-        if (index != 0) index -= 1;
+        if (h != 0) index = h - 1;
     }
 
     /// @dev Returns whether `a` contains `needle`.
@@ -226,23 +225,22 @@ library LibSort {
         pure
         returns (bool found, uint256 index)
     {
-        // The upstream probe sequence: a one-based binary search whose last
-        // probe decides the nearest index when the needle is absent.
+        // The upstream probe sequence: a one-based binary search. An absent
+        // needle ends it at `l == h + 1`, where the upstream's last probe reads
+        // `h`, the nearest element below the needle when there is one.
         uint256 l = 1;
         uint256 h = a.length;
-        int256 t;
-        while (true) {
-            index = (l + h) / 2;
-            if (index != 0) t = a[index - 1];
-            if (l > h || (index != 0 && t == needle)) break;
+        while (l <= h) {
+            uint256 m = (l + h) / 2;
+            int256 t = a[m - 1];
+            if (t == needle) return (true, m - 1);
             if (needle <= t) {
-                h = index - 1;
+                h = m - 1;
             } else {
-                l = index + 1;
+                l = m + 1;
             }
         }
-        found = index != 0 && t == needle;
-        if (index != 0) index -= 1;
+        if (h != 0) index = h - 1;
     }
 
     /// @dev Returns whether `a` contains `needle`.
@@ -257,23 +255,22 @@ library LibSort {
         pure
         returns (bool found, uint256 index)
     {
-        // The upstream probe sequence: a one-based binary search whose last
-        // probe decides the nearest index when the needle is absent.
+        // The upstream probe sequence: a one-based binary search. An absent
+        // needle ends it at `l == h + 1`, where the upstream's last probe reads
+        // `h`, the nearest element below the needle when there is one.
         uint256 l = 1;
         uint256 h = a.length;
-        address t;
-        while (true) {
-            index = (l + h) / 2;
-            if (index != 0) t = a[index - 1];
-            if (l > h || (index != 0 && t == needle)) break;
+        while (l <= h) {
+            uint256 m = (l + h) / 2;
+            address t = a[m - 1];
+            if (t == needle) return (true, m - 1);
             if (needle <= t) {
-                h = index - 1;
+                h = m - 1;
             } else {
-                l = index + 1;
+                l = m + 1;
             }
         }
-        found = index != 0 && t == needle;
-        if (index != 0) index -= 1;
+        if (h != 0) index = h - 1;
     }
 
     /// @dev Returns whether `a` contains `needle`.
@@ -288,23 +285,22 @@ library LibSort {
         pure
         returns (bool found, uint256 index)
     {
-        // The upstream probe sequence: a one-based binary search whose last
-        // probe decides the nearest index when the needle is absent.
+        // The upstream probe sequence: a one-based binary search. An absent
+        // needle ends it at `l == h + 1`, where the upstream's last probe reads
+        // `h`, the nearest element below the needle when there is one.
         uint256 l = 1;
         uint256 h = a.length;
-        bytes32 t;
-        while (true) {
-            index = (l + h) / 2;
-            if (index != 0) t = a[index - 1];
-            if (l > h || (index != 0 && t == needle)) break;
+        while (l <= h) {
+            uint256 m = (l + h) / 2;
+            bytes32 t = a[m - 1];
+            if (t == needle) return (true, m - 1);
             if (needle <= t) {
-                h = index - 1;
+                h = m - 1;
             } else {
-                l = index + 1;
+                l = m + 1;
             }
         }
-        found = index != 0 && t == needle;
-        if (index != 0) index -= 1;
+        if (h != 0) index = h - 1;
     }
 
     /// @dev Returns whether `a` contains `needle`.
