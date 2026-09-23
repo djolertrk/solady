@@ -404,12 +404,13 @@ library LibString {
         return Strings.split(subject, delimiter);
     }
 
-    /// @dev Returns the length of the small string `s` up to its first null byte.
-    function _smallStringLength(bytes32 s) private pure returns (uint256) {
+    /// @dev Returns the length of a small string up to its first null byte,
+    /// from the string's `_nullTail` marks.
+    function _smallStringLength(uint256 tail) private pure returns (uint256) {
         // One mark for each byte from the first zero byte on; the bytes before
         // it are the string. The marks are one per byte, so the byte sums the
         // folds build stay below 33 and never carry into their neighbours.
-        uint256 c = _nullTail(s) >> 7;
+        uint256 c = tail >> 7;
         c += c >> 8;
         c += c >> 16;
         c += c >> 32;
@@ -432,27 +433,30 @@ library LibString {
         marks |= marks >> 128;
     }
 
+    /// @dev Keeps the bytes before the first null byte, from the string's
+    /// `_nullTail` marks: a marked byte minus its mark shifted to the byte's
+    /// low bit leaves the seven bits below the mark, which the mark completes
+    /// to the whole byte. A shift never exceeds its operand, so the difference
+    /// cannot wrap.
+    function _smallStringMask(uint256 tail) private pure returns (uint256) {
+        return ~((tail - (tail >> 7)) | tail);
+    }
+
     /// @dev Returns a string from a small bytes32 string.
     /// `s` must be null-terminated, or behavior will be undefined.
     function fromSmallString(bytes32 s) internal pure returns (string memory result) {
         // The word is written whole, with the bytes from the null on cleared,
         // and the string then shortened to them.
-        uint256 n = _smallStringLength(s);
-        bytes32 kept = n == 32 ? s : s & bytes32(type(uint256).max << ((32 - n) * 8));
-        bytes memory out = abi.encodePacked(kept);
-        Arrays.truncate(out, n);
+        uint256 tail = _nullTail(s);
+        bytes memory out = abi.encodePacked(s & bytes32(_smallStringMask(tail)));
+        Arrays.truncate(out, _smallStringLength(tail));
         return string(out);
     }
 
     /// @dev Returns the small string, with all bytes after the first null byte zeroized.
     function normalizeSmallString(bytes32 s) internal pure returns (bytes32 result) {
-        // Each byte from the first zero byte on is cleared: its mark fills the
-        // byte downwards without leaving it.
-        uint256 tail = _nullTail(s);
-        tail |= tail >> 1;
-        tail |= tail >> 2;
-        tail |= tail >> 4;
-        return s & bytes32(~tail);
+        // Each byte from the first zero byte on is cleared.
+        return s & bytes32(_smallStringMask(_nullTail(s)));
     }
 
     /// @dev Returns the string as a normalized null-terminated small string.
@@ -494,11 +498,12 @@ library LibString {
     /// @dev Returns whether `a` equals `b`, where `b` is a null-terminated small string.
     function eqs(string memory a, bytes32 b) internal pure returns (bool result) {
         bytes memory s = bytes(a);
-        uint256 n = _smallStringLength(b);
-        if (s.length != n) return false;
-        // Both sides keep only their first `n` bytes.
-        uint256 shift = (32 - n) * 8;
-        return uint256(bytes32(s)) >> shift == uint256(b) >> shift;
+        uint256 tail = _nullTail(b);
+        // `b`'s null marks must start exactly where `a` ends.
+        if (s.length > 32 || tail != _HIGH_BITS >> (s.length * 8)) return false;
+        // The conversion pads `a` with zeros after its bytes, and the mask
+        // clears `b` from its first null byte on.
+        return bytes32(s) == b & bytes32(_smallStringMask(tail));
     }
 
     /// @dev Returns 0 if `a == b`, -1 if `a < b`, +1 if `a > b`.
