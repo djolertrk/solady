@@ -343,18 +343,17 @@ library LibString {
         if (times == 0 || s.length == 0) return "";
         // Sizing the result first keeps the overflow panic of the original.
         uint256 total = s.length * times;
-        if (total == 0) return "";
-        // Doubling the accumulated chunk turns the copy into whole-buffer
-        // concatenations: `times` bytes are moved a logarithmic number of times
-        // instead of one byte at a time.
-        bytes memory out;
-        bytes memory chunk = s;
-        uint256 remaining = times;
-        while (true) {
-            if (remaining & 1 == 1) out = bytes.concat(out, chunk);
-            remaining >>= 1;
-            if (remaining == 0) break;
-            chunk = bytes.concat(chunk, chunk);
+        // One copy of the subject, then the filled prefix doubled in place:
+        // `total` bytes move in a logarithmic number of copies into the one
+        // allocation, each copy reading only bytes already written.
+        bytes memory out = new bytes(total);
+        Bytes.copyInto(out, 0, s, 0, s.length);
+        uint256 filled = s.length;
+        while (filled < total) {
+            uint256 rest = total - filled;
+            uint256 step = filled < rest ? filled : rest;
+            Bytes.copyInto(out, filled, out, 0, step);
+            filled += step;
         }
         return string(out);
     }
