@@ -69,11 +69,6 @@ library LibString {
     uint256 private constant _HIGH_BITS =
         0x8080808080808080808080808080808080808080808080808080808080808080;
 
-    /// @dev The length of the rune a high lead byte starts, indexed by its top six bits
-    /// less 32: two for 0x80 to 0xdf, then three, four, five and six.
-    bytes32 private constant _RUNE_LENGTHS =
-        0x0202020202020202020202020202020202020202020202020303030304040506;
-
     function toString(uint256 value) internal pure returns (string memory result) {
         // Halving the remaining magnitude costs at most seven steps, where
         // dividing by ten once per digit costs up to seventy-eight.
@@ -231,46 +226,7 @@ library LibString {
     }
 
     function runeCount(string memory s) internal pure returns (uint256 result) {
-        bytes memory b = bytes(s);
-        uint256 n = b.length;
-        for (uint256 i; i < n;) {
-            // Every byte below 0x80 is one rune, so a word of them is thirty-two runes, and
-            // the bytes before the first high byte of a mixed word are one rune each too.
-            // Past the last full word, the last word of the string is read instead, with the
-            // bytes already counted shifted out of it.
-            if (n >= 32) {
-                uint256 high;
-                if (i + 32 <= n) {
-                    high = uint256(Bytes.readBytes32(b, i)) & _HIGH_BITS;
-                    if (high == 0) {
-                        i += 32;
-                        result += 32;
-                        continue;
-                    }
-                } else {
-                    high =
-                        (uint256(Bytes.readBytes32(b, n - 32)) << ((i + 32 - n) << 3)) & _HIGH_BITS;
-                    if (high == 0) {
-                        result += n - i;
-                        break;
-                    }
-                }
-                uint256 ascii = Bits.leadingZeros(high) >> 3;
-                i += ascii;
-                result += ascii;
-            }
-            // A high byte leads a rune of the length its top six bits declare, the same
-            // length for a stray continuation byte as for a two-byte lead. A run of them is
-            // stepped through here before the next word is probed.
-            uint256 c = uint8(b[i]);
-            while (true) {
-                i += c < 0x80 ? 1 : uint8(_RUNE_LENGTHS[(c >> 2) - 32]);
-                ++result;
-                if (i >= n) break;
-                c = uint8(b[i]);
-                if (c < 0x80) break;
-            }
-        }
+        return Strings.runeCount(s);
     }
 
     function concat(string memory a, string memory b) internal pure returns (string memory) {
