@@ -739,4 +739,24 @@ library LibSort {
             a[i] = a[i];
         }
     }
+
+    /// @dev Sorts and uniquifies `keys`. Updates `values` with the grouped sums by key.
+    function groupSum(uint256[] memory keys, uint256[] memory values) internal pure {
+        WordArrays.groupSum(keys, values);
+    }
+
+    /// @dev Sorts and uniquifies `keys`. Updates `values` with the grouped sums by key.
+    function groupSum(address[] memory keys, uint256[] memory values) internal pure {
+        WordArrays.groupSum(keys, values);
+    }
+
+    /// @dev Sorts and uniquifies `keys`. Updates `values` with the grouped sums by key.
+    function groupSum(bytes32[] memory keys, uint256[] memory values) internal pure {
+        WordArrays.groupSum(keys, values);
+    }
+
+    /// @dev Sorts and uniquifies `keys`. Updates `values` with the grouped sums by key.
+    function groupSum(int256[] memory keys, uint256[] memory values) internal pure {
+        WordArrays.groupSum(keys, values);
+    }
 }

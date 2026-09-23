@@ -252,9 +252,14 @@ def prepare(
     for index, row in enumerate(apis):
         row["wrapper"] = f"f{index}"
         returns = list(row["returns"])
-        # Observe in-place updates through the identical wrapper in both sources.
+        # Observe in-place updates through the identical wrapper in both sources:
+        # a function without results returns every memory argument it may update.
+        row["observed"] = []
         if not returns:
-            returns = [row["params"][0]]
+            row["observed"] = [
+                i for i, (_, loc) in enumerate(row["params"]) if loc == "memory"
+            ] or [0]
+            returns = [row["params"][i] for i in row["observed"]]
         row["outputs"] = [t for t, _ in returns]
         row["wrapper_returns"] = returns
     harness_apis = select_harness_apis(apis, api_filters, isolate)
@@ -287,7 +292,8 @@ def prepare(
                 + ", ".join(f"a{i}" for i in range(len(row["params"])))
                 + ")"
             )
-            body = f"return {call};" if row["returns"] else f"{call}; return a0;"
+            observed = ", ".join(f"a{i}" for i in row["observed"])
+            body = f"return {call};" if row["returns"] else f"{call}; return ({observed});"
             harness += f"function {row['wrapper']}({params}) external pure returns ({result_types}) {{ {body} }}\n"
         harness += "}\n"
     safe["Harness.sol"] = {"content": harness}
@@ -433,6 +439,44 @@ def test_vectors(row, rng):
                     yield [typed(u), typed([needle])[0]], (
                         [found] if name == "inSorted" else [found, index]
                     )
+            return
+        if name == "groupSum":
+            def panic(code):
+                return keccak(b"Panic(uint256)")[:4] + code.to_bytes(32, "big")
+
+            def grouped(keys, values):
+                # Keys order by their word value, so negative `int256` keys come last.
+                if len(keys) != len(values):
+                    return panic(0x32)
+                if len(keys) < 2:
+                    return [typed(keys), values]
+                sums = {}
+                for key, value in zip(keys, values):
+                    word = key % (1 << 256)
+                    sums[word] = sums.get(word, 0) + value
+                if any(total > MAX for total in sums.values()):
+                    return panic(0x11)
+                words = sorted(sums)
+                kept = [w - (1 << 256) if t == "int256" and w >> 255 else w for w in words]
+                return [typed(kept), [sums[w] for w in words]]
+
+            cases = []
+            for a in arrays:
+                cases.append((a, [rng.randrange(1 << 64) for _ in a]))
+                # Few distinct keys make long runs of equal keys.
+                cases.append(([a[i % 3] for i in range(len(a))] if a else a, list(range(len(a)))))
+            base = [low, high, 0, 1]
+            cases += [
+                (base[:2], [5]),
+                (base[:1], []),
+                ([], [3]),
+                ([1, 1], [MAX, 1]),
+                ([2, 1, 2], [MAX - 5, 3, 6]),
+                ([2, 1, 2], [MAX - 5, 3, 5]),
+                (base * 5, [MAX // 11] * 20),
+            ]
+            for keys, values in cases:
+                yield [typed(keys), values], grouped(keys, values)
             return
         if name in ["difference", "intersection", "union"]:
             uniques = [sorted(set(a)) for a in arrays]
