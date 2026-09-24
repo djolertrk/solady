@@ -6,11 +6,25 @@ import {Bytes} from "solar:core/v1/Bytes.sol";
 import {Hash} from "solar:core/v1/Hash.sol";
 import {Hex} from "solar:core/v1/codecs/Hex.sol";
 import {Math} from "solar:core/v1/Math.sol";
+import {Return} from "solar:core/v1/Return.sol";
 import {Strings} from "solar:core/v1/Strings.sol";
+import {LibBytes} from "./LibBytes.sol";
 
-/// @notice Checked Solidity replacements for the value-oriented LibString APIs.
-/// @dev Storage reinterpretation and direct-return APIs are deliberately absent.
+/// @notice Checked Solidity replacements for the LibString APIs.
+/// @dev `StringStorage` keeps the original's packed layout through the
+/// storage operations of `LibBytes`, and `directReturn` ends the call through
+/// the compiler-owned `Return` module. `bytesStorage` is absent: it retypes a
+/// storage reference in a `pure` function, and reaching the nested
+/// `BytesStorage` without assembly is a storage access, so only a `view`
+/// function could return it.
 library LibString {
+    /// @dev Goated string storage struct that totally MOGs, no cap, fr.
+    /// Uses less gas and bytecode than Solidity's native string storage. It's meta af.
+    /// Packs length with the first 31 bytes if <255 bytes, so it’s mad tight.
+    struct StringStorage {
+        LibBytes.BytesStorage _spacer;
+    }
+
     error HexLengthInsufficient();
     error TooBigForSmallString();
     error StringNot7BitASCII();
@@ -49,6 +63,41 @@ library LibString {
     /// @dev The top bit of every byte lane.
     uint256 private constant _HIGH_BITS =
         0x8080808080808080808080808080808080808080808080808080808080808080;
+
+    /// @dev Sets the value of the string storage `$` to `s`.
+    function set(StringStorage storage $, string memory s) internal {
+        LibBytes.set($._spacer, bytes(s));
+    }
+
+    /// @dev Sets the value of the string storage `$` to `s`.
+    function setCalldata(StringStorage storage $, string calldata s) internal {
+        LibBytes.setCalldata($._spacer, bytes(s));
+    }
+
+    /// @dev Sets the value of the string storage `$` to the empty string.
+    function clear(StringStorage storage $) internal {
+        delete $._spacer;
+    }
+
+    /// @dev Returns whether the value stored is `$` is the empty string "".
+    function isEmpty(StringStorage storage $) internal view returns (bool) {
+        return LibBytes.isEmpty($._spacer);
+    }
+
+    /// @dev Returns the length of the value stored in `$`.
+    function length(StringStorage storage $) internal view returns (uint256) {
+        return LibBytes.length($._spacer);
+    }
+
+    /// @dev Returns the value stored in `$`.
+    function get(StringStorage storage $) internal view returns (string memory) {
+        return string(LibBytes.get($._spacer));
+    }
+
+    /// @dev Returns the uint8 at index `i`. If out-of-bounds, returns 0.
+    function uint8At(StringStorage storage $, uint256 i) internal view returns (uint8) {
+        return LibBytes.uint8At($._spacer, i);
+    }
 
     function toString(uint256 value) internal pure returns (string memory result) {
         return Strings.toString(value);
@@ -581,5 +630,10 @@ library LibString {
         returns (string memory resultA, string memory resultB)
     {
         return Strings.unpackTwo(packed);
+    }
+
+    /// @dev Directly returns `a` without copying.
+    function directReturn(string memory a) internal pure {
+        Return.abiEncoded(a);
     }
 }
