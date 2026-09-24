@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import {Arrays} from "solar:core/v1/Arrays.sol";
+import {Build} from "solar:core/v1/Build.sol";
 import {Bytes} from "solar:core/v1/Bytes.sol";
 import {CalldataBytes} from "solar:core/v1/CalldataBytes.sol";
 import {Slots} from "solar:core/v1/Slots.sol";
@@ -29,6 +30,16 @@ library LibBytes {
     /// @dev Sets the value of the bytes storage `$` to `s`.
     function set(BytesStorage storage $, bytes memory s) internal {
         uint256 n = s.length;
+        if (!Build.gasFirst()) {
+            // One head word, the first 31 bytes above the length or the
+            // length alone for a long value, then one copy of the rest into
+            // the derived words.
+            (uint256 head, uint256 from) = ((uint256(bytes32(s)) >> 8 << 8) | n, 31);
+            if (n > 0xfe) (head, from) = ((n << 8) | 0xff, 0);
+            $._spacer.word = bytes32(head);
+            if (n > from) Slots.storeBytes($._spacer, s, from, n - from);
+            return;
+        }
         if (n < 32) {
             // The length in the low byte and the value above it.
             $._spacer.word = bytes32((uint256(bytes32(s)) >> 8 << 8) | n);
@@ -47,6 +58,13 @@ library LibBytes {
     /// @dev Sets the value of the bytes storage `$` to `s`.
     function setCalldata(BytesStorage storage $, bytes calldata s) internal {
         uint256 n = s.length;
+        if (!Build.gasFirst()) {
+            (uint256 head, uint256 from) = ((uint256(bytes32(s)) >> 8 << 8) | n, 31);
+            if (n > 0xfe) (head, from) = ((n << 8) | 0xff, 0);
+            $._spacer.word = bytes32(head);
+            if (n > from) Slots.storeCalldataBytes($._spacer, s, from, n - from);
+            return;
+        }
         if (n < 32) {
             $._spacer.word = bytes32((uint256(bytes32(s)) >> 8 << 8) | n);
         } else if (n < 0xff) {
@@ -79,6 +97,22 @@ library LibBytes {
     function get(BytesStorage storage $) internal view returns (bytes memory result) {
         uint256 packed = uint256($._spacer.word);
         uint256 n = packed & 0xff;
+        if (!Build.gasFirst()) {
+            // One allocation and one copy from the derived words, which a
+            // short value continues from its 32nd byte and a long one holds
+            // from its first. The first word is written whole, so the
+            // allocation has a spare word, cleared again at the end. Its
+            // limit therefore comes one word sooner for a long value, but
+            // no length that `set` or `setCalldata` stores comes that close.
+            uint256 from = 31;
+            if (n == 0xff) (n, from) = (packed >> 8, 0);
+            result = new bytes(n + 32);
+            Bytes.writeBytes32(result, 0, bytes32(packed));
+            if (n > from) Slots.loadBytes($._spacer, result, from, n - from);
+            Bytes.writeBytes32(result, n, bytes32(0));
+            Arrays.truncate(result, n);
+            return result;
+        }
         if (n == 0xff) {
             n = packed >> 8;
             result = new bytes(n);

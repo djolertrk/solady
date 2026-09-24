@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import {Arrays} from "solar:core/v1/Arrays.sol";
+import {Build} from "solar:core/v1/Build.sol";
 import {Bytes} from "solar:core/v1/Bytes.sol";
 import {Hash} from "solar:core/v1/Hash.sol";
 import {Hex} from "solar:core/v1/codecs/Hex.sol";
@@ -289,6 +290,19 @@ library LibString {
     /// and the alphabets are capitalized conditionally according to
     /// https://eips.ethereum.org/EIPS/eip-55
     function toHexStringChecksummed(address value) internal pure returns (string memory result) {
+        if (!Build.gasFirst()) {
+            // The lowercase spelling, then each letter uppercased whose nibble of the hash
+            // of the forty digits, counted from the top, is at least eight.
+            bytes memory text = bytes(toHexString(value));
+            uint256 digest = uint256(Hash.keccak256Range(text, 2, 40));
+            for (uint256 i = 2; i < 42; ++i) {
+                uint8 char = uint8(text[i]);
+                if (char > 0x39 && (digest >> (260 - 4 * i)) & 15 > 7) {
+                    text[i] = bytes1(char - 0x20);
+                }
+            }
+            return string(text);
+        }
         bytes memory out = new bytes(42);
         out[0] = "0";
         out[1] = "x";
@@ -472,9 +486,26 @@ library LibString {
         return ~((tail - (tail >> 7)) | tail);
     }
 
+    /// @dev The index of the first null byte of `s`, or 32 without one.
+    function _nullIndex(bytes32 s) private pure returns (uint256 n) {
+        while (n < 32 && s[n] != 0) ++n;
+    }
+
+    /// @dev The first `n` bytes of `s`, with the rest cleared.
+    function _smallStringPrefix(bytes32 s, uint256 n) private pure returns (bytes32) {
+        return s & ~bytes32(type(uint256).max >> (n << 3));
+    }
+
     /// @dev Returns a string from a small bytes32 string.
     /// `s` must be null-terminated, or behavior will be undefined.
     function fromSmallString(bytes32 s) internal pure returns (string memory result) {
+        if (!Build.gasFirst()) {
+            // The bytes before the first null, found by a scan.
+            uint256 n = _nullIndex(s);
+            bytes memory text = abi.encodePacked(_smallStringPrefix(s, n));
+            Arrays.truncate(text, n);
+            return string(text);
+        }
         // A null in the first eight bytes is found by testing them in turn,
         // which costs less than spreading and counting its marks. After eight
         // tests, spreading the marks still costs less than scanning to the
@@ -502,6 +533,7 @@ library LibString {
 
     /// @dev Returns the small string, with all bytes after the first null byte zeroized.
     function normalizeSmallString(bytes32 s) internal pure returns (bytes32 result) {
+        if (!Build.gasFirst()) return _smallStringPrefix(s, _nullIndex(s));
         // A null in the first seven bytes is found by testing them in turn,
         // which costs less than clearing from it with word operations; after
         // seven tests the word path costs less than a byte scan to the null.
@@ -578,6 +610,15 @@ library LibString {
         bytes memory x = bytes(a);
         bytes memory y = bytes(b);
         uint256 n = x.length < y.length ? x.length : y.length;
+        if (!Build.gasFirst()) {
+            // The first differing byte orders the strings, and the shorter
+            // one comes first when none differs.
+            for (uint256 i; i < n; ++i) {
+                if (x[i] != y[i]) return x[i] < y[i] ? int256(-1) : int256(1);
+            }
+            if (x.length == y.length) return 0;
+            return x.length < y.length ? int256(-1) : int256(1);
+        }
         // Words compare as big-endian integers, so the first differing word
         // orders the strings. A common prefix shorter than a word is masked to
         // its length; a longer one ends with the word ending at its end, whose
