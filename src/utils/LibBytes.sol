@@ -90,7 +90,15 @@ library LibBytes {
         // whole root word and the last derived word's bytes past the value.
         result = new bytes(n + 32);
         Bytes.writeBytes32(result, 0, bytes32(packed));
-        if (n > 31) Slots.loadBytes($._spacer, result, 31, n & ~uint256(31));
+        if (n > 31) {
+            // Up to two derived words directly, more through the loop.
+            if (n < 96) {
+                Bytes.writeBytes32(result, 31, Slots.load($._spacer, 0));
+                if (n > 63) Bytes.writeBytes32(result, 63, Slots.load($._spacer, 1));
+            } else {
+                Slots.loadBytes($._spacer, result, 31, n & ~uint256(31));
+            }
+        }
         // Zero past the end, as the original does, then cut to the length.
         Bytes.writeBytes32(result, n, bytes32(0));
         Arrays.truncate(result, n);
