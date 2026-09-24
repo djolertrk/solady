@@ -24,10 +24,7 @@ library LibSort {
     }
 
     function copy(uint256[] memory a) internal pure returns (uint256[] memory result) {
-        result = new uint256[](a.length);
-        for (uint256 i; i < a.length; ++i) {
-            result[i] = a[i];
-        }
+        return WordArrays.copy(a);
     }
 
     function isSorted(uint256[] memory a) internal pure returns (bool result) {
@@ -69,10 +66,7 @@ library LibSort {
     }
 
     function copy(int256[] memory a) internal pure returns (int256[] memory result) {
-        result = new int256[](a.length);
-        for (uint256 i; i < a.length; ++i) {
-            result[i] = a[i];
-        }
+        return WordArrays.copy(a);
     }
 
     function isSorted(int256[] memory a) internal pure returns (bool result) {
@@ -114,10 +108,7 @@ library LibSort {
     }
 
     function copy(address[] memory a) internal pure returns (address[] memory result) {
-        result = new address[](a.length);
-        for (uint256 i; i < a.length; ++i) {
-            result[i] = a[i];
-        }
+        return WordArrays.copy(a);
     }
 
     function isSorted(address[] memory a) internal pure returns (bool result) {
@@ -159,10 +150,7 @@ library LibSort {
     }
 
     function copy(bytes32[] memory a) internal pure returns (bytes32[] memory result) {
-        result = new bytes32[](a.length);
-        for (uint256 i; i < a.length; ++i) {
-            result[i] = a[i];
-        }
+        return WordArrays.copy(a);
     }
 
     function isSorted(bytes32[] memory a) internal pure returns (bool result) {

@@ -341,23 +341,7 @@ library LibString {
 
     /// @dev Returns `subject` repeated `times`.
     function repeat(string memory subject, uint256 times) internal pure returns (string memory) {
-        bytes memory s = bytes(subject);
-        if (times == 0 || s.length == 0) return "";
-        // Sizing the result first keeps the overflow panic of the original.
-        uint256 total = s.length * times;
-        // One copy of the subject, then the filled prefix doubled in place:
-        // `total` bytes move in a logarithmic number of copies into the one
-        // allocation, each copy reading only bytes already written.
-        bytes memory out = new bytes(total);
-        Bytes.copyInto(out, 0, s, 0, s.length);
-        uint256 filled = s.length;
-        while (filled < total) {
-            uint256 rest = total - filled;
-            uint256 step = filled < rest ? filled : rest;
-            Bytes.copyInto(out, filled, out, 0, step);
-            filled += step;
-        }
-        return string(out);
+        return Strings.repeat(subject, times);
     }
 
     /// @dev Returns a copy of `subject` sliced from `start` to `end` (exclusive).
