@@ -3,7 +3,7 @@
 **This is a partial port and a reproducible comparison. The CTO's full
 API-compatibility and equal-or-better gas target is not met.**
 
-The five implementations listed below in `src/utils/` contain neither inline assembly nor
+The implementations listed below in `src/utils/` contain neither inline assembly nor
 `unchecked` blocks. Arithmetic and array indexing retain Solidity's checks;
 explicit bit operations and `mulmod` keep their defined Solidity semantics.
 This is the experiment's concrete meaning of “safe”, not a security audit.
@@ -21,11 +21,155 @@ upstream repository. Derived code retains the upstream MIT license in
 author attribution. `LibBit` uses upstream's bit-permutation masks, and
 `LibSort` uses its `mulmod` hash with typed, bounds-checked array accesses.
 
-This branch replaces only the five libraries below in `src/utils`. Other
-upstream libraries and tests still contain assembly and unchecked blocks.
-LibSort and LibString have reduced APIs, so the whole upstream suite and
-consumers of missing functions are not expected to compile on this branch.
+This branch replaces only the libraries below in `src/utils`: five whole,
+and `LibBytes` down to its storage operations. Other upstream libraries and
+tests still contain assembly and unchecked blocks. LibString and LibBytes have
+reduced APIs, so the whole upstream suite and consumers of missing functions
+are not expected to compile on this branch.
 Use the scoped runner commands below for the published subset.
+
+## String storage, direct returns and small inputs, 2026-09-24 (later)
+
+Port commits: `268da3f` (`fromSmallString` tests its first eight bytes
+before the word path), `76b0012` (`repeat` and `copy` call the compiler-owned
+`Strings.repeat` and `WordArrays.copy`), `945ed37` (`normalizeSmallString`
+tests its first seven bytes and spells the word path out), `e7d0b14`
+(`reverse` and `toNibbles` return early from inputs with nothing to do),
+`b617b64` (the runner measures storage APIs and `directReturn`), `cfd69c9`
+(`StringStorage` and `directReturn`, below), `d0927e9` (the runner lifts the
+node's code-size limit and marks the harnesses above it), `42d9e01` (storage
+cases are set up and observed through the node, so the harness has no
+assembly), `296a93b` (the storage operations move bytes in whole words).
+
+Solar commits (unpushed): `7d56128a4` branches the set merges on each
+comparison, steps `equalsAt` with one guard and compares every pair of up to
+six words in `hasDuplicate`; `3d4957146` tests `2^64 - 1` bounds with a shift,
+validates address arrays with a cursor tested at the bottom and returns any
+real memory object in place; `fb742de66` adds `Strings.repeat` and
+`WordArrays.copy`; `7d2bbe70d` adds the `Slots` and `Return` modules;
+`9a9f70ee1` hoists slot hashes out of loops; `7738a4cac` keeps object lengths
+across writes below the heap; `e20f37cb9` adds `Slots`' byte moves;
+`bc1bf96c6` hashes constant slots at compile time when the constant is
+cheaper over the deployment's lifetime.
+
+| Harness | Runs | Before (`3e1f9415a`, port `82cbd9b`) | 228 APIs (`fb742de66`, port `e7d0b14`) | Same 228 (`bc1bf96c6`, port `296a93b`) | All 243 |
+|---|---:|---:|---:|---:|---:|
+| Combined | 200 | 0.4946x, 21 losses | 0.4617x, 17 losses | 0.4622x, 17 losses | 0.5139x, 64 losses |
+| Combined | 1,000,000 | 0.4641x, 4 losses | 0.4367x, no losses | 0.4360x, no losses | 0.4908x, 20 losses |
+| Isolated | 200 | 0.4971x, 386 losses | 0.4612x, 29 losses | 0.4612x, 29 losses | 0.5199x, 91 losses |
+| Isolated | 1,000,000 | 0.5020x, 352 losses | 0.4716x, 31 losses | 0.4716x, 31 losses | 0.5304x, 90 losses |
+
+The fifteen new APIs are reported apart as well because a storage case spends
+most of its gas on `SSTORE` and `SLOAD`, where both compilers pay the same: in
+the combined harness they take 7.4 million of the reference's 75.3 million gas
+at 200 runs and pull the total toward 1.0x. The 228 earlier APIs cost what
+they cost with `fb742de66`: alone, to the gas; in the combined harnesses, their
+bodies too (at 200 runs, 26 of 20,957 calls move by 11 gas either way), while
+their totals move with the dispatch positions of the fifteen added selectors,
+in both legs. No harness exceeds EIP-170.
+
+Per change, each API alone at 200 runs on the same port unless noted:
+
+- The set operations branch on each comparison like the upstream assembly,
+  each arm testing the cursors it advances, and return an output with no
+  capacity at once: `union(uint256[])` 0.446x to 0.411x, and every set
+  operation drops its 15 losing calls on empty inputs. Decoding does the rest
+  for addresses: `intersection(address[])` goes from 0.766x with 55 losing
+  calls to 0.626x with none.
+- Decoding tests `2^64 - 1` bounds with `x >> 64`, which needs no wide
+  constant, bounds a word array by its byte size, and validates address
+  elements with a cursor tested at the bottom after the copy: 56 gas per
+  element instead of 75. `hasDuplicate(address[])` 0.847x (7 losing) to 0.770x
+  (0), where comparing every pair of up to six words also avoids the hash
+  table.
+- A terminal return writes the ABI offset below any real memory object, not
+  only a fresh one: `toString(uint256)` 1.007x (15 losing) to 0.987x (0),
+  `toString(int256)` 1.000x (7) to 0.978x (0), minimal hex 0.375x (7) to
+  0.342x (0).
+- `Strings.repeat` doubles the filled prefix with `mcopy` without the body's
+  bounds checks and zero fill, and `WordArrays.copy` moves the length word and
+  the elements with one `mcopy`: `repeat` 0.688x (10 losing) to 0.572x (0),
+  `copy(uint256[])` 0.423x to 0.140x, `copy(address[])` 0.567x (4) to 0.293x
+  (0).
+- `reverse` returns before computing its cursors for arrays of fewer than two
+  elements, as the upstream assembly does: those save 76 gas, longer arrays
+  pay 22, and `reverse(address[])` loses no call at either setting.
+- `equalsAt` steps one cursor behind one guard: `startsWith` 0.919x (9
+  losing) to 0.903x (0). `toNibbles` returns an empty input at once (1 losing
+  to 0), and `normalizeSmallString` stops losing in the combined harness.
+
+### `StringStorage` and `directReturn`
+
+Seven of the eight `StringStorage` functions and `directReturn` are now
+ported, through two compiler-owned modules whose reference bodies are
+memory-safe assembly, the same way as `Revert.raw`:
+
+- `Slots` addresses the words at `keccak256` of a `Root` struct's slot and
+  after it, where a dynamic array at that slot keeps its elements. `load` and
+  `store` move one word at an index below `2^64`; `storeBytes`,
+  `storeCalldataBytes` and `loadBytes` move a byte range of a buffer from word
+  0, with the range and a count below `2^69` checked once before any access.
+  A region cannot reach another variable's slots, and the root word is the
+  owner's.
+- `Return.abiEncoded` ends the call returning a string ABI-encoded, encoded
+  where the string lies.
+
+`LibString.StringStorage` holds a `LibBytes.BytesStorage`, which holds a
+`Slots.Root`: one slot, the original's layout. The port's `LibBytes.sol`
+carries only the seven `BytesStorage` operations. A differential test that
+stores fourteen values from 0 to 300 bytes one after another, through both
+setters, matches the original's results and all thirteen storage words after
+every store. The runner writes each case's starting words with
+`anvil_setStorageAt` and checks a store by running it and reading the words
+back with `eth_getStorageAt`. Its first version wrote and read them with
+assembly in the harness instead, which the audit had to exempt, and which
+cost more than the exemption: a module with any assembly loses the compiler's
+bound on memory-object lengths, and every LibString API in the combined
+harness paid for checks it otherwise drops, up to 211 gas a call.
+
+Two differences remain: stores write zeros past the end of the value where
+the original copies whatever memory or calldata follows it, and `uint8At`
+returns zero from the length on, as the original does since its stale-byte
+fix, where the pinned release returns a byte a longer value left there (three
+cases per library, counted as upstream mismatches). `bytesStorage` stays
+out: it returns the nested `BytesStorage` from a `pure` function, and reaching
+it without assembly is a storage access that needs `view`.
+
+Each new API alone at 200 runs: `clear` 0.989x, `isEmpty` 0.972x, `length`
+0.970x and `uint8At` 0.938x (`LibString`'s 0.945x) lose no call in either
+library, and `directReturn` is 55 gas below upstream in every case (0.882x).
+The setters and `get` total 1.000x to 1.008x. They lose on values of 32 to 100
+bytes, which keep 31 bytes in the root slot and the rest in derived words, by
+up to 98 gas for a setter and 257 for `get`, and win on shorter and longer
+values, by up to 194 gas; `get` also loses at 254 bytes, `LibString.get` by 4
+to 7 gas below 32 bytes, and `LibString.setCalldata` by up to 72 gas on long
+values. At 1,000,000 runs they lose by up to 97 gas for a setter and 258 for
+`get`. Three causes remain: `get` allocates with `new bytes`, whose zero fill
+the byte move then overwrites; the backend passes the setters' arguments
+through frame memory, one store per argument and one load per use, because its
+stack argument layouts do not cover these callees; and `LibString` reaches
+`LibBytes` through one more call, where the constant slot arrives as an
+argument the specializer does not substitute, so its hash stays at run time.
+Solar `bc1bf96c6` hashes a constant slot at compile time when the pushed
+constant is cheaper over the deployment's lifetime; in one harness of the
+fourteen storage operations at 200 runs, `LibBytes.uint8At` goes from 27 of
+149 losing calls (by up to 12 gas) to none.
+
+What still loses among the 228 earlier APIs: in the combined harness at 200
+runs, SafeCastLib selectors whose position in the binary search costs up to
+10 gas more than solc's (12 calls) and one-byte fixed-width `toHexString` (5
+calls, 38 gas); at 1,000,000 runs, nothing. Alone, the fixed-width hex
+functions lose at a one-byte width: `toHexString` by 127 gas on the 5 values
+that fit and by 2 gas on the 14 that revert, `toHexStringNoPrefix` by up to 117
+gas on the 5 that fit (141 and 128 at 1,000,000 runs). `runeCount` loses up to
+57 gas on the empty string and two short multibyte strings, `split` 2 of 61
+calls by up to 17 gas, and at 1,000,000 runs `groupSum(uint256[])` and
+`escapeJSON` one call each, by 6 and 5 gas.
+
+Code size is the largest open item. At 200 runs the combined harnesses take
+5,422 bytes for Base64 against upstream's best 1,300, 20,743 for LibString
+against 8,558, 7,557 for LibSort against 5,791 and 4,313 for LibBit against
+3,057; only SafeCastLib is smaller (3,730 against 6,597).
 
 ## Reverts, dispatch tables and core set operations, 2026-09-24
 
@@ -450,7 +594,8 @@ retain zero mismatches at both optimizer-run settings. Artifacts are in
 | LibBit | 24 | 24 |
 | Base64 | 4 | 4 |
 | LibSort | 57 | 57 |
-| LibString | 48 | 57 |
+| LibString | 56 | 57 |
+| LibBytes (storage operations only) | 7 | 42 |
 
 These are function-declaration counts, not a claim of complete source or
 behavioral compatibility. The runner checks parameter names, types and locations,
@@ -461,16 +606,37 @@ the missing functions across the archive in `api-coverage.json`.
 The port currently covers checked casts, bit operations, Base64, four typed
 array overloads for sorting, copying, reversing, duplicate checks, sorted
 search, the sorted set operations, in-place compaction and grouped sums, and
-the value-oriented string functions (conversion, inspection, search, slicing,
-splitting, small strings, escaping, and packing): 228 of the 237 non-private
-declarations. The in-place resizing of `uniquifySorted` and `groupSum` goes
-through the compiler-owned `Arrays.truncate` and `WordArrays` primitives,
-which the AST audit lists as the trusted primitive layer. The nine
-declarations still absent are out of scope by decision (see
-[Scope decision](#scope-decision-2026-09-23)).
+the string functions (conversion, inspection, search, slicing, splitting,
+small strings, escaping, packing, packed string storage, and direct returns):
+236 of the five libraries' 237 non-private declarations, and the seven
+`BytesStorage` operations of `LibBytes` that `StringStorage` is built on. The
+in-place resizing of `uniquifySorted` and `groupSum` goes through the
+compiler-owned `Arrays.truncate` and `WordArrays` primitives, packed storage
+through `Slots`, and `directReturn` through `Return`; the AST audit lists
+these modules as the trusted primitive layer. `bytesStorage` is the one
+declaration still absent (see [Scope decision](#scope-decision-2026-09-24)).
 Tokens, authentication, proxies, cryptography, storage utilities, and other
 libraries remain outside this port. Missing constants and user-defined
 types are also outside the function audit.
+
+## Scope decision, 2026-09-24
+
+The 2026-09-23 decision below left `StringStorage` and `directReturn` out
+unless a disclosed compiler primitive covered them. Two now do, with
+memory-safe assembly reference bodies that the safe-solc leg compiles:
+
+- `Slots` reads and writes the words derived from a `Root` struct's slot,
+  where a dynamic array at that slot keeps its elements: one word at an index
+  below `2^64`, or a byte range of a buffer from word 0, checked before any
+  access. It cannot address an arbitrary slot, only the region of a root the
+  caller holds, so it is not the raw-slot primitive the earlier decision
+  rejected. `StringStorage` keeps the original's layout on top of it.
+- `Return.abiEncoded` ends the call returning a string, ABI-encoded.
+
+`bytesStorage` stays out. It returns the struct's nested `BytesStorage` from a
+`pure` function; without assembly, reaching the nested struct is a storage
+access that needs `view`, and the API audit requires the original's
+mutability. It stays listed as missing in `api-coverage.json`.
 
 ## Scope decision, 2026-09-23
 
