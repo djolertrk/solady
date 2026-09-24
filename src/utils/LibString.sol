@@ -400,28 +400,18 @@ library LibString {
         return 32 - (Math.wrappingMul(tail >> 7, LANES_01) >> 248);
     }
 
-    /// @dev `0x80` in every zero byte of `s`. A byte carries into its own high
-    /// bit exactly when it is not zero, so the kept high bits mark the zero
-    /// bytes.
-    function _nullMarks(bytes32 s) private pure returns (uint256) {
+    /// @dev `0x80` in every byte of `s` from its first zero byte on. A byte
+    /// carries into its own high bit exactly when it is not zero, so the kept
+    /// high bits mark the zero bytes; each mark then spreads to every lower
+    /// byte, which the first zero byte's mark reaches first.
+    function _nullTail(bytes32 s) private pure returns (uint256 marks) {
         uint256 x = uint256(s);
-        return ~(x | ((x & LANES_7F) + LANES_7F) | LANES_7F);
-    }
-
-    /// @dev `0x80` in every byte from the first marked one on: each of the
-    /// `_nullMarks` spreads to every lower byte, which the first zero byte's
-    /// mark reaches first.
-    function _spreadNullMarks(uint256 marks) private pure returns (uint256) {
+        marks = ~(x | ((x & LANES_7F) + LANES_7F) | LANES_7F);
         marks |= marks >> 8;
         marks |= marks >> 16;
         marks |= marks >> 32;
         marks |= marks >> 64;
-        return marks | (marks >> 128);
-    }
-
-    /// @dev `0x80` in every byte of `s` from its first zero byte on.
-    function _nullTail(bytes32 s) private pure returns (uint256) {
-        return _spreadNullMarks(_nullMarks(s));
+        marks |= marks >> 128;
     }
 
     /// @dev Keeps the bytes before the first null byte, from the string's
@@ -463,15 +453,27 @@ library LibString {
 
     /// @dev Returns the small string, with all bytes after the first null byte zeroized.
     function normalizeSmallString(bytes32 s) internal pure returns (bytes32 result) {
-        // A null in the first four bytes picks its mask from its mark directly,
-        // which costs less than spreading the marks to clear each byte from
-        // the first zero byte on.
-        uint256 marks = _nullMarks(s);
-        if (marks >> 248 != 0) return 0;
-        if (marks >> 240 != 0) return s & bytes32(bytes1(0xff));
-        if (marks >> 232 != 0) return s & bytes32(bytes2(0xffff));
-        if (marks >> 224 != 0) return s & bytes32(bytes3(0xffffff));
-        return s & bytes32(_smallStringMask(_spreadNullMarks(marks)));
+        // A null in the first seven bytes is found by testing them in turn,
+        // which costs less than clearing from it with word operations; after
+        // seven tests the word path costs less than a byte scan to the null.
+        if (s[0] == 0) return 0;
+        if (s[1] == 0) return s & bytes32(bytes1(0xff));
+        if (s[2] == 0) return s & bytes32(bytes2(0xffff));
+        if (s[3] == 0) return s & bytes32(bytes3(0xffffff));
+        if (s[4] == 0) return s & bytes32(bytes4(0xffffffff));
+        if (s[5] == 0) return s & bytes32(bytes5(0xffffffffff));
+        if (s[6] == 0) return s & bytes32(bytes6(0xffffffffffff));
+        // Otherwise each byte from the first zero byte on is cleared, spelled
+        // out here so that the word path pays for no helper calls where the
+        // helpers are shared.
+        uint256 x = uint256(s);
+        uint256 tail = ~(x | ((x & LANES_7F) + LANES_7F) | LANES_7F);
+        tail |= tail >> 8;
+        tail |= tail >> 16;
+        tail |= tail >> 32;
+        tail |= tail >> 64;
+        tail |= tail >> 128;
+        return s & bytes32(~((tail - (tail >> 7)) | tail));
     }
 
     /// @dev Returns the string as a normalized null-terminated small string.
