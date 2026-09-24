@@ -239,6 +239,17 @@ library LibString {
     {
         bytes memory b = bytes(subject);
         uint256 n = b.length;
+        if (!Build.gasFirst()) {
+            // Each letter of the other case gets its 0x20 bit flipped, one
+            // byte at a time.
+            bytes memory text = new bytes(n);
+            uint8 first = toUpper ? 0x61 : 0x41;
+            for (uint256 i; i < n; ++i) {
+                uint8 c = uint8(b[i]);
+                text[i] = bytes1(c >= first && c < first + 26 ? c ^ 0x20 : c);
+            }
+            return string(text);
+        }
         if (n == 0) return result;
         // Either direction is the same single bit flip, applied a word at a
         // time. Flipping that bit in every byte first maps uppercase letters
@@ -392,6 +403,11 @@ library LibString {
     function startsWith(string memory subject, string memory needle) internal pure returns (bool) {
         bytes memory s = bytes(subject);
         bytes memory n = bytes(needle);
+        if (!Build.gasFirst()) {
+            // The range's hash against the needle's, equal exactly when the
+            // bytes are, barring a keccak collision.
+            return n.length <= s.length && Hash.keccak256Range(s, 0, n.length) == keccak256(n);
+        }
         return n.length <= s.length && Bytes.equalsAt(s, 0, n);
     }
 
@@ -399,6 +415,10 @@ library LibString {
     function endsWith(string memory subject, string memory needle) internal pure returns (bool) {
         bytes memory s = bytes(subject);
         bytes memory n = bytes(needle);
+        if (!Build.gasFirst()) {
+            return n.length <= s.length
+                && Hash.keccak256Range(s, s.length - n.length, n.length) == keccak256(n);
+        }
         return n.length <= s.length && Bytes.equalsAt(s, s.length - n.length, n);
     }
 
