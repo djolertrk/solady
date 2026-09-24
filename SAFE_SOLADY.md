@@ -28,6 +28,72 @@ reduced APIs, so the whole upstream suite and consumers of missing functions
 are not expected to compile on this branch.
 Use the scoped runner commands below for the published subset.
 
+## Code size in size builds, 2026-09-25
+
+Port commit: `f372883`. Fast paths that only pay for themselves in gas are
+guarded by `Build.gasFirst()` from the new compiler-owned
+`solar:core/v1/Build.sol`, a constant that is false in builds optimizing for
+size, and those builds take one compact path with the same result: `get`,
+`set` and `setCalldata` of `LibBytes` with one head word and one `Slots` copy
+for every length, `fromSmallString` and `normalizeSmallString` by a scan to
+the first null, `cmp` by a byte loop, and `toHexStringChecksummed` from the
+lowercase spelling and a loop over the hash. Gas builds compile to the same
+bytecode as before.
+
+Solar commits since the previous section (unpushed), all changing only
+builds that do not optimize for gas unless noted: `3f3d166eb` outlines open
+instruction runs in gas mode where the run count pays for it, `3d2fff620`
+builds repeated constants by division and multiplication where bytes come
+first (also in gas builds' cold blocks and their EIP-170 rescue), `5054930b8`, `e3146605a`, `a4ee817f7` and `85a6f1e08` lower Base64,
+the escapes, hex and the string scans compactly, `8e1924e22` and `f12f66c3f`
+share one body per operation for the hex spellings, `equalsAt`, the set
+operations and the sorts (signed elements through a flip word), `e556c3291`
+merges bodies that become identical after lowering, `1aa4246b0` stores the
+free-memory pointer once before dispatch, `ec8c73ff0` adds `Build`, and
+`043840b9f` consumes loop-free single-use helpers in size builds too.
+
+Runtime bytes of each combined harness at one optimizer run, where the
+compiler optimizes for size, against upstream's best build:
+
+| Harness | Upstream best | Before (`db94dc8ae`, `ac7c883`) | Now (`043840b9f`, `f372883`) |
+|---|---:|---:|---:|
+| Base64 | 1,294 | 4,069 | 1,084 |
+| LibBit | 2,980 | 2,821 | 2,458 |
+| LibBytes | 1,110 | 1,266 | 1,072 |
+| LibSort | 5,545 | 7,448 | 5,300 |
+| LibString | 8,324 | 13,541 | 8,195 |
+| SafeCastLib | 5,486 | 3,292 | 2,027 |
+
+Every harness is now smaller than upstream's best build at one run. The gas
+legs are unchanged: at 200 runs the combined matrix is 0.4934x of upstream's
+best gas and at 1,000,000 runs 0.4839x, with no losing call at either.
+Solar's builds of the port match the oracle on every case at all three
+settings; the 48 to 50 mismatches per setting are upstream's own, as before.
+The compiler's UI suite and its in-repo Foundry projects pass, and its
+external Foundry suite still differs from solc only on OpenZeppelin's
+history-block test after `vm.roll`.
+
+Size builds put bytes first, so their calls cost more gas than the gas
+builds': at one run the combined matrix is 0.7363x of upstream's best gas,
+with 2,289 of 21,471 calls losing. Base64 is 4.15x, its decoder taking one
+character at a time without a table (8.6x); a table would cost about 80
+bytes for roughly half the decoder's gas, which at one run is about even.
+LibBit is 1.18x and LibString 1.02x, while LibSort (0.59x) and SafeCastLib
+(0.94x) still win.
+
+Gas builds at 200 runs remain larger than upstream's: the combined LibString
+harness is 16,957 bytes (21,588 before `3f3d166eb`) against 8,558. That is
+the price of every call winning; closing it would bring back the losses the
+gas legs closed.
+
+Measured and rejected: a shared checked allocator (the call protocol and the
+stack arrangement at each site cost more than the inline bump: LibString +7
+bytes, Base64 +26), shared `Slots` byte copies (LibBytes +4), skipping the
+hash for short needles in size builds (+16 bytes for about 40 gas per
+match), consuming single-use helpers with loops too (LibSort +290: two
+overloads that lower to one body can no longer merge), and consuming them
+only after the merge (LibSort 5,423 bytes instead of 5,267).
+
 ## Last losses and EIP-170, 2026-09-24 (late night)
 
 Port commit: `ac7c883`. `LibBytes.get` writes the one or two derived words of
