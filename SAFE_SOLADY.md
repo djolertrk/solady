@@ -28,6 +28,93 @@ reduced APIs, so the whole upstream suite and consumers of missing functions
 are not expected to compile on this branch.
 Use the scoped runner commands below for the published subset.
 
+## Storage words, loop entries and small inputs, 2026-09-24 (evening)
+
+Port commit: `d522300` (`LibBytes.get` loads whole words from byte 31, and the
+setters read a value's first word whole once it has 32 bytes or more).
+
+Solar commits (unpushed): `e2162ebee` drops masks and sign extensions a range
+check already makes idle, and lets a call that never returns cut its edge;
+`d87847cb4` returns a static value of up to 64 bytes from scratch memory in
+gas mode; `5579fd09b` spells fixed-width hex below sixteen bytes in one word;
+`3652d90fb` counts a short string's runes inline; `73850579c` orders two masks
+of one word and reads a reread length as the checked sum stored with it;
+`3b7a31434` specializes a helper past callers no entry reaches; `839a1507c`
+steps a byte cursor and a slot through `Slots`' byte moves; `ceace78c6`
+replaces a reused branch condition with the truth its scope proves;
+`35353ea31` enters a loop in the order the entering stack already holds the
+words the loop carries.
+
+| Harness | Runs | Before (`bc1bf96c6`, port `296a93b`) | Now (`35353ea31`, port `d522300`) | Now, 228 earlier APIs |
+|---|---:|---:|---:|---:|
+| Combined | 200 | 0.5139x, 64 losses | 0.5108x, 12 losses | 0.4591x, 10 losses |
+| Combined | 1,000,000 | 0.4908x, 20 losses | 0.4876x, no losses | 0.4328x, no losses |
+| Isolated | 200 | 0.5199x, 91 losses | 0.5166x, 8 losses | 0.4579x, no losses |
+| Isolated | 1,000,000 | 0.5304x, 90 losses | 0.5272x, 9 losses | 0.4683x, 1 loss |
+
+Each item below is measured with the API alone against upstream's best build
+unless noted.
+
+- **SafeCastLib.** Casts whose result the ABI would mask again keep the value
+  the range check already bounded, and a static result of up to two words
+  returns from scratch memory instead of the heap: `toUint136`, `toInt112` and
+  `toInt208` together go from 0.7486x to 0.6616x at 200 runs, and the combined
+  harness from 0.6934x to 0.6683x with 10 losing calls instead of 12.
+- **Fixed-width hex.** A width below sixteen bytes is spelled in one word with
+  one store; one-byte widths lost by up to 141 gas and now win by 7 to 19.
+  `toHexString` and `toHexStringNoPrefix` with a width: 0.2850x with 24 losing
+  calls to 0.2812x with none at 200 runs, 0.2965x to 0.2925x at 1,000,000.
+- **`runeCount`.** A rune's length comes from a nibble table, so the count
+  writes no memory and inlines; a subject of up to 31 bytes that is all ASCII
+  returns at once. 0.2316x with 3 of 6 calls losing to 0.2222x with none at
+  200 runs, 0.2313x to 0.2216x at 1,000,000.
+- **Storage.** The three causes named in the previous section are closed where
+  they came from. `get` loads whole words from byte 31, which the spare word's
+  zeroing covers, and the compiler proves its range from the two masks of one
+  word; the constant slot reaches `LibBytes` through `LibString`'s wrapper,
+  because the wrapper the inliner left behind no longer blocks specialization;
+  and `Slots`' byte moves step a cursor and a slot, so the hash has one use
+  and the setters' arguments die before the loop and stay on the stack. The
+  setters read a first word of 32 bytes or more whole. In the harness of the
+  fourteen storage operations, losing calls go from 46 to none at 200 runs and
+  from 35 to none at 1,000,000; `get` from 1.0007x to 0.9907x for `LibBytes`
+  and from 1.0014x to 0.9889x for `LibString`, `setCalldata` from 1.0004x to
+  0.9980x and from 0.9995x to 0.9967x, `set` from 0.9985x to 0.9970x and from
+  0.9995x to 0.9980x (200 runs).
+- **`split`.** Its two search loops carried eight words each in an order the
+  entering block had to permute with five exchanges; the loops now take the
+  order that block's stack holds. `split` goes from 0.7680x with 2 of 61 calls
+  losing to 0.7628x with none at 200 runs and from 0.7730x to 0.7678x at
+  1,000,000; `indicesOf` from 0.6893x to 0.6826x and `indexOf` from 0.8105x to
+  0.7960x at 200 runs.
+
+What still loses. In the combined harness at 200 runs: ten reverting calls to
+five SafeCastLib casts, by up to 11 gas, and two `LibString.get` calls, by 3
+gas. Both are dispatch positions: solc's via-IR build reaches the lowest
+SafeCastLib selectors first in a plain scan, and its legacy build reaches
+`get` through a different split, while the compiler's selector tree, which the
+switch planner prices for 200 runs, reaches them later; the deposit weight
+behind that price was measured and kept on 2026-09-14. Alone, the 228 earlier
+APIs lose no call at 200 runs and one at 1,000,000 (`escapeJSON` on the empty
+string, by 5 gas). Each `get` alone loses 4 of 13 calls on values of 32 to 64
+bytes, by up to 45 gas at 200 runs and 48 at 1,000,000: in a contract of one
+function solc's dispatcher does almost nothing, and the zero fill of `new
+bytes` and the call from the ABI wrapper into `get` are left to pay for.
+Inlining `get` into its wrapper spills around its loop again and costs more.
+
+Code size is still open. At 200 runs the combined LibString harness is 21,469
+bytes against upstream's best 8,558 (the short fixed-width hex path added
+about 0.8 KB), Base64's 5,418 against 1,300, LibSort's 7,511 against 5,791 and
+LibBit's 4,279 against 3,057; SafeCastLib's is 2,966 against 6,597. At
+1,000,000 runs the combined LibString harness is 25,288 bytes, over EIP-170;
+the runner lifts the node's limit, and the harness is an aggregate for
+measurement, not a deployable application.
+
+Measured and rejected this round: pricing `inline_returns` over the
+deployment's lifetime (+0.70% runtime bytes in the corpus), an outlined zero
+fill for the hex path (its call spilled), and inlining the storage getter into
+its wrapper, which spills around the loop again (+71 gas at worst).
+
 ## String storage, direct returns and small inputs, 2026-09-24 (later)
 
 Port commits: `268da3f` (`fromSmallString` tests its first eight bytes
