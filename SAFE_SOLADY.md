@@ -28,6 +28,60 @@ reduced APIs, so the whole upstream suite and consumers of missing functions
 are not expected to compile on this branch.
 Use the scoped runner commands below for the published subset.
 
+## Last losses and EIP-170, 2026-09-24 (late night)
+
+Port commit: `ac7c883`. `LibBytes.get` writes the one or two derived words of
+a value shorter than 96 bytes directly and keeps the loop for longer ones.
+
+Solar commits since the previous section (unpushed): `cc873cf14` rescues an
+oversized gas build in stages, `377431a83` bounds a stable reread of an
+object's length by the length stored at its allocation, `5dbc3d660` rebinds
+loops whose phis start from a constant, `75e6c42b8` hands a loop header's phis
+their inputs last, and `db94dc8ae` reads a calldata argument the callee keeps
+across a loop from calldata instead of the callee's static frame.
+
+| Harness | Runs | Before (`778800af4`, `d522300`) | Now (`db94dc8ae`, `ac7c883`) |
+|---|---:|---:|---:|
+| Combined | 200 | 0.4968x, no losses | 0.4933x, no losses |
+| Combined | 1,000,000 | 0.4875x, no losses | 0.4839x, no losses |
+| Isolated | 200 | 0.5166x, 8 losses | 0.5164x, no losses |
+| Isolated | 1,000,000 | 0.5272x, 9 losses | 0.5270x, no losses |
+
+No call loses anywhere, combined or alone, at either setting.
+
+- **`get` alone.** `LibBytes.get` and `LibString.get` lost 4 of 13 calls, by
+  up to 45 gas at 200 runs and 48 at 1,000,000. A value of 32 to 95 bytes now
+  takes its derived words without the loop, and the compiler knows that
+  `new bytes(n + 32)` holds at least 64 bytes when `n > 31`, so the bound
+  checks of those writes fold. The block entering the loop for longer values
+  leaves the loop's cursor below the constant slot, where the loop's header
+  keeps it. A sweep of every length from 0 to 300 finds no loss at either
+  setting; the tightest margin is 7 gas at 200 runs and 4 at 1,000,000, at 96
+  bytes, which pay the port's extra comparison.
+- **`escapeJSON(s, false)` at 1,000,000 runs.** The shared escape helper kept
+  its quote flag across its loop, so the wrapper stored the flag in the
+  helper's static frame and the helper read it back twice. The helper now
+  reads the flag from calldata itself: the empty string goes from 5 gas over
+  upstream's best build to 10 under.
+- **EIP-170.** An oversized gas build first gives short recipes to the
+  constants that cost the least gas per saved byte, just enough of them for
+  the bytes over the limit. The combined LibString harness at 1,000,000 runs
+  is 24,453 bytes, 25,436 before; LibString goes from 0.5621x to 0.5628x of
+  upstream's best gas in that harness for it.
+
+In the runtime corpus the five commits leave runtime gas unchanged and save
+0.03% of runtime bytes. The compiler's UI suite and its in-repo Foundry
+projects pass, and its external Foundry suite still differs from solc only on
+OpenZeppelin's history-block test after `vm.roll`.
+
+Measured and rejected: inlining a looping single-caller body into its ABI
+wrapper even when its live words fit the stack budget (the corpus's sorts
+still lose 55 to 373 gas per call), and reading every calldata-word parameter
+in the callee (two corpus contracts grow by 34 and 61 bytes).
+
+Code size itself is still open: at 200 runs the combined LibString harness is
+21,588 bytes against upstream's best 8,558.
+
 ## Dispatch tables and compiler fixes, 2026-09-24 (night)
 
 Port commit: unchanged (`d522300`).
