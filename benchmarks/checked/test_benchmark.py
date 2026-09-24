@@ -84,6 +84,18 @@ class SafetyAuditTests(unittest.TestCase):
             ],
         )
 
+    def test_generated_harness_is_exempt(self):
+        assembly = {"nodes": [{"nodeType": "InlineAssembly"}]}
+        output = {
+            "sources": {
+                "Harness.sol": {"ast": assembly},
+                "src/Port.sol": {"ast": assembly},
+            }
+        }
+        self.assertEqual(
+            benchmark.safety_violations(output), [("src/Port.sol", "InlineAssembly")]
+        )
+
     def test_comments_do_not_create_false_violations(self):
         output = {
             "sources": {
@@ -176,6 +188,38 @@ class WrapperNameTests(unittest.TestCase):
         self.assertRegex(name, "^f[0-9a-f]{8}$")
         self.assertNotEqual(name, benchmark.wrapper_name("LibSort", "sort(int256[])"))
         self.assertNotEqual(name, benchmark.wrapper_name("LibBit", "sort(uint256[])"))
+
+
+class StorageLayoutTests(unittest.TestCase):
+    def test_short_value_packs_its_length_below_its_bytes(self):
+        words = benchmark.packed_words(b"abc")
+        self.assertEqual(words[0], b"abc" + bytes(28) + bytes([3]))
+        self.assertEqual(words[1:], [bytes(32)] * benchmark.STORAGE_WORDS)
+
+    def test_short_value_continues_from_byte_31_in_derived_words(self):
+        value = bytes(range(40))
+        words = benchmark.packed_words(value)
+        self.assertEqual(words[0], value[:31] + bytes([40]))
+        self.assertEqual(words[1], value[31:].ljust(32, b"\0"))
+        self.assertEqual(words[2], bytes(32))
+
+    def test_long_value_keeps_its_length_in_the_root(self):
+        value = bytes(i % 251 for i in range(300))
+        words = benchmark.packed_words(value)
+        self.assertEqual(words[0], ((300 << 8) | 0xFF).to_bytes(32, "big"))
+        self.assertEqual(b"".join(words[1:11])[:300], value)
+        self.assertEqual(words[10][300 - 288 :], bytes(20))
+
+    def test_shorter_value_leaves_later_words_of_a_longer_one(self):
+        longer = benchmark.packed_words(b"y" * 300)
+        words = benchmark.packed_words(b"x" * 40, longer)
+        self.assertEqual(words[1], b"x" * 9 + bytes(23))
+        self.assertEqual(words[2:], longer[2:])
+
+    def test_reads_start_from_the_stored_words(self):
+        cases = list(benchmark.storage_vectors("length", [b"", b"ab"], bytes))
+        self.assertEqual([case[1] for case in cases], [[0], [2]])
+        self.assertEqual(cases[1][2][0][-1], 2)
 
 
 class CaseIdentityTests(unittest.TestCase):

@@ -82,11 +82,14 @@ def safety_violations(output):
     # The compiler-owned modules are the trusted primitive layer: their bodies
     # spell operations that have no other Solidity spelling, and the compiler
     # lowers them directly rather than compiling the body. They are recorded
-    # in the audit by hash instead of being held to the port's policy.
+    # in the audit by hash instead of being held to the port's policy. The
+    # generated harness is identical in every leg and is not part of the port:
+    # its storage cases write and read raw words with assembly, because the
+    # same text must reach the state of both libraries' structs.
     return [
         (path, node["nodeType"])
         for path, source in output["sources"].items()
-        if not path.startswith(CORE_PREFIX)
+        if not path.startswith(CORE_PREFIX) and path != "Harness.sol"
         for node in walk(source["ast"])
         if node.get("nodeType") in {"InlineAssembly", "UncheckedBlock"}
     ]
@@ -301,10 +304,21 @@ def prepare(
         raise ValueError("harness wrapper names collide")
     for row in apis:
         returns = list(row["returns"])
+        # A storage parameter is the harness's own state variable, set up by a
+        # raw write of its words before the call; the call takes the rest.
+        row["storage"] = [
+            i for i, (_, loc) in enumerate(row["params"]) if loc == "storage"
+        ]
+        row["wrapper_params"] = [
+            (i, p) for i, p in enumerate(row["params"]) if i not in row["storage"]
+        ]
         # Observe in-place updates through the identical wrapper in both sources:
-        # a function without results returns every memory argument it may update.
+        # a function without results returns every memory argument it may update,
+        # and a storage update returns the words it leaves behind.
         row["observed"] = []
-        if not returns:
+        if not returns and row["storage"]:
+            returns = [("bytes32[]", "memory")]
+        elif not returns:
             row["observed"] = [
                 i for i, (_, loc) in enumerate(row["params"]) if loc == "memory"
             ] or [0]
@@ -322,28 +336,40 @@ def prepare(
             harness += f'import "{path}";\n'
     for library in sorted({r["library"] for r in harness_apis}):
         harness += f"contract {library}Harness {{\n"
-        for row in harness_apis:
-            if row["library"] != library:
-                continue
+        rows = [row for row in harness_apis if row["library"] == library]
+        if any(row["storage"] for row in rows):
+            harness += STORAGE_HELPERS
+        for row in rows:
             params = ", ".join(
                 t + ("" if loc == "default" else " " + loc) + f" a{i}"
-                for i, (t, loc) in enumerate(row["params"])
+                for i, (t, loc) in row["wrapper_params"]
             )
             result_types = ", ".join(
                 t + ("" if loc == "default" else " " + loc)
                 for t, loc in row["wrapper_returns"]
             )
-            call = (
-                row["library"]
-                + "."
-                + row["name"]
-                + "("
-                + ", ".join(f"a{i}" for i in range(len(row["params"])))
-                + ")"
-            )
-            observed = ", ".join(f"a{i}" for i in row["observed"])
-            body = f"return {call};" if row["returns"] else f"{call}; return ({observed});"
-            harness += f"function {row['wrapper']}({params}) external pure returns ({result_types}) {{ {body} }}\n"
+            state = "s" + row["wrapper"]
+            args = [
+                state if i in row["storage"] else f"a{i}"
+                for i in range(len(row["params"]))
+            ]
+            call = row["library"] + "." + row["name"] + "(" + ", ".join(args) + ")"
+            mutability = "pure"
+            if row["storage"]:
+                struct = row["params"][row["storage"][0]][0].removeprefix("struct ")
+                slot = f"uint256 slot; assembly {{ slot := {state}.slot }}"
+                harness += f"{struct} internal {state};\n"
+                harness += f"function g{row['wrapper'][1:]}(bytes32[] calldata w) external {{ {slot} _setWords(slot, w); }}\n"
+                mutability = "view" if row["mutability"] == "view" else ""
+                body = (
+                    f"return {call};"
+                    if row["returns"]
+                    else f"{call}; {slot} return _words(slot);"
+                )
+            else:
+                observed = ", ".join(f"a{i}" for i in row["observed"])
+                body = f"return {call};" if row["returns"] else f"{call}; return ({observed});"
+            harness += f"function {row['wrapper']}({params}) external {mutability} returns ({result_types}) {{ {body} }}\n"
         harness += "}\n"
     safe["Harness.sol"] = {"content": harness}
     upstream = closure(archive["sources"], safe.keys() - {"Harness.sol"} - set(port_only))
@@ -352,7 +378,7 @@ def prepare(
     audit = {
         "archive": str(ARCHIVE.relative_to(REPO)),
         "archive_sha256": digest(ARCHIVE.read_bytes()),
-        "policy": "no InlineAssembly or UncheckedBlock in any safe source or dependency; compiler-owned solar:core modules are the trusted primitive layer and are exempt",
+        "policy": "no InlineAssembly or UncheckedBlock in any safe source or dependency; compiler-owned solar:core modules are the trusted primitive layer and are exempt; the shared generated harness uses assembly only for raw storage setup and observation",
         "core_modules": {
             p: digest(v["content"].encode()) for p, v in safe.items() if p.startswith(CORE_PREFIX)
         },
@@ -372,6 +398,85 @@ def prepare(
     }
     (out / "api-coverage.json").write_text(json.dumps(audit, indent=2) + "\n")
     return safe, upstream, apis, audit
+
+
+# The words a storage case sets up and observes: the root slot and this many
+# words derived from it, which covers every value the storage vectors store.
+STORAGE_WORDS = 12
+
+# Raw access to a state variable's words for storage cases, so that setup and
+# observation do not depend on the library under test. Harness-only.
+STORAGE_HELPERS = f"""function _words(uint256 slot) private view returns (bytes32[] memory w) {{
+    w = new bytes32[]({STORAGE_WORDS + 1});
+    assembly {{
+        mstore(0x00, slot)
+        let base := keccak256(0x00, 0x20)
+        mstore(add(w, 0x20), sload(slot))
+        for {{ let k := 0 }} lt(k, {STORAGE_WORDS}) {{ k := add(k, 1) }} {{
+            mstore(add(w, add(0x40, shl(5, k))), sload(add(base, k)))
+        }}
+    }}
+}}
+function _setWords(uint256 slot, bytes32[] calldata w) private {{
+    assembly {{
+        mstore(0x00, slot)
+        let base := keccak256(0x00, 0x20)
+        sstore(slot, calldataload(w.offset))
+        for {{ let k := 0 }} lt(k, {STORAGE_WORDS}) {{ k := add(k, 1) }} {{
+            sstore(add(base, k), calldataload(add(w.offset, shl(5, add(k, 1)))))
+        }}
+    }}
+}}
+"""
+
+
+def packed_words(value, base=None):
+    """The words of `value` stored over `base` in the `BytesStorage` layout.
+
+    Up to 254 bytes keep the length in the root's low byte and the first 31
+    bytes above it; a longer value keeps 0xff there and its length above. The
+    rest follows in the derived words, and words a shorter value does not
+    reach keep what `base` left in them.
+    """
+    words = list(base) if base else [bytes(32)] * (STORAGE_WORDS + 1)
+    n = len(value)
+    if n < 0xFF:
+        words[0] = value[:31].ljust(31, b"\0") + bytes([n])
+        start = 31
+    else:
+        words[0] = ((n << 8) | 0xFF).to_bytes(32, "big")
+        start = 0
+    for k, i in enumerate(range(start, n, 32)):
+        words[1 + k] = value[i : i + 32].ljust(32, b"\0")
+    return words
+
+
+def storage_vectors(name, values, convert):
+    """Cases for the `BytesStorage` operations: setup words, arguments, result.
+
+    Every read is set up over a longer value, so words and bytes past the
+    stored value's end hold what the longer value left there.
+    """
+    longer = packed_words(bytes((i * 13 + 5) % 95 + 32 for i in range(300)))
+    if name in ("set", "setCalldata"):
+        for base in (packed_words(b""), longer):
+            for v in values:
+                yield [convert(v)], [packed_words(v, base)], base
+    elif name == "clear":
+        for v in values:
+            words = packed_words(v, longer)
+            yield [], [[bytes(32)] + words[1:]], words
+    elif name in ("get", "length", "isEmpty"):
+        for v in values:
+            out = convert(v) if name == "get" else len(v) if name == "length" else len(v) == 0
+            yield [], [out], packed_words(v, longer)
+    elif name == "uint8At":
+        for v in values:
+            n = len(v)
+            for i in sorted({0, 1, 30, 31, 32, 62, 63, 64, max(n - 1, 0), n, n + 1, 300, MAX}):
+                yield [i], [v[i] if i < n else 0], packed_words(v, longer)
+    else:
+        raise ValueError(f"no storage oracle for {name}")
 
 
 def test_vectors(row, rng):
@@ -629,6 +734,13 @@ def test_vectors(row, rng):
                     }[name]
                     yield [x], [result]
         return
+    if row["library"] == "LibBytes" and row["storage"]:
+        blobs = [
+            bytes((i * 37 + 11) % 256 for i in range(n))
+            for n in [0, 1, 5, 31, 32, 33, 63, 64, 100, 254, 255, 256, 300]
+        ]
+        yield from storage_vectors(name, blobs, bytes)
+        return
     if row["library"] == "LibString":
         NOT_FOUND = MAX
         words = ["", "a", "ab", "abc", "hello world", "aaa", "banana", "a" * 32, "a" * 33]
@@ -673,6 +785,18 @@ def test_vectors(row, rng):
             return '"' + out + '"' if quotes else out
 
         small = [b"", b"a", b"hello", b"ab\x00cd", b"z" * 31, b"z" * 32, b"\x00abc"]
+        if row["storage"]:
+            texts = [
+                bytes((i * 7 + 3) % 95 + 32 for i in range(n))
+                for n in [0, 1, 5, 31, 32, 33, 63, 64, 100, 254, 255, 256, 300]
+            ]
+            yield from storage_vectors(name, texts, bytes.decode)
+            return
+        if name == "directReturn":
+            for n in [0, 1, 31, 32, 33, 64, 100, 300]:
+                s = "".join(chr((i * 7 + 3) % 95 + 32) for i in range(n))
+                yield [s], [s]
+            return
         if name == "toHexStringChecksummed":
             for x in scalars:
                 address = "0x" + (x & mask(160)).to_bytes(20, "big").hex()
@@ -892,6 +1016,22 @@ def test_vectors(row, rng):
     raise ValueError(f"no oracle for {row}")
 
 
+def send_transaction(url, sender, to, data):
+    tx = rpc(
+        url,
+        "eth_sendTransaction",
+        [{"from": sender, "to": to, "data": "0x" + data.hex(), "gas": hex(80000000)}],
+    )
+    for _ in range(400):
+        receipt = rpc(url, "eth_getTransactionReceipt", [tx])
+        if receipt is not None:
+            if int(receipt["status"], 16) != 1:
+                raise RuntimeError(f"setup transaction failed: {to}")
+            return
+        time.sleep(0.02)
+    raise RuntimeError(f"setup receipt timed out: {to}")
+
+
 def rpc(url, method, params):
     request = urllib.request.Request(
         url,
@@ -1069,12 +1209,15 @@ def run(args):
             print(
                 f"{row['library']}.{row['signature']}: {len(vectors)} cases", flush=True
             )
-            for index, (values, expected) in enumerate(vectors):
-                signature = (
-                    row["wrapper"] + "(" + ",".join(t for t, _ in row["params"]) + ")"
-                )
-                calldata = keccak(signature.encode())[:4] + encode(
-                    [t for t, _ in row["params"]], values
+            for index, (values, expected, *setup) in enumerate(vectors):
+                types = [t for _, (t, _) in row["wrapper_params"]]
+                signature = row["wrapper"] + "(" + ",".join(types) + ")"
+                calldata = keccak(signature.encode())[:4] + encode(types, values)
+                setup_data = (
+                    keccak(f"g{row['wrapper'][1:]}(bytes32[])".encode())[:4]
+                    + encode(["bytes32[]"], [setup[0]])
+                    if setup
+                    else None
                 )
                 expected_revert = isinstance(expected, bytes)
                 expected_bytes = (
@@ -1082,6 +1225,14 @@ def run(args):
                 )
                 measurements = {}
                 for label in binaries:
+                    if setup_data is not None:
+                        # The state the call starts from, written raw.
+                        send_transaction(
+                            url,
+                            sender,
+                            addresses[label][row["library"] + "Harness"],
+                            setup_data,
+                        )
                     tx = {
                         "from": sender,
                         "to": addresses[label][row["library"] + "Harness"],
