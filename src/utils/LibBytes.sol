@@ -108,7 +108,8 @@ library LibBytes {
             if (n == 0xff) (n, from) = (packed >> 8, 0);
             result = new bytes(n + 32);
             Bytes.writeBytes32(result, 0, bytes32(packed));
-            if (n > from) Slots.loadBytes($._spacer, result, from, n - from);
+            // Whole derived words, the last one reaching into the spare word.
+            if (n > from) Slots.loadBytes($._spacer, result, from, (n - from + 31) & ~uint256(31));
             Bytes.writeBytes32(result, n, bytes32(0));
             Arrays.truncate(result, n);
             return result;

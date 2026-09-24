@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import {Arrays} from "solar:core/v1/Arrays.sol";
 import {Bits} from "solar:core/v1/Bits.sol";
+import {Build} from "solar:core/v1/Build.sol";
 import {Bytes} from "solar:core/v1/Bytes.sol";
 
 /// @notice Checked Solidity implementation of the pinned Solady LibBit API.
@@ -108,6 +109,15 @@ library LibBit {
 
     function toNibbles(bytes memory s) internal pure returns (bytes memory result) {
         uint256 n = s.length;
+        if (!Build.gasFirst()) {
+            // Each byte's high nibble, then its low one.
+            result = new bytes(n * 2);
+            for (uint256 i; i < n; ++i) {
+                uint8 b = uint8(s[i]);
+                (result[2 * i], result[2 * i + 1]) = (bytes1(b >> 4), bytes1(b & 15));
+            }
+            return result;
+        }
         // Below one block the input fits one word, zero-padded by the
         // conversion: its nibbles fill one word, cut down to the output. An
         // empty input has none to spread.
