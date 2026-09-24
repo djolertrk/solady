@@ -84,18 +84,6 @@ class SafetyAuditTests(unittest.TestCase):
             ],
         )
 
-    def test_generated_harness_is_exempt(self):
-        assembly = {"nodes": [{"nodeType": "InlineAssembly"}]}
-        output = {
-            "sources": {
-                "Harness.sol": {"ast": assembly},
-                "src/Port.sol": {"ast": assembly},
-            }
-        }
-        self.assertEqual(
-            benchmark.safety_violations(output), [("src/Port.sol", "InlineAssembly")]
-        )
-
     def test_comments_do_not_create_false_violations(self):
         output = {
             "sources": {
@@ -220,6 +208,17 @@ class StorageLayoutTests(unittest.TestCase):
         cases = list(benchmark.storage_vectors("length", [b"", b"ab"], bytes))
         self.assertEqual([case[1] for case in cases], [[0], [2]])
         self.assertEqual(cases[1][2][0][-1], 2)
+
+    def test_stores_expect_the_words_they_leave(self):
+        base, value = benchmark.packed_words(b""), b"z" * 40
+        cases = list(benchmark.storage_vectors("set", [value], bytes))
+        self.assertEqual(cases[0], ([value], [], base, benchmark.packed_words(value)))
+
+    def test_derived_slots_follow_the_root_hash(self):
+        slots = benchmark.storage_slots(3)
+        base = int.from_bytes(benchmark.keccak((3).to_bytes(32, "big")), "big")
+        self.assertEqual(slots[:3], [3, base, base + 1])
+        self.assertEqual(len(slots), benchmark.STORAGE_WORDS + 1)
 
 
 class CaseIdentityTests(unittest.TestCase):

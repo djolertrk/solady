@@ -84,14 +84,11 @@ def safety_violations(output):
     # The compiler-owned modules are the trusted primitive layer: their bodies
     # spell operations that have no other Solidity spelling, and the compiler
     # lowers them directly rather than compiling the body. They are recorded
-    # in the audit by hash instead of being held to the port's policy. The
-    # generated harness is identical in every leg and is not part of the port:
-    # its storage cases write and read raw words with assembly, because the
-    # same text must reach the state of both libraries' structs.
+    # in the audit by hash instead of being held to the port's policy.
     return [
         (path, node["nodeType"])
         for path, source in output["sources"].items()
-        if not path.startswith(CORE_PREFIX) and path != "Harness.sol"
+        if not path.startswith(CORE_PREFIX)
         for node in walk(source["ast"])
         if node.get("nodeType") in {"InlineAssembly", "UncheckedBlock"}
     ]
@@ -306,8 +303,8 @@ def prepare(
         raise ValueError("harness wrapper names collide")
     for row in apis:
         returns = list(row["returns"])
-        # A storage parameter is the harness's own state variable, set up by a
-        # raw write of its words before the call; the call takes the rest.
+        # A storage parameter is the harness's own state variable, whose words
+        # the runner writes before the call; the call takes the rest.
         row["storage"] = [
             i for i, (_, loc) in enumerate(row["params"]) if loc == "storage"
         ]
@@ -315,11 +312,11 @@ def prepare(
             (i, p) for i, p in enumerate(row["params"]) if i not in row["storage"]
         ]
         # Observe in-place updates through the identical wrapper in both sources:
-        # a function without results returns every memory argument it may update,
-        # and a storage update returns the words it leaves behind.
+        # a function without results returns every memory argument it may update.
+        # A storage update is observed through the words it leaves in storage.
         row["observed"] = []
-        if not returns and row["storage"]:
-            returns = [("bytes32[]", "memory")]
+        if row["storage"]:
+            pass
         elif not returns:
             row["observed"] = [
                 i for i, (_, loc) in enumerate(row["params"]) if loc == "memory"
@@ -339,8 +336,7 @@ def prepare(
     for library in sorted({r["library"] for r in harness_apis}):
         harness += f"contract {library}Harness {{\n"
         rows = [row for row in harness_apis if row["library"] == library]
-        if any(row["storage"] for row in rows):
-            harness += STORAGE_HELPERS
+        slots = 0
         for row in rows:
             params = ", ".join(
                 t + ("" if loc == "default" else " " + loc) + f" a{i}"
@@ -358,20 +354,18 @@ def prepare(
             call = row["library"] + "." + row["name"] + "(" + ", ".join(args) + ")"
             mutability = "pure"
             if row["storage"]:
+                # Every struct here occupies one slot, in declaration order.
                 struct = row["params"][row["storage"][0]][0].removeprefix("struct ")
-                slot = f"uint256 slot; assembly {{ slot := {state}.slot }}"
                 harness += f"{struct} internal {state};\n"
-                harness += f"function g{row['wrapper'][1:]}(bytes32[] calldata w) external {{ {slot} _setWords(slot, w); }}\n"
+                row["storage_slot"] = slots
+                slots += 1
                 mutability = "view" if row["mutability"] == "view" else ""
-                body = (
-                    f"return {call};"
-                    if row["returns"]
-                    else f"{call}; {slot} return _words(slot);"
-                )
+                body = f"return {call};" if row["returns"] else f"{call};"
             else:
                 observed = ", ".join(f"a{i}" for i in row["observed"])
                 body = f"return {call};" if row["returns"] else f"{call}; return ({observed});"
-            harness += f"function {row['wrapper']}({params}) external {mutability} returns ({result_types}) {{ {body} }}\n"
+            returns_clause = f" returns ({result_types})" if result_types else ""
+            harness += f"function {row['wrapper']}({params}) external {mutability}{returns_clause} {{ {body} }}\n"
         harness += "}\n"
     safe["Harness.sol"] = {"content": harness}
     upstream = closure(archive["sources"], safe.keys() - {"Harness.sol"} - set(port_only))
@@ -380,7 +374,7 @@ def prepare(
     audit = {
         "archive": str(ARCHIVE.relative_to(REPO)),
         "archive_sha256": digest(ARCHIVE.read_bytes()),
-        "policy": "no InlineAssembly or UncheckedBlock in any safe source or dependency; compiler-owned solar:core modules are the trusted primitive layer and are exempt; the shared generated harness uses assembly only for raw storage setup and observation",
+        "policy": "no InlineAssembly or UncheckedBlock in any safe source or dependency; compiler-owned solar:core modules are the trusted primitive layer and are exempt",
         "core_modules": {
             p: digest(v["content"].encode()) for p, v in safe.items() if p.startswith(CORE_PREFIX)
         },
@@ -406,31 +400,11 @@ def prepare(
 # words derived from it, which covers every value the storage vectors store.
 STORAGE_WORDS = 12
 
-# Raw access to a state variable's words for storage cases, so that setup and
-# observation do not depend on the library under test. Harness-only.
-STORAGE_HELPERS = f"""function _words(uint256 slot) private view returns (bytes32[] memory w) {{
-    w = new bytes32[]({STORAGE_WORDS + 1});
-    assembly {{
-        mstore(0x00, slot)
-        let base := keccak256(0x00, 0x20)
-        mstore(add(w, 0x20), sload(slot))
-        for {{ let k := 0 }} lt(k, {STORAGE_WORDS}) {{ k := add(k, 1) }} {{
-            mstore(add(w, add(0x40, shl(5, k))), sload(add(base, k)))
-        }}
-    }}
-}}
-function _setWords(uint256 slot, bytes32[] calldata w) private {{
-    assembly {{
-        mstore(0x00, slot)
-        let base := keccak256(0x00, 0x20)
-        sstore(slot, calldataload(w.offset))
-        for {{ let k := 0 }} lt(k, {STORAGE_WORDS}) {{ k := add(k, 1) }} {{
-            sstore(add(base, k), calldataload(add(w.offset, shl(5, add(k, 1)))))
-        }}
-    }}
-}}
-"""
 
+def storage_slots(slot):
+    """The root slot and the derived slots whose words a storage case covers."""
+    base = int.from_bytes(keccak(slot.to_bytes(32, "big")), "big")
+    return [slot] + [(base + k) % (1 << 256) for k in range(STORAGE_WORDS)]
 
 def packed_words(value, base=None):
     """The words of `value` stored over `base` in the `BytesStorage` layout.
@@ -454,20 +428,22 @@ def packed_words(value, base=None):
 
 
 def storage_vectors(name, values, convert):
-    """Cases for the `BytesStorage` operations: setup words, arguments, result.
+    """Cases for the `BytesStorage` operations.
 
-    Every read is set up over a longer value, so words and bytes past the
-    stored value's end hold what the longer value left there.
+    Each case is its arguments, its result, the words storage starts from and,
+    for a store, the words it must leave. Every read is set up over a longer
+    value, so words and bytes past the stored value's end hold what the longer
+    value left there.
     """
     longer = packed_words(bytes((i * 13 + 5) % 95 + 32 for i in range(300)))
     if name in ("set", "setCalldata"):
         for base in (packed_words(b""), longer):
             for v in values:
-                yield [convert(v)], [packed_words(v, base)], base
+                yield [convert(v)], [], base, packed_words(v, base)
     elif name == "clear":
         for v in values:
             words = packed_words(v, longer)
-            yield [], [[bytes(32)] + words[1:]], words
+            yield [], [], words, [bytes(32)] + words[1:]
     elif name in ("get", "length", "isEmpty"):
         for v in values:
             out = convert(v) if name == "get" else len(v) if name == "length" else len(v) == 0
@@ -1217,33 +1193,25 @@ def run(args):
             print(
                 f"{row['library']}.{row['signature']}: {len(vectors)} cases", flush=True
             )
-            for index, (values, expected, *setup) in enumerate(vectors):
+            for index, (values, expected, *storage) in enumerate(vectors):
                 types = [t for _, (t, _) in row["wrapper_params"]]
                 signature = row["wrapper"] + "(" + ",".join(types) + ")"
                 calldata = keccak(signature.encode())[:4] + encode(types, values)
-                setup_data = (
-                    keccak(f"g{row['wrapper'][1:]}(bytes32[])".encode())[:4]
-                    + encode(["bytes32[]"], [setup[0]])
-                    if setup
-                    else None
-                )
+                setup, final = (storage + [None, None])[:2]
+                slots = storage_slots(row["storage_slot"]) if setup else []
                 expected_revert = isinstance(expected, bytes)
                 expected_bytes = (
                     expected if expected_revert else encode(row["outputs"], expected)
                 )
                 measurements = {}
                 for label in binaries:
-                    if setup_data is not None:
-                        # The state the call starts from, written raw.
-                        send_transaction(
-                            url,
-                            sender,
-                            addresses[label][row["library"] + "Harness"],
-                            setup_data,
-                        )
+                    harness_address = addresses[label][row["library"] + "Harness"]
+                    # The words storage starts from, written by the node itself.
+                    for slot, word in zip(slots, setup or []):
+                        rpc(url, "anvil_setStorageAt", [harness_address, hex(slot), "0x" + word.hex()])
                     tx = {
                         "from": sender,
-                        "to": addresses[label][row["library"] + "Harness"],
+                        "to": harness_address,
                         "data": "0x" + calldata.hex(),
                         "gas": hex(80000000),
                     }
@@ -1278,6 +1246,18 @@ def run(args):
                         "failed": failed,
                         "return_data": "0x" + actual,
                     }
+                    if final is not None:
+                        # A store is observed through the words it leaves:
+                        # run it for real and read them back.
+                        send_transaction(url, sender, harness_address, calldata)
+                        words = [
+                            rpc(url, "eth_getStorageAt", [harness_address, hex(slot), "latest"])
+                            for slot in slots
+                        ]
+                        measurement["storage"] = words
+                        measurement["matches_oracle"] &= [
+                            int(word, 16) for word in words
+                        ] == [int.from_bytes(word, "big") for word in final]
                     if not measurement["matches_oracle"]:
                         failures.append(
                             {
@@ -1311,6 +1291,9 @@ def run(args):
                         "calldata": "0x" + calldata.hex(),
                         "expected_revert": expected_revert,
                         "expected": "0x" + expected_bytes.hex(),
+                        "expected_storage": (
+                            ["0x" + word.hex() for word in final] if final is not None else None
+                        ),
                         "variants": measurements,
                     }
                 )
