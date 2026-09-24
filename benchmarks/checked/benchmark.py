@@ -40,6 +40,8 @@ CORE_PREFIX = "solar:core/v1/"
 # the solc legs resolve the same import.
 DEFAULT_CORE_MODULES = REPO.parent / "solar/crates/sema/src/core/v1"
 MAX = (1 << 256) - 1
+# EIP-170's limit on deployed runtime code, in bytes.
+CODE_SIZE_LIMIT = 0x6000
 
 
 def mask(n):
@@ -1051,6 +1053,10 @@ def launch_anvil(evm):
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
+    # A combined harness holds every API of a library in one contract, an
+    # aggregate for measurement rather than an application, and a build that
+    # trades bytes for gas can pass the deployment size limit with it. Deploy
+    # it anyway; the report records every contract's size against the limit.
     process = subprocess.Popen(
         [
             "anvil",
@@ -1061,6 +1067,7 @@ def launch_anvil(evm):
             "--steps-tracing",
             "--gas-limit",
             "100000000",
+            "--disable-code-size-limit",
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -1194,6 +1201,7 @@ def run(args):
                     "creation_bytes": len(bytecode) // 2,
                     "runtime_bytes": (len(runtime) - 2) // 2,
                     "deployment_gas": int(receipt["gasUsed"], 16),
+                    "exceeds_code_size_limit": (len(runtime) - 2) // 2 > CODE_SIZE_LIMIT,
                 }
         selected_apis = [
             row
@@ -1428,9 +1436,11 @@ def write_report(report, path):
         "|---|" + "---:|" * len(labels),
     ]
     for name in sorted(report["artifacts"]["solar-safe"]["contracts"]):
+        contracts = [report["artifacts"][x]["contracts"][name] for x in labels]
         sizes = [
-            str(report["artifacts"][x]["contracts"][name]["runtime_bytes"])
-            for x in labels
+            str(c["runtime_bytes"])
+            + (" (over EIP-170)" if c.get("exceeds_code_size_limit") else "")
+            for c in contracts
         ]
         lines.append(f"| {name} | " + " | ".join(sizes) + " |")
     lines += [
