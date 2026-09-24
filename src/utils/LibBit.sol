@@ -109,8 +109,10 @@ library LibBit {
     function toNibbles(bytes memory s) internal pure returns (bytes memory result) {
         uint256 n = s.length;
         // Below one block the input fits one word, zero-padded by the
-        // conversion: its nibbles fill one word, cut down to the output.
+        // conversion: its nibbles fill one word, cut down to the output. An
+        // empty input has none to spread.
         if (n < 16) {
+            if (n == 0) return "";
             result = abi.encodePacked(bytes32(_spread(uint256(bytes32(s)) >> 128)));
             Arrays.truncate(result, n * 2);
             return result;

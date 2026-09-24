@@ -17,6 +17,7 @@ library LibSort {
     }
 
     function reverse(uint256[] memory a) internal pure {
+        if (a.length < 2) return;
         for (uint256 i; i < a.length / 2; ++i) {
             uint256 j = a.length - 1 - i;
             (a[i], a[j]) = (a[j], a[i]);
@@ -59,6 +60,7 @@ library LibSort {
     }
 
     function reverse(int256[] memory a) internal pure {
+        if (a.length < 2) return;
         for (uint256 i; i < a.length / 2; ++i) {
             uint256 j = a.length - 1 - i;
             (a[i], a[j]) = (a[j], a[i]);
@@ -101,6 +103,7 @@ library LibSort {
     }
 
     function reverse(address[] memory a) internal pure {
+        if (a.length < 2) return;
         for (uint256 i; i < a.length / 2; ++i) {
             uint256 j = a.length - 1 - i;
             (a[i], a[j]) = (a[j], a[i]);
@@ -143,6 +146,7 @@ library LibSort {
     }
 
     function reverse(bytes32[] memory a) internal pure {
+        if (a.length < 2) return;
         for (uint256 i; i < a.length / 2; ++i) {
             uint256 j = a.length - 1 - i;
             (a[i], a[j]) = (a[j], a[i]);
