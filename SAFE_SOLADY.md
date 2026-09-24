@@ -28,6 +28,79 @@ reduced APIs, so the whole upstream suite and consumers of missing functions
 are not expected to compile on this branch.
 Use the scoped runner commands below for the published subset.
 
+## Dispatch tables and compiler fixes, 2026-09-24 (night)
+
+Port commit: unchanged (`d522300`).
+
+The compiler branch is rebased onto main `b49d5306b`; the commits the previous
+section names are now `ca0409555`, `9acb3d20e`, `5bb64fa8b`, `f88e35831`,
+`6c785f661`, `6b840919d`, `960e23729`, `95dde31b8` and `17c9fe520`. Solar
+commits since (unpushed): `7671728ba`, `19eadcfd0` and `c8df2bff7` fix three
+miscompiles described below; `a69ca6d90` folds the phi that a revert helper's
+dropped edge leaves behind; `778800af4` lets the selector switch dispatch
+through short bucket tables.
+
+| Harness | Runs | Before (`17c9fe520`) | Now (`778800af4`) | Now, 228 earlier APIs |
+|---|---:|---:|---:|---:|
+| Combined | 200 | 0.5108x, 12 losses | 0.4968x, no losses | 0.4442x, no losses |
+| Combined | 1,000,000 | 0.4876x, no losses | 0.4875x, no losses | 0.4327x, no losses |
+| Isolated | 200 | 0.5166x, 8 losses | 0.5166x, 8 losses | 0.4579x, no losses |
+| Isolated | 1,000,000 | 0.5272x, 9 losses | 0.5272x, 9 losses | 0.4683x, 1 loss |
+
+- **SafeCastLib dispatch.** The switch planner tried bucket tables with about
+  one selector per slot and, below that, only a balanced tree: at 200 runs
+  SafeCastLib's 95 selectors took a three-level tree with chains of twelve,
+  which reached the lowest selectors 46 gas after solc's via-IR scan did. Tables
+  of 4 to 64 slots now compete, and a power-of-two table hashes with a mask. The
+  harness dispatches through 16 slots: one indexed jump replaces the tree's
+  three levels. The ten reverting calls that lost by up to 11 gas win now, and
+  SafeCastLib in the combined harness goes from 0.6675x to 0.4831x at 200 runs.
+- **`LibString.get` in the combined harness.** Its two calls that lost 3 gas
+  win now; LibString goes from 0.6267x to 0.5818x at 200 runs. At 1,000,000 runs
+  its 56 selectors move from `mod 57` to `and 63`, cheaper per selector but
+  second in their slot for some heavily sampled calls: LibString 0.5592x to
+  0.5621x, the whole harness still 0.4876x to 0.4875x.
+- **Cast wrappers.** A cast inlined into its ABI wrapper joins the passing
+  path with the path through the outlined revert helper; once that helper is
+  known not to return, the join kept a phi with one input, which the backend
+  parked in memory. `toUint256(int256)` and `toInt256(uint256)` alone go from
+  0.6981x to 0.5746x at 200 runs and from 0.7091x to 0.5836x at 1,000,000; no
+  other API alone moves.
+
+In the runtime corpus the two performance commits move runtime gas by -0.01%
+and runtime bytes by -0.02%.
+
+**Compiler fixes.** The compiler's external Foundry suite (morpho-blue,
+solmate, solady, seaport, OpenZeppelin and v4-core) failed on main itself.
+A void function ending in a call to a helper that returns a value jumped into
+the helper and left the discarded value on its caller's stack (solady's
+LibBitmap and MinHeap tests, a v4-core swap fuzz test); pointer casts hid heap
+destinations from the spill-hazard analysis, so seaport's navigator helpers
+failed to compile and an OpenZeppelin test created its token from corrupted
+constructor arguments; and a free-memory-pointer load after a low-memory copy
+was reloaded from a slot nothing had stored. All three are fixed with
+regression tests. With this section's compiler the suite differs from solc
+only on OpenZeppelin's history-block test after `vm.roll`, as before (v4-core's
+unsound tick-relation fuzz test passes or fails with the fuzzer's draws). The
+fixes leave every harness here byte-identical and shrink the runtime corpus's
+code by 0.11%.
+
+What still loses. Alone at 200 runs: each `get` on 4 of 13 calls, values of 32
+to 64 bytes, by up to 45 gas (48 at 1,000,000). The loop that loads the words
+enters with its cursor under six other words, the wrapper calls `get`, `new
+bytes` zero-fills memory that `get` overwrites, and the allocation check cannot
+see that the free-memory pointer is small; the last would need a whole-contract
+bound on the pointer that only assembly-free code gives. At 1,000,000 runs,
+`escapeJSON` on the empty string, by 5 gas: the call from its wrapper.
+
+Measured and rejected: inlining a single-caller body that loops and returns
+memory into its ABI wrapper. `escapeJSON("")` stops losing and `get` gains 2
+gas, but the runtime corpus's sorts lose 55 to 373 gas per call and 52 bytes.
+
+Code size is still open. At 200 runs the combined LibString harness is 21,515
+bytes against upstream's best 8,558 and SafeCastLib's 2,964 against 6,597; at
+1,000,000 runs LibString's is 25,436 bytes, over EIP-170.
+
 ## Storage words, loop entries and small inputs, 2026-09-24 (evening)
 
 Port commit: `d522300` (`LibBytes.get` loads whole words from byte 31, and the
