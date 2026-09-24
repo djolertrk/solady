@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import {Arrays} from "solar:core/v1/Arrays.sol";
 import {Bytes} from "solar:core/v1/Bytes.sol";
+import {CalldataBytes} from "solar:core/v1/CalldataBytes.sol";
 import {Slots} from "solar:core/v1/Slots.sol";
 
 /// @notice Checked Solidity replacements for the byte storage operations of
@@ -28,11 +29,15 @@ library LibBytes {
     /// @dev Sets the value of the bytes storage `$` to `s`.
     function set(BytesStorage storage $, bytes memory s) internal {
         uint256 n = s.length;
-        if (n < 0xff) {
-            // The length in the low byte, the first 31 bytes above it, and
-            // the rest from byte 31 on in the derived words.
+        if (n < 32) {
+            // The length in the low byte and the value above it.
             $._spacer.word = bytes32((uint256(bytes32(s)) >> 8 << 8) | n);
-            if (n > 31) Slots.storeBytes($._spacer, s, 31, n - 31);
+        } else if (n < 0xff) {
+            // The length in the low byte, the first 31 bytes above it, from
+            // a first word that is whole, and the rest from byte 31 on in the
+            // derived words.
+            $._spacer.word = bytes32((uint256(Bytes.readBytes32(s, 0)) >> 8 << 8) | n);
+            Slots.storeBytes($._spacer, s, 31, n - 31);
         } else {
             $._spacer.word = bytes32((n << 8) | 0xff);
             Slots.storeBytes($._spacer, s, 0, n);
@@ -42,9 +47,11 @@ library LibBytes {
     /// @dev Sets the value of the bytes storage `$` to `s`.
     function setCalldata(BytesStorage storage $, bytes calldata s) internal {
         uint256 n = s.length;
-        if (n < 0xff) {
+        if (n < 32) {
             $._spacer.word = bytes32((uint256(bytes32(s)) >> 8 << 8) | n);
-            if (n > 31) Slots.storeCalldataBytes($._spacer, s, 31, n - 31);
+        } else if (n < 0xff) {
+            $._spacer.word = bytes32((uint256(CalldataBytes.readBytes32(s, 0)) >> 8 << 8) | n);
+            Slots.storeCalldataBytes($._spacer, s, 31, n - 31);
         } else {
             $._spacer.word = bytes32((n << 8) | 0xff);
             Slots.storeCalldataBytes($._spacer, s, 0, n);
@@ -79,10 +86,11 @@ library LibBytes {
             return result;
         }
         // Up to 31 bytes above the length, then the rest from the derived
-        // words; a spare word past the end takes the whole root word.
+        // words, all of them whole: a spare word past the end takes the
+        // whole root word and the last derived word's bytes past the value.
         result = new bytes(n + 32);
         Bytes.writeBytes32(result, 0, bytes32(packed));
-        if (n > 31) Slots.loadBytes($._spacer, result, 31, n - 31);
+        if (n > 31) Slots.loadBytes($._spacer, result, 31, n & ~uint256(31));
         // Zero past the end, as the original does, then cut to the length.
         Bytes.writeBytes32(result, n, bytes32(0));
         Arrays.truncate(result, n);
