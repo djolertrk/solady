@@ -38,7 +38,9 @@ counter on the stack when its starting literal is also used after the loop,
 where size builds had given it a memory home loaded and stored on every
 iteration; `3c3f5792a` prices the label of a jump that tail merging removes
 as at least `PUSH1`; `873d1d528` stages short returns in the scratch words;
-`19e484a01` and `ef0c71961` replace the shared quicksort with a heapsort;
+`19e484a01` and `ef0c71961` replaced the shared quicksort with a heapsort,
+and `351829a6c` restores it, since the heapsort (and a Shell sort measured in
+between) cost gas on every sort call;
 `e11a046bf` retries a rejected specialization with its one-byte literals
 alone; `a64377964` proves the arrays the shared set helpers return clean, so
 an address result is not copied and masked; `5037f35ea` folds a right shift
@@ -49,21 +51,23 @@ bytecode unchanged on both corpora.
 
 Runtime bytes of each combined harness at one optimizer run:
 
-| Harness | Upstream best | Before (`160f8a8fa`, `5685b37`) | Now (`ef0c71961`, `2c640de`) |
+| Harness | Upstream best | Before (`160f8a8fa`, `5685b37`) | Now (`351829a6c`, `2c640de`) |
 |---|---:|---:|---:|
 | Base64 | 1,294 | 1,084 | 1,043 |
 | LibBit | 2,980 | 2,250 | 2,110 |
 | LibBytes | 1,110 | 1,047 | 1,008 |
-| LibSort | 5,545 | 5,050 | 4,443 |
+| LibSort | 5,545 | 5,050 | 4,811 |
 | LibString | 8,324 | 8,169 | 7,207 |
 | SafeCastLib | 5,486 | 2,027 | 2,025 |
 
-Each API alone in its own harness: 231 of 243 are no larger than upstream's
-best build (207 before), 45,967 bytes in total against upstream's 59,125
-(54,105 before). Most of the twelve still larger pay for checks that
-upstream's assembly skips: `toHexString(value, length)` and its no-prefix
-twin (+62, +72) check that twice the length neither overflows nor exceeds
-the allocation limit, both address spellings (+16, +27) check their
+Each API alone in its own harness: 223 of 243 are no larger than upstream's
+best build (207 before), 49,183 bytes in total against upstream's 59,125
+(54,105 before). `groupSum` (+252 to +301) and `insertionSort` (+213 to +232)
+alone carry the whole quicksort, whose gas is worth more than those bytes.
+Most of the other twelve still larger pay for checks that upstream's
+assembly skips: `toHexString(value, length)` and its no-prefix twin (+62,
++72) check that twice the length neither overflows nor exceeds the
+allocation limit, both address spellings (+16, +27) check their
 allocation against the free-memory pointer's limit and pass the value to the
 shared helper through memory, `LibBytes.get` and `LibString.get` (+47, +37)
 zero their allocation before copying into it, and `fromSmallString` (+48)
@@ -71,29 +75,30 @@ checks its truncation. `Base64.encode` with flags (+19, +51), both
 `setCalldata` (+6) and `unpackTwo` (+3) were not analysed further.
 
 The compiler's own corpora agree: in size builds its UI codegen fixtures
-shrink 4.62% (1,076 smaller, 9 larger), and the runtime corpus at one run
+shrink 4.40% (1,075 smaller, 9 larger), and the runtime corpus at one run
 loses 1.92% of its runtime bytes with no case larger (upstream LibString
 -8.0%, OpenZeppelin's governor -5.6%, SignatureChecker -4.7%).
 
 The gas legs are unchanged: the gas builds of every harness are
 byte-identical, so the combined matrix stays at 0.4934x of upstream's best
-gas at 200 runs and 0.4839x at 1,000,000, with no losing call. Size builds
-spend more gas on sorting: a heapsort takes about 2.3 times the quicksort's
-gas on word arrays, so LibSort at one run is 0.77x of upstream's best gas
-(0.59x before) and the combined matrix 0.8625x, with 2,330 of 21,471 calls
-losing. Solar's builds match the oracle on every case; 4,050 random calls of
-every sort, `insertionSort` and `groupSum` overload in size builds and 720
-unoptimized, and 4,000 of the new case and prefix paths in size and gas
-builds, agree with Python models. The compiler's UI suite and its in-repo
-Foundry projects pass, and its external Foundry suite still differs from
-solc only on OpenZeppelin's history-block test after `vm.roll`.
+gas at 200 runs and 0.4839x at 1,000,000, with no losing call. Size builds'
+own gas at one run is 0.7254x of upstream's best, with 2,020 of 21,471 calls
+losing (0.7363x and 2,289 in the previous section); the benchmark's `sort`,
+`insertionSort` and `groupSum` calls take 9.36M gas against upstream's
+15.92M. Solar's builds match the oracle on every case, and 4,000 random calls
+of the new case and prefix paths in size and gas builds agree with a Python
+model. The compiler's UI suite and its in-repo Foundry projects pass, and
+its external Foundry suite still differs from solc only on OpenZeppelin's
+history-block test after `vm.roll`.
 
 Measured and rejected: the wide stack-permutation search in size builds (UI
 +4 bytes), passing single-site arguments on the stack (+28), letting size
-builds' specialization raise gas (one fixture +265), a heapsort that carries
-its key down into a hole (+30 bytes for 5.5% less sorting gas), and keeping
-immediates for sixteen instructions instead of four (upstream LibString in the
-runtime corpus +55 bytes).
+builds' specialization raise gas (one fixture +265), sorting with a heapsort
+or a Shell sort (368 and 439 bytes smaller in the LibSort harness, but the
+sort calls took 20.46M and 11.25M gas against the quicksort's 9.36M, 1.5 to
+4.7 and 1.05 to 2.1 times per call), and keeping immediates for sixteen
+instructions instead of four (upstream LibString in the runtime corpus +55
+bytes).
 
 ## Code size in size builds, 2026-09-25
 
