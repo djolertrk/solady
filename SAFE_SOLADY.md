@@ -28,40 +28,111 @@ reduced APIs, so the whole upstream suite and consumers of missing functions
 are not expected to compile on this branch.
 Use the scoped runner commands below for the published subset.
 
+## Code size, second round, 2026-09-25
+
+Port commit: `2c640de`. Size builds flip case one byte at a time and compare
+a prefix or suffix by hashing the range, as upstream does.
+
+Solar commits since the previous section (unpushed): `ad19980f8` keeps a loop
+counter on the stack when its starting literal is also used after the loop,
+where size builds had given it a memory home loaded and stored on every
+iteration; `3c3f5792a` prices the label of a jump that tail merging removes
+as at least `PUSH1`; `873d1d528` stages short returns in the scratch words;
+`19e484a01` and `ef0c71961` replace the shared quicksort with a heapsort;
+`e11a046bf` retries a rejected specialization with its one-byte literals
+alone; `a64377964` proves the arrays the shared set helpers return clean, so
+an address result is not copied and masked; `5037f35ea` folds a right shift
+past an argument's proved width; and `1a84ff0b7` duplicates a wide immediate
+used again within four instructions. All change only builds that do not
+optimize for gas, except `a64377964` and `5037f35ea`, which leave gas builds'
+bytecode unchanged on both corpora.
+
+Runtime bytes of each combined harness at one optimizer run:
+
+| Harness | Upstream best | Before (`160f8a8fa`, `5685b37`) | Now (`ef0c71961`, `2c640de`) |
+|---|---:|---:|---:|
+| Base64 | 1,294 | 1,084 | 1,043 |
+| LibBit | 2,980 | 2,250 | 2,110 |
+| LibBytes | 1,110 | 1,047 | 1,008 |
+| LibSort | 5,545 | 5,050 | 4,443 |
+| LibString | 8,324 | 8,169 | 7,207 |
+| SafeCastLib | 5,486 | 2,027 | 2,025 |
+
+Each API alone in its own harness: 231 of 243 are no larger than upstream's
+best build (207 before), 45,967 bytes in total against upstream's 59,125
+(54,105 before). Most of the twelve still larger pay for checks that
+upstream's assembly skips: `toHexString(value, length)` and its no-prefix
+twin (+62, +72) check that twice the length neither overflows nor exceeds
+the allocation limit, both address spellings (+16, +27) check their
+allocation against the free-memory pointer's limit and pass the value to the
+shared helper through memory, `LibBytes.get` and `LibString.get` (+47, +37)
+zero their allocation before copying into it, and `fromSmallString` (+48)
+checks its truncation. `Base64.encode` with flags (+19, +51), both
+`setCalldata` (+6) and `unpackTwo` (+3) were not analysed further.
+
+The compiler's own corpora agree: in size builds its UI codegen fixtures
+shrink 4.62% (1,076 smaller, 9 larger), and the runtime corpus at one run
+loses 1.92% of its runtime bytes with no case larger (upstream LibString
+-8.0%, OpenZeppelin's governor -5.6%, SignatureChecker -4.7%).
+
+The gas legs are unchanged: the gas builds of every harness are
+byte-identical, so the combined matrix stays at 0.4934x of upstream's best
+gas at 200 runs and 0.4839x at 1,000,000, with no losing call. Size builds
+spend more gas on sorting: a heapsort takes about 2.3 times the quicksort's
+gas on word arrays, so LibSort at one run is 0.77x of upstream's best gas
+(0.59x before) and the combined matrix 0.8625x, with 2,330 of 21,471 calls
+losing. Solar's builds match the oracle on every case; 4,050 random calls of
+every sort, `insertionSort` and `groupSum` overload in size builds and 720
+unoptimized, and 4,000 of the new case and prefix paths in size and gas
+builds, agree with Python models. The compiler's UI suite and its in-repo
+Foundry projects pass, and its external Foundry suite still differs from
+solc only on OpenZeppelin's history-block test after `vm.roll`.
+
+Measured and rejected: the wide stack-permutation search in size builds (UI
++4 bytes), passing single-site arguments on the stack (+28), letting size
+builds' specialization raise gas (one fixture +265), a heapsort that carries
+its key down into a hole (+30 bytes for 5.5% less sorting gas), and keeping
+immediates for sixteen instructions instead of four (upstream LibString in the
+runtime corpus +55 bytes).
+
 ## Code size in size builds, 2026-09-25
 
-Port commit: `f372883`. Fast paths that only pay for themselves in gas are
-guarded by `Build.gasFirst()` from the new compiler-owned
-`solar:core/v1/Build.sol`, a constant that is false in builds optimizing for
-size, and those builds take one compact path with the same result: `get`,
-`set` and `setCalldata` of `LibBytes` with one head word and one `Slots` copy
-for every length, `fromSmallString` and `normalizeSmallString` by a scan to
-the first null, `cmp` by a byte loop, and `toHexStringChecksummed` from the
-lowercase spelling and a loop over the hash. Gas builds compile to the same
-bytecode as before.
+Port commits: `f372883` and `5685b37`. Fast paths that only pay for
+themselves in gas are guarded by `Build.gasFirst()` from the new
+compiler-owned `solar:core/v1/Build.sol`, a constant that is false in builds
+optimizing for size, and those builds take one compact path with the same
+result: `get`, `set` and `setCalldata` of `LibBytes` with one head word and
+one `Slots` copy of whole words for every length, `fromSmallString` and
+`normalizeSmallString` by a scan to the first null, `cmp` and `toNibbles` by
+byte loops, and `toHexStringChecksummed` from the lowercase spelling and a
+loop over the hash. Gas builds compile to the same bytecode as before.
 
 Solar commits since the previous section (unpushed), all changing only
 builds that do not optimize for gas unless noted: `3f3d166eb` outlines open
 instruction runs in gas mode where the run count pays for it, `3d2fff620`
 builds repeated constants by division and multiplication where bytes come
-first (also in gas builds' cold blocks and their EIP-170 rescue), `5054930b8`, `e3146605a`, `a4ee817f7` and `85a6f1e08` lower Base64,
-the escapes, hex and the string scans compactly, `8e1924e22` and `f12f66c3f`
+first (also in gas builds' cold blocks and their EIP-170 rescue),
+`5054930b8`, `e3146605a`, `a4ee817f7` and `85a6f1e08` lower Base64, the
+escapes, hex and the string scans compactly, `8e1924e22` and `f12f66c3f`
 share one body per operation for the hex spellings, `equalsAt`, the set
 operations and the sorts (signed elements through a flip word), `e556c3291`
 merges bodies that become identical after lowering, `1aa4246b0` stores the
-free-memory pointer once before dispatch, `ec8c73ff0` adds `Build`, and
-`043840b9f` consumes loop-free single-use helpers in size builds too.
+free-memory pointer once before dispatch, `ec8c73ff0` adds `Build`,
+`043840b9f` consumes loop-free single-use helpers in size builds too,
+`3514d67d4` lets size builds substitute literal flags into no-inline helpers,
+and `7ab617755` and `160f8a8fa` have them find duplicates by table alone and
+sort without the scans for sorted input.
 
 Runtime bytes of each combined harness at one optimizer run, where the
 compiler optimizes for size, against upstream's best build:
 
-| Harness | Upstream best | Before (`db94dc8ae`, `ac7c883`) | Now (`043840b9f`, `f372883`) |
+| Harness | Upstream best | Before (`db94dc8ae`, `ac7c883`) | Now (`160f8a8fa`, `5685b37`) |
 |---|---:|---:|---:|
 | Base64 | 1,294 | 4,069 | 1,084 |
-| LibBit | 2,980 | 2,821 | 2,458 |
-| LibBytes | 1,110 | 1,266 | 1,072 |
-| LibSort | 5,545 | 7,448 | 5,300 |
-| LibString | 8,324 | 13,541 | 8,195 |
+| LibBit | 2,980 | 2,821 | 2,250 |
+| LibBytes | 1,110 | 1,266 | 1,047 |
+| LibSort | 5,545 | 7,448 | 5,050 |
+| LibString | 8,324 | 13,541 | 8,169 |
 | SafeCastLib | 5,486 | 3,292 | 2,027 |
 
 Every harness is now smaller than upstream's best build at one run. The gas
