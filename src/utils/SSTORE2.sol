@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {Code, CodeView} from "solar:core/v1/Code.sol";
+import {Code} from "solar:core/v1/Code.sol";
 import {Create} from "solar:core/v1/Create.sol";
 
 /// @notice Checked Solidity implementation of the pinned Solady SSTORE2 API.
@@ -91,15 +91,12 @@ library SSTORE2 {
 
     /// @dev Equivalent to `read(pointer, 0, 2 ** 256 - 1)`.
     function read(address pointer) internal view returns (bytes memory data) {
-        return Code.read(_data(pointer));
+        return read(pointer, 0, type(uint256).max);
     }
 
     /// @dev Equivalent to `read(pointer, start, 2 ** 256 - 1)`.
     function read(address pointer, uint256 start) internal view returns (bytes memory data) {
-        CodeView stored = _data(pointer);
-        uint256 n = Code.length(stored);
-        if (start >= n) return "";
-        return Code.read(Code.slice(stored, start, n - start));
+        return read(pointer, start, type(uint256).max);
     }
 
     /// @dev Returns a slice of the data on `pointer` from `start` to `end`.
@@ -110,11 +107,12 @@ library SSTORE2 {
         view
         returns (bytes memory data)
     {
-        CodeView stored = _data(pointer);
-        uint256 n = Code.length(stored);
+        // The data is the code after the STOP byte. The read checks its range
+        // against the code size this line already took.
+        uint256 n = pointer.code.length - 1;
         if (end > n) end = n;
         if (start >= end) return "";
-        return Code.read(Code.slice(stored, start, end - start));
+        return Code.read(pointer, start + 1, end - start);
     }
 
     /// @dev The creation code of the storage contract for `data`: it copies the
@@ -124,11 +122,6 @@ library SSTORE2 {
         if (data.length > 0xfffe) revert DeploymentFailed();
         // PUSH2 l, DUP1, PUSH1 0x0a, RETURNDATASIZE, CODECOPY, RETURNDATASIZE, RETURN, STOP
         return abi.encodePacked(hex"61", uint16(data.length + 1), hex"80600a3d393df300", data);
-    }
-
-    /// @dev The data a storage contract holds: its code after the STOP byte.
-    function _data(address pointer) private view returns (CodeView) {
-        return Code.slice(pointer, 1, pointer.code.length - 1);
     }
 
     /// @dev The address a CREATE3 proxy's one deployment gets: its first
