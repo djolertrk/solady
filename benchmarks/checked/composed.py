@@ -42,8 +42,56 @@ pragma solidity ^0.8.20;
 
 import "src/utils/Base64.sol";
 import "src/utils/LibBit.sol";
+import "src/utils/LibCall.sol";
+import "src/utils/LibClone.sol";
 import "src/utils/LibSort.sol";
 import "src/utils/LibString.sol";
+import "src/utils/SafeTransferLib.sol";
+import "src/utils/SSTORE2.sol";
+
+/// @dev A token whose `transfer`, `transferFrom` and `approve` answer `true`.
+contract MockToken {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+    uint256 public totalSupply;
+
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+        totalSupply += amount;
+    }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        allowance[from][msg.sender] -= amount;
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+        return true;
+    }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        return true;
+    }
+}
+
+/// @dev A token whose `transfer` answers nothing, as older tokens do.
+contract QuietToken {
+    mapping(address => uint256) public balanceOf;
+
+    function mint(address to, uint256 amount) external {
+        balanceOf[to] += amount;
+    }
+
+    function transfer(address to, uint256 amount) external {
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+    }
+}
 
 contract Composed {
     /// @dev ERC-721 style metadata: escape the name, render the identifier and
@@ -94,14 +142,102 @@ contract Composed {
         at = LibString.indexOf(text, needle);
         hexed = LibString.toHexString(raw);
     }
+
+    /// @dev Store bytes in data contracts three ways, then read ranges back.
+    function storeAndRead(bytes memory data, bytes32 salt)
+        external
+        returns (
+            bytes memory whole,
+            bytes memory tail,
+            bytes memory middle,
+            bool counterfactual,
+            bool deterministic
+        )
+    {
+        address pointer = SSTORE2.write(data);
+        whole = SSTORE2.read(pointer);
+        tail = SSTORE2.read(pointer, 1);
+        middle = SSTORE2.read(pointer, 1, 5);
+        counterfactual = SSTORE2.writeCounterfactual(data, salt)
+            == SSTORE2.predictCounterfactualAddress(data, salt);
+        deterministic =
+            SSTORE2.writeDeterministic(data, salt) == SSTORE2.predictDeterministicAddress(salt);
+    }
+
+    /// @dev Clone this contract twice and call through both clones.
+    function cloneAndCall(uint256 x, bytes32 salt)
+        external
+        returns (uint256 viaClone, uint256 viaDeterministic, bool predicted)
+    {
+        address instance = LibClone.clone(address(this));
+        viaClone = Composed(instance).twice(x);
+        address deterministic = LibClone.cloneDeterministic(address(this), salt);
+        predicted =
+            deterministic == LibClone.predictDeterministicAddress(address(this), salt, address(this));
+        viaDeterministic = Composed(deterministic).twice(x + 1);
+    }
+
+    function twice(uint256 x) external pure returns (uint256) {
+        return 2 * x;
+    }
+
+    /// @dev Move a token that answers `true` and one that answers nothing.
+    function tokenFlow(uint256 amount)
+        external
+        returns (uint256[4] memory balances, uint256 supply, bool unapproved)
+    {
+        MockToken token = new MockToken();
+        QuietToken quiet = new QuietToken();
+        token.mint(address(this), amount * 2);
+        quiet.mint(address(this), amount * 2);
+        address to = address(0xBEEF);
+        SafeTransferLib.safeTransfer(address(token), to, amount);
+        SafeTransferLib.safeTransfer(address(quiet), to, amount);
+        SafeTransferLib.safeApprove(address(token), to, amount);
+        unapproved = SafeTransferLib.trySafeTransferFrom(address(token), to, address(this), 1);
+        uint256 rest = SafeTransferLib.safeTransferAll(address(quiet), to);
+        balances = [
+            SafeTransferLib.balanceOf(address(token), to),
+            SafeTransferLib.balanceOf(address(token), address(this)),
+            SafeTransferLib.balanceOf(address(quiet), to),
+            rest
+        ];
+        supply = SafeTransferLib.totalSupply(address(token));
+    }
+
+    /// @dev Call this contract through LibCall, whole and bounded.
+    function callFlow(bytes memory payload, uint16 maxCopy)
+        external
+        returns (
+            bytes memory echoed,
+            bool success,
+            bool exceeded,
+            bytes memory bounded,
+            bytes memory reselected
+        )
+    {
+        bytes memory call = abi.encodeCall(this.echo, (payload));
+        echoed = abi.decode(LibCall.callContract(address(this), call), (bytes));
+        (success, exceeded, bounded) = LibCall.tryCall(address(this), 0, gasleft() / 2, maxCopy, call);
+        reselected = abi.encodeCall(this.echo, (payload));
+        LibCall.setSelector(this.twice.selector, reselected);
+    }
+
+    function echo(bytes memory payload) external pure returns (bytes memory) {
+        return payload;
+    }
 }
 '''
 
 ROOTS = [
     "src/utils/Base64.sol",
     "src/utils/LibBit.sol",
+    "src/utils/LibCall.sol",
+    "src/utils/LibClone.sol",
     "src/utils/LibSort.sol",
     "src/utils/LibString.sol",
+    "src/utils/SafeTransferLib.sol",
+    "src/utils/SSTORE2.sol",
 ]
 
 
@@ -160,7 +296,32 @@ def workload_cases():
         )
         for p in payloads
     ]
-    return {"tokenURI": token, "mergeLists": lists, "decodeAndScan": scan}
+    blobs = [b"", b"a", b"sstore2 data", bytes(range(31)), bytes(range(33)), bytes(range(200))]
+    store = [
+        ("storeAndRead(bytes,bytes32)", ["bytes", "bytes32"], (b, bytes([k + 1]) * 32))
+        for k, b in enumerate(blobs)
+    ]
+    clones = [
+        ("cloneAndCall(uint256,bytes32)", ["uint256", "bytes32"], (x, bytes([k + 7]) * 32))
+        for k, x in enumerate([0, 1, 7, 2**128, 2**200, 12345])
+    ]
+    tokens = [
+        ("tokenFlow(uint256)", ["uint256"], (amount,))
+        for amount in [1, 2, 1000, 10**18, 2**100, 7]
+    ]
+    calls = [
+        ("callFlow(bytes,uint16)", ["bytes", "uint16"], (b, cap))
+        for b, cap in zip(blobs, [0, 32, 64, 96, 0xFFFF, 128])
+    ]
+    return {
+        "tokenURI": token,
+        "mergeLists": lists,
+        "decodeAndScan": scan,
+        "storeAndRead": store,
+        "cloneAndCall": clones,
+        "tokenFlow": tokens,
+        "callFlow": calls,
+    }
 
 
 def run(args):
@@ -284,9 +445,9 @@ def run(args):
                         ],
                     )
                     measurements[label] = {
-                        "opcode_gas": sum(
-                            int(x["gasCost"]) for x in trace["structLogs"]
-                        ),
+                        # Calls and creations count at what they used, not
+                        # at the allowance their steps report.
+                        "opcode_gas": benchmark.opcode_gas(trace["structLogs"]),
                         "failed": trace.get("failed", False),
                         "return_data": "0x"
                         + trace.get("returnValue", "").removeprefix("0x").lower(),
@@ -427,7 +588,7 @@ def write_report(report, path):
     lines += [
         "",
         "This measures the published workloads only. It is not a claim about "
-        "unmeasured inputs, memory aliasing, or APIs outside the three workloads.",
+        "unmeasured inputs, memory aliasing, or APIs outside the published workloads.",
         "",
     ]
     path.write_text("\n".join(lines))
