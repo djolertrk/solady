@@ -177,6 +177,11 @@ library EfficientHashLib {
         return buffer;
     }
 
+    /// @dev `keccak256` of the words of `buffer`, as `abi.encode` lays them out.
+    function hash(bytes32[] memory buffer) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(buffer));
+    }
+
     /// @dev A zeroed buffer of `n` words.
     function malloc(uint256 n) internal pure returns (bytes32[] memory buffer) {
         return new bytes32[](n);
@@ -196,10 +201,14 @@ library EfficientHashLib {
     }
 
     /// @dev `keccak256` of `b` from `start` to `end`, both clamped to the
-    /// length, and of nothing when the range is empty or reversed.
+    /// length, and of nothing when the range is empty or reversed: the upstream
+    /// clamp, spelled so that `start <= end <= b.length` is visible where the
+    /// range is read.
     function hash(bytes memory b, uint256 start, uint256 end) internal pure returns (bytes32) {
-        (uint256 offset, uint256 count) = range(b.length, start, end);
-        return Hash.keccak256Range(b, offset, count);
+        uint256 n = b.length;
+        if (end > n) end = n;
+        if (start > end) start = end;
+        return Hash.keccak256Range(b, start, end - start);
     }
 
     /// @dev `keccak256` of `b` from `start` to its end.
@@ -218,8 +227,10 @@ library EfficientHashLib {
         pure
         returns (bytes32)
     {
-        (uint256 offset, uint256 count) = range(b.length, start, end);
-        return keccak256(b[offset:offset + count]);
+        uint256 n = b.length;
+        if (end > n) end = n;
+        if (start > end) start = end;
+        return keccak256(b[start:end]);
     }
 
     /// @dev `keccak256` of `b` from `start` to its end.
@@ -241,9 +252,11 @@ library EfficientHashLib {
     /// is a view of `b`, which Solar hashes where it lies and other compilers
     /// copy out first.
     function sha2(bytes memory b, uint256 start, uint256 end) internal view returns (bytes32) {
-        (uint256 offset, uint256 count) = range(b.length, start, end);
+        uint256 n = b.length;
+        if (end > n) end = n;
+        if (start > end) start = end;
         /// @custom:solar-view
-        bytes memory part = Bytes.slice(b, offset, count);
+        bytes memory part = Bytes.slice(b, start, end - start);
         return sha256(part);
     }
 
@@ -263,8 +276,10 @@ library EfficientHashLib {
         view
         returns (bytes32)
     {
-        (uint256 offset, uint256 count) = range(b.length, start, end);
-        return sha256(b[offset:offset + count]);
+        uint256 n = b.length;
+        if (end > n) end = n;
+        if (start > end) start = end;
+        return sha256(b[start:end]);
     }
 
     /// @dev `sha256` of `b` from `start` to its end.
@@ -277,15 +292,4 @@ library EfficientHashLib {
         return sha256(b);
     }
 
-    /// @dev The upstream clamp: both ends are pulled down to `length`, and a
-    /// reversed range hashes nothing.
-    function range(uint256 length, uint256 start, uint256 end)
-        private
-        pure
-        returns (uint256 offset, uint256 count)
-    {
-        if (end > length) end = length;
-        if (start > length) start = length;
-        return (start, end > start ? end - start : 0);
-    }
 }
