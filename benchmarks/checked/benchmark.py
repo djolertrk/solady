@@ -39,6 +39,7 @@ CHECKED_LIBRARIES = (
     "LibBit",
     "LibSort",
     "LibString",
+    "MerkleProofLib",
     "SafeCastLib",
 )
 CORE_PREFIX = "solar:core/v1/"
@@ -585,6 +586,9 @@ def test_vectors(row, rng):
                 [value] if low <= value <= high else keccak(b"Overflow()")[:4],
             )
         return
+    if row["library"] == "MerkleProofLib":
+        yield from merkle_vectors(name, rng)
+        return
     if row["library"] == "Base64":
         if name == "encode":
             for b in blobs:
@@ -1097,6 +1101,140 @@ def test_vectors(row, rng):
                     yield [s], [s.isascii()]
         return
     raise ValueError(f"no oracle for {row}")
+
+
+def merkle_pair(a, b):
+    # The smaller word is hashed first, as the assembly orders them in scratch.
+    return keccak(min(a, b) + max(a, b))
+
+
+def merkle_tree(leaves):
+    # OpenZeppelin's array layout: leaves at the end, in reverse, and each
+    # node the hash of its two children.
+    n = len(leaves)
+    tree = [b""] * (2 * n - 1)
+    for i, leaf in enumerate(leaves):
+        tree[len(tree) - 1 - i] = leaf
+    for i in range(len(tree) - 1 - n, -1, -1):
+        tree[i] = merkle_pair(tree[2 * i + 1], tree[2 * i + 2])
+    return tree
+
+
+def merkle_proof(tree, index):
+    proof = []
+    while index > 0:
+        proof.append(tree[index - 1 if index % 2 == 0 else index + 1])
+        index = (index - 1) // 2
+    return proof
+
+
+def merkle_multiproof(tree, indices):
+    # OpenZeppelin's `getMultiProof`: a queue of tree indices, deepest first.
+    stack = sorted(indices, reverse=True)
+    leaves = [tree[i] for i in stack]
+    proof, flags = [], []
+    while stack and stack[0] > 0:
+        j = stack.pop(0)
+        sibling = j - 1 if j % 2 == 0 else j + 1
+        if stack and stack[0] == sibling:
+            flags.append(True)
+            stack.pop(0)
+        else:
+            flags.append(False)
+            proof.append(tree[sibling])
+        stack.append((j - 1) // 2)
+    return proof, leaves, flags
+
+
+def merkle_fold(proof, leaf):
+    for sibling in proof:
+        leaf = merkle_pair(leaf, sibling)
+    return leaf
+
+
+def merkle_verify_multi(proof, root, leaves, flags):
+    # The assembly's queue, which returns false wherever it would read past
+    # the written queue or the proof: its final proof check fails there.
+    if len(leaves) + len(proof) != len(flags) + 1:
+        return False
+    if not flags:
+        return (proof[0] if len(proof) == 1 else leaves[0]) == root
+    hashes, front, used = list(leaves), 0, 0
+    for flag in flags:
+        if front == len(hashes):
+            return False
+        a = hashes[front]
+        front += 1
+        if flag:
+            if front == len(hashes):
+                return False
+            b = hashes[front]
+            front += 1
+        else:
+            if used == len(proof):
+                return False
+            b = proof[used]
+            used += 1
+        hashes.append(merkle_pair(a, b))
+    return hashes[-1] == root and used == len(proof)
+
+
+def merkle_vectors(name, rng):
+    def word():
+        return rng.getrandbits(256).to_bytes(32, "big")
+
+    trees = []
+    for n in [1, 2, 3, 4, 5, 7, 8, 16, 33]:
+        leaves = [word() for _ in range(n)]
+        trees.append((leaves, merkle_tree(leaves)))
+    if name.startswith("verifyMultiProof"):
+        for leaves, tree in trees:
+            n = len(leaves)
+            first = len(tree) - n
+            picks = {(), (first,), (len(tree) - 1,), tuple(range(first, len(tree)))}
+            picks |= {tuple(sorted(rng.sample(range(first, len(tree)), min(k, n)))) for k in [2, 3]}
+            for pick in sorted(picks):
+                proof, chosen, flags = merkle_multiproof(tree, list(pick))
+                if not chosen:
+                    proof = [tree[0]]
+                root = tree[0]
+                variants = [
+                    (proof, root, chosen, flags),
+                    (proof, word(), chosen, flags),
+                    (proof[:-1], root, chosen, flags),
+                    (proof, root, chosen, flags + [True]),
+                    (proof, root, chosen, [not f for f in flags]),
+                    (proof, root, list(reversed(chosen)), flags),
+                    (proof + [word()], root, chosen, flags + [False]),
+                    (proof, root, chosen, [True] * len(flags)),
+                    (proof, root, chosen, [False] * len(flags)),
+                ]
+                for proof_v, root_v, leaves_v, flags_v in variants:
+                    yield (
+                        [proof_v, root_v, leaves_v, flags_v],
+                        [merkle_verify_multi(proof_v, root_v, leaves_v, flags_v)],
+                    )
+        return
+    for leaves, tree in trees:
+        n = len(leaves)
+        root = tree[0]
+        for i in sorted({0, n // 2, n - 1}):
+            index = len(tree) - 1 - i
+            proof = merkle_proof(tree, index)
+            leaf = tree[index]
+            for proof_v, root_v, leaf_v in [
+                (proof, root, leaf),
+                (proof, root, word()),
+                (proof, word(), leaf),
+                (proof[:-1], root, leaf),
+                (proof + [word()], root, leaf),
+                (list(reversed(proof)), root, leaf),
+            ]:
+                yield [proof_v, root_v, leaf_v], [merkle_fold(proof_v, leaf_v) == root_v]
+    for length in [0, 1, 2, 9]:
+        proof = [word() for _ in range(length)]
+        leaf = word()
+        yield [proof, merkle_fold(proof, leaf), leaf], [True]
 
 
 def send_transaction(url, sender, to, data):

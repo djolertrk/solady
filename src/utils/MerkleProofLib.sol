@@ -1,45 +1,37 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.4;
+pragma solidity ^0.8.20;
 
-/// @notice Gas optimized verification of proof of inclusion for a leaf in a Merkle tree.
-/// @author Solady (https://github.com/vectorized/solady/blob/main/src/utils/MerkleProofLib.sol)
-/// @author Modified from Solmate (https://github.com/transmissions11/solmate/blob/main/src/utils/MerkleProofLib.sol)
-/// @author Modified from OpenZeppelin (https://github.com/OpenZeppelin/openzeppelin-contracts/blob/master/contracts/utils/cryptography/MerkleProof.sol)
+/// @notice Checked Solidity implementation of the pinned Solady MerkleProofLib API.
+/// @dev A proof is folded one sibling at a time, hashing the smaller word of
+/// each pair first, as the assembly orders the two words in scratch space.
+///
+/// A multiproof rebuilds the root through a queue that starts with the leaves
+/// and grows by one hash per flag; each hash takes its second input from the
+/// queue or from the proof, as its flag says. The assembly reads its queue and
+/// its proof without bounds, and its final check that every proof element was
+/// used turns any read past either into `false`. This port returns `false` as
+/// soon as a read would pass the written queue or the proof, which gives the
+/// same result without reading memory nothing wrote. The queue is a new array,
+/// where the assembly uses free memory without reserving it.
+///
+/// Two deliberate differences from the assembly: a calldata flag is read as a
+/// `bool`, so a flag word other than zero or one reverts where the assembly
+/// treats it as true, and `emptyProof`, `emptyLeaves` and `emptyFlags` are left
+/// out, since no Solidity expression is an empty calldata array.
 library MerkleProofLib {
-    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
-    /*            MERKLE PROOF VERIFICATION OPERATIONS            */
-    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
-
     /// @dev Returns whether `leaf` exists in the Merkle tree with `root`, given `proof`.
     function verify(bytes32[] memory proof, bytes32 root, bytes32 leaf)
         internal
         pure
         returns (bool isValid)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            if mload(proof) {
-                // Initialize `offset` to the offset of `proof` elements in memory.
-                let offset := add(proof, 0x20)
-                // Left shift by 5 is equivalent to multiplying by 0x20.
-                let end := add(offset, shl(5, mload(proof)))
-                // Iterate over proof elements to compute root hash.
-                for {} 1 {} {
-                    // Slot of `leaf` in scratch space.
-                    // If the condition is true: 0x20, otherwise: 0x00.
-                    let scratch := shl(5, gt(leaf, mload(offset)))
-                    // Store elements to hash contiguously in scratch space.
-                    // Scratch space is 64 bytes (0x00 - 0x3f) and both elements are 32 bytes.
-                    mstore(scratch, leaf)
-                    mstore(xor(scratch, 0x20), mload(offset))
-                    // Reuse `leaf` to store the hash to reduce stack operations.
-                    leaf := keccak256(0x00, 0x40)
-                    offset := add(offset, 0x20)
-                    if iszero(lt(offset, end)) { break }
-                }
-            }
-            isValid := eq(leaf, root)
+        for (uint256 i; i < proof.length; ++i) {
+            bytes32 a = leaf;
+            bytes32 b = proof[i];
+            if (a > b) (a, b) = (b, a);
+            leaf = keccak256(abi.encode(a, b));
         }
+        return leaf == root;
     }
 
     /// @dev Returns whether `leaf` exists in the Merkle tree with `root`, given `proof`.
@@ -48,30 +40,13 @@ library MerkleProofLib {
         pure
         returns (bool isValid)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            if proof.length {
-                // Left shift by 5 is equivalent to multiplying by 0x20.
-                let end := add(proof.offset, shl(5, proof.length))
-                // Initialize `offset` to the offset of `proof` in the calldata.
-                let offset := proof.offset
-                // Iterate over proof elements to compute root hash.
-                for {} 1 {} {
-                    // Slot of `leaf` in scratch space.
-                    // If the condition is true: 0x20, otherwise: 0x00.
-                    let scratch := shl(5, gt(leaf, calldataload(offset)))
-                    // Store elements to hash contiguously in scratch space.
-                    // Scratch space is 64 bytes (0x00 - 0x3f) and both elements are 32 bytes.
-                    mstore(scratch, leaf)
-                    mstore(xor(scratch, 0x20), calldataload(offset))
-                    // Reuse `leaf` to store the hash to reduce stack operations.
-                    leaf := keccak256(0x00, 0x40)
-                    offset := add(offset, 0x20)
-                    if iszero(lt(offset, end)) { break }
-                }
-            }
-            isValid := eq(leaf, root)
+        for (uint256 i; i < proof.length; ++i) {
+            bytes32 a = leaf;
+            bytes32 b = proof[i];
+            if (a > b) (a, b) = (b, a);
+            leaf = keccak256(abi.encode(a, b));
         }
+        return leaf == root;
     }
 
     /// @dev Returns whether all `leaves` exist in the Merkle tree with `root`,
@@ -80,102 +55,21 @@ library MerkleProofLib {
     /// Note:
     /// - Breaking the invariant `flags.length == (leaves.length - 1) + proof.length`
     ///   will always return false.
-    /// - The sum of the lengths of `proof` and `leaves` must never overflow.
     /// - Any non-zero word in the `flags` array is treated as true.
-    /// - The memory offset of `proof` must be non-zero
-    ///   (i.e. `proof` is not pointing to the scratch space).
     function verifyMultiProof(
         bytes32[] memory proof,
         bytes32 root,
         bytes32[] memory leaves,
         bool[] memory flags
     ) internal pure returns (bool isValid) {
-        // Rebuilds the root by consuming and producing values on a queue.
-        // The queue starts with the `leaves` array, and goes into a `hashes` array.
-        // After the process, the last element on the queue is verified
-        // to be equal to the `root`.
-        //
-        // The `flags` array denotes whether the sibling
-        // should be popped from the queue (`flag == true`), or
-        // should be popped from the `proof` (`flag == false`).
-        /// @solidity memory-safe-assembly
-        assembly {
-            // Cache the lengths of the arrays.
-            let leavesLength := mload(leaves)
-            let proofLength := mload(proof)
-            let flagsLength := mload(flags)
-
-            // Advance the pointers of the arrays to point to the data.
-            leaves := add(0x20, leaves)
-            proof := add(0x20, proof)
-            flags := add(0x20, flags)
-
-            // If the number of flags is correct.
-            for {} eq(add(leavesLength, proofLength), add(flagsLength, 1)) {} {
-                // For the case where `proof.length + leaves.length == 1`.
-                if iszero(flagsLength) {
-                    // `isValid = (proof.length == 1 ? proof[0] : leaves[0]) == root`.
-                    isValid := eq(mload(xor(leaves, mul(xor(proof, leaves), proofLength))), root)
-                    break
-                }
-
-                // The required final proof offset if `flagsLength` is not zero, otherwise zero.
-                let proofEnd := add(proof, shl(5, proofLength))
-                // We can use the free memory space for the queue.
-                // We don't need to allocate, since the queue is temporary.
-                let hashesFront := mload(0x40)
-                // Copy the leaves into the hashes.
-                // Sometimes, a little memory expansion costs less than branching.
-                // Should cost less, even with a high free memory offset of 0x7d00.
-                leavesLength := shl(5, leavesLength)
-                for { let i := 0 } iszero(eq(i, leavesLength)) { i := add(i, 0x20) } {
-                    mstore(add(hashesFront, i), mload(add(leaves, i)))
-                }
-                // Compute the back of the hashes.
-                let hashesBack := add(hashesFront, leavesLength)
-                // This is the end of the memory for the queue.
-                // We recycle `flagsLength` to save on stack variables (sometimes save gas).
-                flagsLength := add(hashesBack, shl(5, flagsLength))
-
-                for {} 1 {} {
-                    // Pop from `hashes`.
-                    let a := mload(hashesFront)
-                    // Pop from `hashes`.
-                    let b := mload(add(hashesFront, 0x20))
-                    hashesFront := add(hashesFront, 0x40)
-
-                    // If the flag is false, load the next proof,
-                    // else, pops from the queue.
-                    if iszero(mload(flags)) {
-                        // Loads the next proof.
-                        b := mload(proof)
-                        proof := add(proof, 0x20)
-                        // Unpop from `hashes`.
-                        hashesFront := sub(hashesFront, 0x20)
-                    }
-
-                    // Advance to the next flag.
-                    flags := add(flags, 0x20)
-
-                    // Slot of `a` in scratch space.
-                    // If the condition is true: 0x20, otherwise: 0x00.
-                    let scratch := shl(5, gt(a, b))
-                    // Hash the scratch space and push the result onto the queue.
-                    mstore(scratch, a)
-                    mstore(xor(scratch, 0x20), b)
-                    mstore(hashesBack, keccak256(0x00, 0x40))
-                    hashesBack := add(hashesBack, 0x20)
-                    if iszero(lt(hashesBack, flagsLength)) { break }
-                }
-                isValid := and(
-                    // Checks if the last value in the queue is same as the root.
-                    eq(mload(sub(hashesBack, 0x20)), root),
-                    // And whether all the proofs are used, if required.
-                    eq(proofEnd, proof)
-                )
-                break
-            }
+        if (leaves.length + proof.length != flags.length + 1) return false;
+        if (flags.length == 0) return (proof.length == 1 ? proof[0] : leaves[0]) == root;
+        bytes32[] memory hashes = new bytes32[](leaves.length + flags.length);
+        for (uint256 i; i < leaves.length; ++i) {
+            hashes[i] = leaves[i];
         }
+        (bool complete, bytes32 computed) = _rebuild(hashes, leaves.length, proof, flags);
+        return complete && computed == root;
     }
 
     /// @dev Returns whether all `leaves` exist in the Merkle tree with `root`,
@@ -184,127 +78,74 @@ library MerkleProofLib {
     /// Note:
     /// - Breaking the invariant `flags.length == (leaves.length - 1) + proof.length`
     ///   will always return false.
-    /// - Any non-zero word in the `flags` array is treated as true.
-    /// - The calldata offset of `proof` must be non-zero
-    ///   (i.e. `proof` is from a regular Solidity function with a 4-byte selector).
+    /// - A flag word other than zero or one reverts.
     function verifyMultiProofCalldata(
         bytes32[] calldata proof,
         bytes32 root,
         bytes32[] calldata leaves,
         bool[] calldata flags
     ) internal pure returns (bool isValid) {
-        // Rebuilds the root by consuming and producing values on a queue.
-        // The queue starts with the `leaves` array, and goes into a `hashes` array.
-        // After the process, the last element on the queue is verified
-        // to be equal to the `root`.
-        //
-        // The `flags` array denotes whether the sibling
-        // should be popped from the queue (`flag == true`), or
-        // should be popped from the `proof` (`flag == false`).
-        /// @solidity memory-safe-assembly
-        assembly {
-            // If the number of flags is correct.
-            for {} eq(add(leaves.length, proof.length), add(flags.length, 1)) {} {
-                // For the case where `proof.length + leaves.length == 1`.
-                if iszero(
-                    flags.length
-                ) {
+        if (leaves.length + proof.length != flags.length + 1) return false;
+        if (flags.length == 0) return (proof.length == 1 ? proof[0] : leaves[0]) == root;
+        bytes32[] memory hashes = new bytes32[](leaves.length + flags.length);
+        for (uint256 i; i < leaves.length; ++i) {
+            hashes[i] = leaves[i];
+        }
+        (bool complete, bytes32 computed) = _rebuildCalldata(hashes, leaves.length, proof, flags);
+        return complete && computed == root;
+    }
 
-                    // `isValid = (proof.length == 1 ? proof[0] : leaves[0]) == root`.
-                    // forgefmt: disable-next-item
-                    isValid := eq(
-                        calldataload(
-                            xor(leaves.offset, mul(xor(proof.offset, leaves.offset), proof.length))
-                        ),
-                        root
-                    )
-                    break
-                }
-
-                // The required final proof offset if `flagsLength` is not zero, otherwise zero.
-                let proofEnd := add(proof.offset, shl(5, proof.length))
-                // We can use the free memory space for the queue.
-                // We don't need to allocate, since the queue is temporary.
-                let hashesFront := mload(0x40)
-                // Copy the leaves into the hashes.
-                // Sometimes, a little memory expansion costs less than branching.
-                // Should cost less, even with a high free memory offset of 0x7d00.
-                calldatacopy(hashesFront, leaves.offset, shl(5, leaves.length))
-                // Compute the back of the hashes.
-                let hashesBack := add(hashesFront, shl(5, leaves.length))
-                // This is the end of the memory for the queue.
-                // We recycle `flagsLength` to save on stack variables (sometimes save gas).
-                flags.length := add(hashesBack, shl(5, flags.length))
-
-                // We don't need to make a copy of `proof.offset` or `flags.offset`,
-                // as they are pass-by-value (this trick may not always save gas).
-
-                for {} 1 {} {
-                    // Pop from `hashes`.
-                    let a := mload(hashesFront)
-                    // Pop from `hashes`.
-                    let b := mload(add(hashesFront, 0x20))
-                    hashesFront := add(hashesFront, 0x40)
-
-                    // If the flag is false, load the next proof,
-                    // else, pops from the queue.
-                    if iszero(calldataload(flags.offset)) {
-                        // Loads the next proof.
-                        b := calldataload(proof.offset)
-                        proof.offset := add(proof.offset, 0x20)
-                        // Unpop from `hashes`.
-                        hashesFront := sub(hashesFront, 0x20)
-                    }
-
-                    // Advance to the next flag offset.
-                    flags.offset := add(flags.offset, 0x20)
-
-                    // Slot of `a` in scratch space.
-                    // If the condition is true: 0x20, otherwise: 0x00.
-                    let scratch := shl(5, gt(a, b))
-                    // Hash the scratch space and push the result onto the queue.
-                    mstore(scratch, a)
-                    mstore(xor(scratch, 0x20), b)
-                    mstore(hashesBack, keccak256(0x00, 0x40))
-                    hashesBack := add(hashesBack, 0x20)
-                    if iszero(lt(hashesBack, flags.length)) { break }
-                }
-                isValid := and(
-                    // Checks if the last value in the queue is same as the root.
-                    eq(mload(sub(hashesBack, 0x20)), root),
-                    // And whether all the proofs are used, if required.
-                    eq(proofEnd, proof.offset)
-                )
-                break
+    /// @dev Runs the queue whose first `back` entries `hashes` holds, one hash
+    /// per flag, and returns the last hash and whether every read stayed in the
+    /// written queue and the proof, and every proof element was used.
+    function _rebuild(
+        bytes32[] memory hashes,
+        uint256 back,
+        bytes32[] memory proof,
+        bool[] memory flags
+    ) private pure returns (bool complete, bytes32 computed) {
+        uint256 front;
+        uint256 used;
+        for (uint256 i; i < flags.length; ++i) {
+            if (front == back) return (false, 0);
+            bytes32 a = hashes[front++];
+            bytes32 b;
+            if (flags[i]) {
+                if (front == back) return (false, 0);
+                b = hashes[front++];
+            } else {
+                if (used == proof.length) return (false, 0);
+                b = proof[used++];
             }
+            if (a > b) (a, b) = (b, a);
+            hashes[back++] = keccak256(abi.encode(a, b));
         }
+        return (used == proof.length, hashes[back - 1]);
     }
 
-    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
-    /*                   EMPTY CALLDATA HELPERS                   */
-    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
-
-    /// @dev Returns an empty calldata bytes32 array.
-    function emptyProof() internal pure returns (bytes32[] calldata proof) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            proof.length := 0
+    /// @dev `_rebuild` for a proof and flags in calldata.
+    function _rebuildCalldata(
+        bytes32[] memory hashes,
+        uint256 back,
+        bytes32[] calldata proof,
+        bool[] calldata flags
+    ) private pure returns (bool complete, bytes32 computed) {
+        uint256 front;
+        uint256 used;
+        for (uint256 i; i < flags.length; ++i) {
+            if (front == back) return (false, 0);
+            bytes32 a = hashes[front++];
+            bytes32 b;
+            if (flags[i]) {
+                if (front == back) return (false, 0);
+                b = hashes[front++];
+            } else {
+                if (used == proof.length) return (false, 0);
+                b = proof[used++];
+            }
+            if (a > b) (a, b) = (b, a);
+            hashes[back++] = keccak256(abi.encode(a, b));
         }
-    }
-
-    /// @dev Returns an empty calldata bytes32 array.
-    function emptyLeaves() internal pure returns (bytes32[] calldata leaves) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            leaves.length := 0
-        }
-    }
-
-    /// @dev Returns an empty calldata bool array.
-    function emptyFlags() internal pure returns (bool[] calldata flags) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            flags.length := 0
-        }
+        return (used == proof.length, hashes[back - 1]);
     }
 }
