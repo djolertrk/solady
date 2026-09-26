@@ -3,11 +3,13 @@
 # requires-python = ">=3.11"
 # dependencies = ["eth-abi==5.2.0", "eth-hash[pycryptodome]==0.7.1"]
 # ///
-"""Run the pinned upstream tests for the three complete function surfaces.
+"""Run the pinned upstream tests for the ported libraries whose suites compile.
 
-Original test helpers remain test oracles, including their assembly. Only
-SafeCastLib, LibBit and Base64 production sources are replaced in the safe leg.
-This is an additional correctness check, not the gas benchmark or safety audit.
+Original test helpers remain test oracles, including their assembly. Only the
+selected production sources are replaced in the safe legs, which also receive
+the compiler's core modules. A library is named by its path below `src/`, or by
+its bare name for `src/utils/`; its suite is `test/<name>.t.sol`. This is an
+additional correctness check, not the gas benchmark or safety audit.
 """
 
 import argparse
@@ -17,16 +19,43 @@ import os
 import subprocess
 from pathlib import Path
 
-from benchmark import ARCHIVE, REPO, ROOT, closure, digest
+from benchmark import (
+    ARCHIVE,
+    DEFAULT_CORE_MODULES,
+    REPO,
+    ROOT,
+    closure,
+    core_sources,
+    digest,
+)
 
-LIBRARIES = ["SafeCastLib", "LibBit", "Base64"]
+# MerkleProofLib's suite calls the `empty*` functions the port leaves out, and
+# EfficientHashLib's checks that `free` moves the free-memory pointer back.
+LIBRARIES = [
+    "SafeCastLib",
+    "LibBit",
+    "Base64",
+    "ECDSA",
+    "SignatureCheckerLib",
+    "tokens/ERC20",
+]
+
+
+def source_path(library):
+    return f"src/{library}.sol" if "/" in library else f"src/utils/{library}.sol"
+
+
+def test_path(library):
+    return f"test/{library.rsplit('/', 1)[-1]}.t.sol"
 
 
 def run(args):
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
+    libraries = args.library or LIBRARIES
     archive = json.loads(gzip.decompress(ARCHIVE.read_bytes()))
-    sources = closure(archive["sources"], [f"test/{name}.t.sol" for name in LIBRARIES])
+    sources = closure(archive["sources"], [test_path(name) for name in libraries])
+    replaced = {source_path(name) for name in libraries}
     results = {}
     for label, compiler, safe in [
         ("solc-upstream", args.solc, False),
@@ -38,12 +67,18 @@ def run(args):
         hashes = {}
         for name, source in sources.items():
             text = source["content"]
-            if safe and name in [f"src/utils/{lib}.sol" for lib in LIBRARIES]:
+            if safe and name in replaced:
                 text = (ROOT / name).read_text()
             path = folder / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text)
             hashes[name] = digest(text.encode())
+        if safe:
+            for name, source in core_sources(args.core_modules).items():
+                path = folder / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(source["content"])
+                hashes[name] = digest(source["content"].encode())
         (folder / "foundry.toml").write_text(
             '[profile.default]\nsrc = "src"\ntest = "test"\nlibs = []\n'
             'evm_version = "cancun"\noptimizer = true\noptimizer_runs = 200\n'
@@ -80,8 +115,8 @@ def run(args):
                         "reason": test.get("reason"),
                     }
         complete = all(
-            any(name.startswith(f"test/{lib}.t.sol:") for name in tests)
-            for lib in LIBRARIES
+            any(name.startswith(f"{test_path(lib)}:") for name in tests)
+            for lib in libraries
         )
         succeeded = (
             result.returncode == 0
@@ -109,6 +144,12 @@ if __name__ == "__main__":
         "--solar", type=Path, default=REPO.parent / "solar/target/debug/solar"
     )
     parser.add_argument("--forge", default="forge")
+    parser.add_argument(
+        "--library",
+        action="append",
+        help="library to test, repeatable (default: every library whose suite passes)",
+    )
+    parser.add_argument("--core-modules", type=Path, default=DEFAULT_CORE_MODULES)
     parser.add_argument("--fuzz-runs", type=int, default=256)
     parser.add_argument("--output", type=Path, required=True)
     raise SystemExit(run(parser.parse_args()))
