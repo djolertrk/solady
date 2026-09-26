@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import {Calls} from "solar:core/v1/Calls.sol";
 import {Code} from "solar:core/v1/Code.sol";
 import {Create} from "solar:core/v1/Create.sol";
 
@@ -8,10 +9,13 @@ import {Create} from "solar:core/v1/Create.sol";
 /// @dev A data contract holds `data` as its code after one STOP byte, so it
 /// cannot be called. Writing deploys it with `Create`; reading copies a range of
 /// it with `Code`, checked against the code's size, where the assembly copies
-/// past the end and trims. Two deliberate differences from the assembly: data
-/// too long for the two-byte length the creation code pushes fails with
-/// `DeploymentFailed()` instead of running out of gas, and reading an account
-/// without code fails with `Panic(0x11)` instead of running out of gas.
+/// past the end and trims. The creation code is `abi.encodePacked` of a fixed
+/// prefix and `data`, written where it is used, which this compiler lays out over
+/// the length word of `data` instead of copying it, as the assembly does. Two
+/// deliberate differences from the assembly: data too long for the two-byte
+/// length the creation code pushes fails with `DeploymentFailed()` instead of
+/// running out of gas, and reading an account without code fails with
+/// `Panic(0x11)` instead of running out of gas.
 library SSTORE2 {
     /// @dev The creation code of the CREATE3 proxy.
     bytes internal constant _CREATE3_PROXY_INITCODE = hex"67363d3d37363d34f03d5260086018f3";
@@ -25,7 +29,9 @@ library SSTORE2 {
 
     /// @dev Writes `data` into the bytecode of a storage contract and returns its address.
     function write(bytes memory data) internal returns (address pointer) {
-        return Create.deploy(_initCode(data), 0);
+        return Create.deploy(
+            abi.encodePacked(hex"61", _codeSize(data), hex"80600a3d393df300", data), 0
+        );
     }
 
     /// @dev Writes `data` into the bytecode of a storage contract with `salt`
@@ -34,7 +40,9 @@ library SSTORE2 {
         internal
         returns (address pointer)
     {
-        return Create.deploy2(_initCode(data), salt, 0);
+        return Create.deploy2(
+            abi.encodePacked(hex"61", _codeSize(data), hex"80600a3d393df300", data), salt, 0
+        );
     }
 
     /// @dev Writes `data` into the bytecode of a storage contract and returns its address.
@@ -46,14 +54,21 @@ library SSTORE2 {
     {
         address proxy = Create.deploy2(_CREATE3_PROXY_INITCODE, salt, 0);
         pointer = _proxyDeployment(proxy);
-        (bool success,) = proxy.call(_initCode(data));
+        // The proxy creates a contract from its calldata and returns nothing.
+        (bool success,,) = Calls.callBounded(
+            proxy,
+            0,
+            gasleft(),
+            abi.encodePacked(hex"61", _codeSize(data), hex"80600a3d393df300", data),
+            0
+        );
         if (!success || pointer.code.length == 0) revert DeploymentFailed();
     }
 
     /// @dev Returns the initialization code hash of the storage contract for `data`.
     /// Used for mining vanity addresses with create2crunch.
     function initCodeHash(bytes memory data) internal pure returns (bytes32 hash) {
-        return keccak256(_initCode(data));
+        return keccak256(abi.encodePacked(hex"61", _codeSize(data), hex"80600a3d393df300", data));
     }
 
     /// @dev Equivalent to `predictCounterfactualAddress(data, salt, address(this))`
@@ -115,13 +130,14 @@ library SSTORE2 {
         return Code.read(pointer, start + 1, end - start);
     }
 
-    /// @dev The creation code of the storage contract for `data`: it copies the
-    /// STOP byte and `data` that follow it out as the deployed code.
-    function _initCode(bytes memory data) private pure returns (bytes memory) {
-        // The two-byte length the creation code pushes covers the STOP byte too.
+    /// @dev The code size the creation code of the storage contract for `data`
+    /// pushes: `data` and the STOP byte before it. The creation code,
+    /// `hex"61", _codeSize(data), hex"80600a3d393df300", data`, copies them out
+    /// as the deployed code with
+    /// PUSH2 l, DUP1, PUSH1 0x0a, RETURNDATASIZE, CODECOPY, RETURNDATASIZE, RETURN, STOP.
+    function _codeSize(bytes memory data) private pure returns (uint16) {
         if (data.length > 0xfffe) revert DeploymentFailed();
-        // PUSH2 l, DUP1, PUSH1 0x0a, RETURNDATASIZE, CODECOPY, RETURNDATASIZE, RETURN, STOP
-        return abi.encodePacked(hex"61", uint16(data.length + 1), hex"80600a3d393df300", data);
+        return uint16(data.length + 1);
     }
 
     /// @dev The address a CREATE3 proxy's one deployment gets: its first
