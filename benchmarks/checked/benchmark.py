@@ -33,7 +33,14 @@ from eth_hash.auto import keccak
 ROOT = Path(__file__).resolve().parents[2]
 REPO = ROOT
 ARCHIVE = Path(__file__).resolve().with_name("upstream-solady-0.1.26.json.gz")
-CHECKED_LIBRARIES = ("Base64", "LibBit", "LibSort", "LibString", "SafeCastLib")
+CHECKED_LIBRARIES = (
+    "Base64",
+    "EfficientHashLib",
+    "LibBit",
+    "LibSort",
+    "LibString",
+    "SafeCastLib",
+)
 CORE_PREFIX = "solar:core/v1/"
 # The compiler-owned modules the port may import. Under solar the compiler
 # supplies them itself and sets a supplied copy aside; the copy is what lets
@@ -166,6 +173,23 @@ def closure(sources, roots):
                 else imp
             )
     return result
+
+
+def opcode_gas(logs) -> int:
+    """Opcode gas the call spent, excluding the transaction's intrinsic gas.
+
+    A step's `gasCost` is what it deducted, except for a call, which reports
+    the allowance it forwarded; a precompile leaves no steps of its own, so a
+    sum of the costs would bill a precompile call everything it forwarded.
+    The gas the outer frame had at its first step, less what it had left
+    after its last, counts every call at what it used, and equals that sum
+    for code that makes no call.
+    """
+    if not logs:
+        return 0
+    depth = logs[0]["depth"]
+    last = next(step for step in reversed(logs) if step["depth"] == depth)
+    return int(logs[0]["gas"]) - int(last["gas"]) + int(last["gasCost"])
 
 
 def dispatch_gas(logs, code: bytes, selector: bytes) -> int | None:
@@ -352,7 +376,9 @@ def prepare(
                 for i in range(len(row["params"]))
             ]
             call = row["library"] + "." + row["name"] + "(" + ", ".join(args) + ")"
-            mutability = "pure"
+            # A wrapper keeps its API's mutability: the precompile hashes are
+            # `view`, since a staticcall is not provably pure.
+            mutability = "view" if row["mutability"] == "view" else "pure"
             if row["storage"]:
                 # Every struct here occupies one slot, in declaration order.
                 struct = row["params"][row["storage"][0]][0].removeprefix("struct ")
@@ -467,6 +493,85 @@ def test_vectors(row, rng):
         for n in [0, 1, 2, 3, 15, 16, 31, 32, 33, 63, 64, 65, 256]
     ]
     blobs += [bytes(range(256)), bytes(64), bytes([255]) * 64]
+    if row["library"] == "EfficientHashLib":
+        def words(values):
+            return b"".join(v.to_bytes(32, "big") for v in values)
+
+        def clamp(n, start, end):
+            end = min(end, n)
+            start = min(start, n)
+            return start, max(end - start, 0)
+
+        digest_of = hashlib.sha256 if name.startswith("sha2") else None
+
+        def as_type(ty, value):
+            return value.to_bytes(32, "big") if ty == "bytes32" else value
+
+        if name == "set":
+            for n in [1, 2, 8]:
+                buffer = [rng.getrandbits(256) for _ in range(n)]
+                for i in [0, n - 1]:
+                    value = rng.getrandbits(256)
+                    expected = list(buffer)
+                    expected[i] = value
+                    yield (
+                        [[v.to_bytes(32, "big") for v in buffer], i, as_type(types[2], value)],
+                        [[v.to_bytes(32, "big") for v in expected]],
+                    )
+            return
+        if name == "malloc":
+            for n in [0, 1, 2, 8, 33]:
+                yield [n], [[bytes(32)] * n]
+            return
+        if name == "free":
+            for n in [0, 1, 8]:
+                buffer = [rng.getrandbits(256).to_bytes(32, "big") for _ in range(n)]
+                yield [buffer], [buffer]
+            return
+        if name == "eq":
+            for b in blobs + [bytes(32), bytes([7]) * 32]:
+                word = b[:32].rjust(32, b"\0")
+                args = [word, b] if types[0] == "bytes32" else [b, word]
+                yield args, [len(b) == 32 and b == word]
+            return
+        if types == ["bytes32[]"]:
+            for n in [0, 1, 2, 3, 8, 33]:
+                buffer = [rng.getrandbits(256) for _ in range(n)]
+                yield [[v.to_bytes(32, "big") for v in buffer]], [keccak(words(buffer))]
+            return
+        if name == "sha2" and types == ["bytes32"]:
+            for v in scalars:
+                word = v.to_bytes(32, "big")
+                yield [word], [hashlib.sha256(word).digest()]
+            return
+        if types and all(t in ("bytes32", "uint256") for t in types):
+            # Every arity, with the neighbours of the word boundaries.
+            picks = [0, 1, MAX, 1 << 255, (1 << 128) - 1] + [
+                rng.getrandbits(256) for _ in range(3)
+            ]
+            for i in range(len(picks)):
+                chosen = [picks[(i + j) % len(picks)] for j in range(len(types))]
+                args = [as_type(t, v) for t, v in zip(types, chosen)]
+                yield args, [keccak(words(chosen))]
+            return
+        if types and types[0] == "bytes":
+            for b in blobs:
+                spans = [(0, len(b)), (0, 0), (1, 1), (0, len(b) + 8), (len(b) + 4, len(b) + 9)]
+                spans += [(len(b) // 2, len(b)), (len(b), 0)]
+                for start, end in spans:
+                    if len(types) == 3:
+                        args = [b, start, end]
+                    elif len(types) == 2:
+                        args, end = [b, start], len(b)
+                    else:
+                        args, start, end = [b], 0, len(b)
+                    offset, count = clamp(len(b), start, end)
+                    part = b[offset : offset + count]
+                    yield args, [digest_of(part).digest() if digest_of else keccak(part)]
+                    if len(types) < 3:
+                        break
+            return
+        raise ValueError(f"no oracle for {row}")
     if row["library"] == "SafeCastLib":
         bits = int(re.search(r"\d+", name)[0])
         signed = name.startswith("toInt")
@@ -1236,7 +1341,7 @@ def run(args):
                             failed == expected_revert
                             and actual.lower() == expected_bytes.hex()
                         ),
-                        "opcode_gas": sum(int(x["gasCost"]) for x in logs),
+                        "opcode_gas": opcode_gas(logs),
                         "dispatch_gas": dispatch_gas(
                             logs,
                             runtime_code[label][row["library"] + "Harness"],
