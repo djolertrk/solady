@@ -8,8 +8,8 @@
 The per-API matrix in `benchmark.py` measures one library call per transaction.
 This script measures workloads that chain several libraries in one call, the way
 an application uses them: an ERC-721 style metadata URI, a set pipeline over two
-lists, a decode-then-scan path, data contracts, clones, token and ETH transfers,
-permits, and bounded calls.
+lists, a decode-then-scan path, data contracts, clones of every proxy family, token
+and ETH transfers, permits, and bounded calls.
 
 The workload source is byte-identical across every leg and uses only APIs whose
 declarations the port shares with the pinned archive, so the same contract
@@ -37,6 +37,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import benchmark  # noqa: E402
 
 WORKLOAD_PATH = "Composed.sol"
+
+# The contract each workload calls, when it is not `Composed`.
+WORKLOAD_CONTRACT = {"cloneFamilies": "Clones", "cloneArgsLimit": "Clones"}
 
 WORKLOAD_SOURCE = '''// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
@@ -133,6 +136,15 @@ contract DaiToken {
         bytes32 s
     ) external {
         recorded = keccak256(abi.encode(holder, spender, nonce, expiry, allowed, v, r, s));
+    }
+}
+
+/// @dev A beacon that points proxies at one implementation.
+contract Beacon {
+    address public implementation;
+
+    constructor(address target) {
+        implementation = target;
     }
 }
 
@@ -352,6 +364,169 @@ contract Composed {
         SafeTransferLib.safeMoveETH(SafeTransferLib.ETH_MOVER, amount);
     }
 }
+
+/// @dev Every LibClone proxy family, in a contract of its own so that its code
+/// does not change how the other workloads compile.
+contract Clones {
+    /// @dev Deploy every proxy family around this contract, with and without
+    /// arguments, and read each back: calls through it, its arguments, its
+    /// implementation, and its address against the prediction.
+    function cloneFamilies(uint256 x, bytes memory args, bytes32 salt)
+        external
+        returns (uint256[] memory calls, bool[] memory checks, bytes memory readBack, bytes32 codes)
+    {
+        address beacon = address(new Beacon(address(this)));
+        address[12] memory p = _deployFamilies(beacon, args, salt);
+        calls = new uint256[](12);
+        for (uint256 i; i < 12; ++i) {
+            calls[i] = Clones(p[i]).twice(x + i);
+        }
+        checks = _checkFamilies(p, beacon, x, args, salt);
+        readBack = _readFamilies(p, args);
+        codes = _familyCodes(args);
+    }
+
+    function _deployFamilies(address beacon, bytes memory args, bytes32 salt)
+        internal
+        returns (address[12] memory p)
+    {
+        address target = address(this);
+        p[0] = LibClone.clone_PUSH0(target);
+        p[1] = LibClone.clone(target, args);
+        p[2] = LibClone.deployERC1967(target);
+        p[3] = LibClone.deployERC1967(target, args);
+        p[4] = LibClone.deployERC1967I(target);
+        p[5] = LibClone.deployERC1967I(target, args);
+        p[6] = LibClone.deployERC1967BeaconProxy(beacon);
+        p[7] = LibClone.deployERC1967BeaconProxy(beacon, args);
+        p[8] = LibClone.deployERC1967IBeaconProxy(beacon);
+        p[9] = LibClone.deployERC1967IBeaconProxy(beacon, args);
+        p[10] = LibClone.cloneDeterministic_PUSH0(target, salt);
+        p[11] = LibClone.cloneDeterministic(target, args, salt);
+    }
+
+    function _checkFamilies(
+        address[12] memory p,
+        address beacon,
+        uint256 x,
+        bytes memory args,
+        bytes32 salt
+    ) internal returns (bool[] memory checks) {
+        address target = address(this);
+        checks = new bool[](16);
+        checks[0] = LibClone.implementationOf(p[0]) == target;
+        checks[1] = LibClone.implementationOf(p[1]) == target;
+        checks[2] = LibClone.implementationOf(p[2]) == address(0);
+        checks[3] = LibClone.implementationOf(p[5]) == target;
+        checks[4] = LibClone.implementationOf(p[8]) == target;
+        checks[5] = p[10] == LibClone.predictDeterministicAddress_PUSH0(target, salt, target);
+        checks[6] = p[11] == LibClone.predictDeterministicAddress(target, args, salt, target);
+        checks[7] = LibClone.deployDeterministicERC1967(target, args, salt)
+            == LibClone.predictDeterministicAddressERC1967(target, args, salt, target);
+        checks[8] = LibClone.deployDeterministicERC1967I(target, salt)
+            == LibClone.predictDeterministicAddressERC1967I(target, salt, target);
+        checks[9] = LibClone.deployDeterministicERC1967BeaconProxy(beacon, args, salt)
+            == LibClone.predictDeterministicAddressERC1967BeaconProxy(beacon, args, salt, target);
+        checks[10] = _createTwice(beacon, args, salt);
+        checks[11] = _bootstrapFlow(x);
+        checks[12] = _bootstrapAndCallFlow(x);
+        checks[13] = LibClone.implementationOf(p[9]) == target;
+        // `argLoad` past the end of a buffer reads what follows it, which the
+        // assembly leaves to memory; `argsOn` buffers are followed by zeros.
+        checks[14] = LibClone.argLoad(LibClone.argsOnClone(p[1]), 0) == bytes32(args);
+        checks[15] = LibClone.implementationOf(address(0xdead)) == address(0);
+    }
+
+    function _createTwice(address beacon, bytes memory args, bytes32 salt) internal returns (bool) {
+        (bool first, address made) =
+            LibClone.createDeterministicERC1967IBeaconProxy(beacon, args, salt);
+        (bool again, address found) =
+            LibClone.createDeterministicERC1967IBeaconProxy(beacon, args, salt);
+        return !first && again && made == found;
+    }
+
+    function _bootstrapFlow(uint256 x) internal returns (bool) {
+        address bootstrap = LibClone.erc1967Bootstrap();
+        if (bootstrap != LibClone.predictDeterministicAddressERC1967Bootstrap()) return false;
+        address upgradable = LibClone.deployERC1967(bootstrap);
+        LibClone.bootstrapERC1967(upgradable, address(this));
+        return Clones(upgradable).twice(x) == 2 * x;
+    }
+
+    function _bootstrapAndCallFlow(uint256 x) internal returns (bool) {
+        address called = LibClone.deployERC1967(LibClone.erc1967Bootstrap());
+        LibClone.bootstrapERC1967AndCall(called, address(this), abi.encodeCall(this.twice, (x)));
+        return Clones(called).twice(x + 1) == 2 * x + 2;
+    }
+
+    function _readFamilies(address[12] memory p, bytes memory args)
+        internal
+        view
+        returns (bytes memory read)
+    {
+        read = bytes.concat(
+            LibClone.argsOnClone(p[1]), LibClone.argsOnClone(p[1], 1), LibClone.argsOnClone(p[1], 2, 7)
+        );
+        read = bytes.concat(read, LibClone.argsOnERC1967(p[3], 1), LibClone.argsOnERC1967I(p[5], 3, 40));
+        read = bytes.concat(
+            read,
+            LibClone.argsOnERC1967BeaconProxy(p[7]),
+            LibClone.argsOnERC1967IBeaconProxy(p[9], 0, 2 ** 255)
+        );
+        bytes memory stored = LibClone.argsOnClone(p[1]);
+        read = bytes.concat(read, LibClone.argLoad(stored, 1), LibClone.argLoad(stored, 31));
+    }
+
+    function _familyCodes(bytes memory args) internal pure returns (bytes32 h) {
+        address a = address(0xA11CE);
+        h = keccak256(
+            abi.encode(
+                LibClone.initCodeHash(a), LibClone.initCodeHash_PUSH0(a), LibClone.initCodeHashERC1967(a)
+            )
+        );
+        h = keccak256(
+            abi.encode(h, LibClone.initCodeHashERC1967I(a), LibClone.initCodeHashERC1967BeaconProxy(a))
+        );
+        h = keccak256(
+            abi.encode(
+                h, LibClone.initCodeHashERC1967IBeaconProxy(a), LibClone.initCodeHashERC1967Bootstrap(a)
+            )
+        );
+        h = keccak256(
+            abi.encode(h, LibClone.initCodeHash(a, args), LibClone.initCodeHashERC1967(a, args))
+        );
+        h = keccak256(
+            abi.encode(
+                h, LibClone.initCodeHashERC1967I(a, args), LibClone.initCodeHashERC1967BeaconProxy(a, args)
+            )
+        );
+        h = keccak256(
+            abi.encode(
+                h,
+                LibClone.initCodeHashERC1967IBeaconProxy(a, args),
+                keccak256(LibClone.initCodeERC1967IBeaconProxy(a, args))
+            )
+        );
+    }
+
+    /// @dev Arguments too long for a proxy fail its deployment. The assembly
+    /// deploys creation code it made invalid, which burns the gas the
+    /// creation gets, so this is a workload of its own.
+    function cloneArgsLimit() external returns (bool failed) {
+        try this.tooManyArgs() {}
+        catch (bytes memory reason) {
+            failed = keccak256(reason) == keccak256(abi.encodeWithSignature("DeploymentFailed()"));
+        }
+    }
+
+    function tooManyArgs() external {
+        LibClone.deployERC1967I(address(this), new bytes(0xffae));
+    }
+
+    function twice(uint256 x) external pure returns (uint256) {
+        return 2 * x;
+    }
+}
 '''
 
 ROOTS = [
@@ -452,6 +627,14 @@ def workload_cases():
         ("ethFlow(uint256)", ["uint256"], (amount,))
         for amount in [0, 1, 2, 10**15, 10**18, 3 * 10**18]
     ]
+    families = [
+        (
+            "cloneFamilies(uint256,bytes,bytes32)",
+            ["uint256", "bytes", "bytes32"],
+            (x, bytes((0x41 + i) % 256 for i in range(n)), bytes([k + 3]) * 32),
+        )
+        for k, (x, n) in enumerate([(0, 0), (1, 1), (7, 20), (2**64, 32), (12345, 33), (3, 100)])
+    ]
     return {
         "tokenURI": token,
         "mergeLists": lists,
@@ -462,6 +645,8 @@ def workload_cases():
         "callFlow": calls,
         "permitFlow": permits,
         "ethFlow": ether,
+        "cloneFamilies": families,
+        "cloneArgsLimit": [("cloneArgsLimit()", [], ())],
     }
 
 
@@ -526,7 +711,7 @@ def run(args):
         folder = out / label
         folder.mkdir()
         (folder / "output.json").write_text(json.dumps(result, indent=2) + "\n")
-        binaries[label] = result["contracts"][WORKLOAD_PATH]["Composed"]
+        binaries[label] = result["contracts"][WORKLOAD_PATH]
         artifacts[label] = {
             "compiler": subprocess.check_output(
                 [str(binary), "--version"], text=True
@@ -538,30 +723,33 @@ def run(args):
     cases = []
     try:
         addresses = {}
-        for label, artifact in binaries.items():
-            bytecode = artifact["evm"]["bytecode"]["object"]
-            tx = benchmark.rpc(
-                url,
-                "eth_sendTransaction",
-                [{"from": sender, "data": "0x" + bytecode, "gas": hex(80000000)}],
-            )
-            receipt = None
-            for _ in range(200):
-                receipt = benchmark.rpc(url, "eth_getTransactionReceipt", [tx])
-                if receipt is not None:
-                    break
-                time.sleep(0.05)
-            if receipt is None or int(receipt["status"], 16) != 1:
-                raise RuntimeError(f"deployment failed: {label}")
-            addresses[label] = receipt["contractAddress"]
-            # `ethFlow` sends ETH out of the contract, the same amount on every leg.
-            benchmark.rpc(url, "anvil_setBalance", [addresses[label], hex(10**22)])
-            runtime = benchmark.rpc(
-                url, "eth_getCode", [receipt["contractAddress"], "latest"]
-            )
-            artifacts[label]["creation_bytes"] = len(bytecode) // 2
-            artifacts[label]["runtime_bytes"] = (len(runtime) - 2) // 2
-            artifacts[label]["deployment_gas"] = int(receipt["gasUsed"], 16)
+        for label, contracts in binaries.items():
+            addresses[label] = {}
+            for name in ["Composed", *sorted(set(WORKLOAD_CONTRACT.values()))]:
+                bytecode = contracts[name]["evm"]["bytecode"]["object"]
+                tx = benchmark.rpc(
+                    url,
+                    "eth_sendTransaction",
+                    [{"from": sender, "data": "0x" + bytecode, "gas": hex(80000000)}],
+                )
+                receipt = None
+                for _ in range(200):
+                    receipt = benchmark.rpc(url, "eth_getTransactionReceipt", [tx])
+                    if receipt is not None:
+                        break
+                    time.sleep(0.05)
+                if receipt is None or int(receipt["status"], 16) != 1:
+                    raise RuntimeError(f"deployment failed: {label} {name}")
+                address = receipt["contractAddress"]
+                addresses[label][name] = address
+                # `ethFlow` sends ETH out of the contract, the same amount on every leg.
+                benchmark.rpc(url, "anvil_setBalance", [address, hex(10**22)])
+                if name != "Composed":
+                    continue
+                runtime = benchmark.rpc(url, "eth_getCode", [address, "latest"])
+                artifacts[label]["creation_bytes"] = len(bytecode) // 2
+                artifacts[label]["runtime_bytes"] = (len(runtime) - 2) // 2
+                artifacts[label]["deployment_gas"] = int(receipt["gasUsed"], 16)
 
         for workload, entries in workload_cases().items():
             print(f"{workload}: {len(entries)} cases", flush=True)
@@ -575,7 +763,9 @@ def run(args):
                         [
                             {
                                 "from": sender,
-                                "to": addresses[label],
+                                "to": addresses[label][
+                                    WORKLOAD_CONTRACT.get(workload, "Composed")
+                                ],
                                 "data": "0x" + calldata.hex(),
                                 "gas": hex(80000000),
                             },
