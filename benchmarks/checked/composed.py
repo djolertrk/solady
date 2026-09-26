@@ -8,7 +8,8 @@
 The per-API matrix in `benchmark.py` measures one library call per transaction.
 This script measures workloads that chain several libraries in one call, the way
 an application uses them: an ERC-721 style metadata URI, a set pipeline over two
-lists, and a decode-then-scan path.
+lists, a decode-then-scan path, data contracts, clones, token and ETH transfers,
+permits, and bounded calls.
 
 The workload source is byte-identical across every leg and uses only APIs whose
 declarations the port shares with the pinned archive, so the same contract
@@ -90,6 +91,55 @@ contract QuietToken {
     function transfer(address to, uint256 amount) external {
         balanceOf[msg.sender] -= amount;
         balanceOf[to] += amount;
+    }
+}
+
+/// @dev A token with an EIP-2612 permit that records its arguments.
+contract PermitToken {
+    bytes32 public constant DOMAIN_SEPARATOR = keccak256("PermitToken");
+    bytes32 public recorded;
+
+    function permit(
+        address owner,
+        address spender,
+        uint256 value,
+        uint256 deadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) external {
+        recorded = keccak256(abi.encode(owner, spender, value, deadline, v, r, s));
+    }
+}
+
+/// @dev A token with DAI's domain separator and permit, recording its arguments.
+contract DaiToken {
+    bytes32 public constant DOMAIN_SEPARATOR =
+        0xdbb8cf42e1ecb028be3f3dbc922e1d878b963f411dc388ced501601c60f7c6f7;
+    bytes32 public recorded;
+
+    function nonces(address) external pure returns (uint256) {
+        return 7;
+    }
+
+    function permit(
+        address holder,
+        address spender,
+        uint256 nonce,
+        uint256 expiry,
+        bool allowed,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) external {
+        recorded = keccak256(abi.encode(holder, spender, nonce, expiry, allowed, v, r, s));
+    }
+}
+
+/// @dev A contract that refuses every ETH transfer.
+contract Rejector {
+    receive() external payable {
+        revert();
     }
 }
 
@@ -226,6 +276,81 @@ contract Composed {
     function echo(bytes memory payload) external pure returns (bytes memory) {
         return payload;
     }
+
+    /// @dev Permit through tokens' own permits, EIP-2612's and DAI's, and
+    /// through Permit2, which this chain lacks, so those fail with their errors.
+    function permitFlow(uint256 amount, uint8 v, bytes32 r, bytes32 s)
+        external
+        returns (bytes32 plain, bytes32 dai, bytes memory missing, bytes memory viaPermit2)
+    {
+        PermitToken token = new PermitToken();
+        DaiToken daiToken = new DaiToken();
+        SafeTransferLib.permit2(address(token), address(0xA11CE), address(0xB0B), amount, 1000, v, r, s);
+        plain = token.recorded();
+        SafeTransferLib.permit2(
+            address(daiToken), address(0xA11CE), address(0xB0B), amount, 1000, v, r, s
+        );
+        dai = daiToken.recorded();
+        try this.permitWithoutPermit(amount, v, r, s) {}
+        catch (bytes memory reason) {
+            missing = reason;
+        }
+        try this.transferFromWithoutPermit2(amount) {}
+        catch (bytes memory reason) {
+            viaPermit2 = reason;
+        }
+        SafeTransferLib.permit2Approve(address(token), address(0xB0B), uint160(amount), 5);
+        SafeTransferLib.permit2Lockdown(address(token), address(0xB0B));
+    }
+
+    function permitWithoutPermit(uint256 amount, uint8 v, bytes32 r, bytes32 s) external {
+        SafeTransferLib.permit2(address(0xdead), address(0xA11CE), address(0xB0B), amount, 1000, v, r, s);
+    }
+
+    function transferFromWithoutPermit2(uint256 amount) external {
+        SafeTransferLib.safeTransferFrom2(address(0xdead), address(0xA11CE), address(0xB0B), amount);
+    }
+
+    /// @dev Force ETH into contracts that refuse it, and move ETH through a
+    /// vault, as this chain has no mover.
+    function ethFlow(uint256 amount)
+        external
+        returns (
+            uint256 forced,
+            uint256 forcedAll,
+            bool vaultPredicted,
+            uint256 vaultBalance,
+            bytes memory toMover
+        )
+    {
+        Rejector first = new Rejector();
+        SafeTransferLib.forceSafeTransferETH(address(first), amount);
+        forced = address(first).balance;
+        address vault = SafeTransferLib.safeMoveETH(address(0xB0B), amount);
+        bytes32 codeHash = keccak256(
+            abi.encodePacked(
+                hex"6035600b3d3960353df3fe73",
+                address(0xB0B),
+                hex"33146025575b600160005260206000f35b3d3d3d3d47335af1601a5760003dfd"
+            )
+        );
+        vaultPredicted = vault
+            == address(
+                uint160(uint256(keccak256(abi.encodePacked(hex"ff", address(this), bytes32(0), codeHash))))
+            );
+        vaultBalance = vault.balance;
+        try this.moveToMover(amount) {}
+        catch (bytes memory reason) {
+            toMover = reason;
+        }
+        Rejector second = new Rejector();
+        SafeTransferLib.forceSafeTransferAllETH(address(second));
+        forcedAll = address(second).balance;
+    }
+
+    function moveToMover(uint256 amount) external {
+        SafeTransferLib.safeMoveETH(SafeTransferLib.ETH_MOVER, amount);
+    }
 }
 '''
 
@@ -313,6 +438,20 @@ def workload_cases():
         ("callFlow(bytes,uint16)", ["bytes", "uint16"], (b, cap))
         for b, cap in zip(blobs, [0, 32, 64, 96, 0xFFFF, 128])
     ]
+    permits = [
+        (
+            "permitFlow(uint256,uint8,bytes32,bytes32)",
+            ["uint256", "uint8", "bytes32", "bytes32"],
+            (amount, v, bytes([k + 1]) * 32, bytes([k + 9]) * 32),
+        )
+        for k, (amount, v) in enumerate(
+            [(0, 27), (1, 28), (10**18, 27), (2**160 - 1, 28), (2**160, 27), (2**255, 0)]
+        )
+    ]
+    ether = [
+        ("ethFlow(uint256)", ["uint256"], (amount,))
+        for amount in [0, 1, 2, 10**15, 10**18, 3 * 10**18]
+    ]
     return {
         "tokenURI": token,
         "mergeLists": lists,
@@ -321,6 +460,8 @@ def workload_cases():
         "cloneAndCall": clones,
         "tokenFlow": tokens,
         "callFlow": calls,
+        "permitFlow": permits,
+        "ethFlow": ether,
     }
 
 
@@ -413,6 +554,8 @@ def run(args):
             if receipt is None or int(receipt["status"], 16) != 1:
                 raise RuntimeError(f"deployment failed: {label}")
             addresses[label] = receipt["contractAddress"]
+            # `ethFlow` sends ETH out of the contract, the same amount on every leg.
+            benchmark.rpc(url, "anvil_setBalance", [addresses[label], hex(10**22)])
             runtime = benchmark.rpc(
                 url, "eth_getCode", [receipt["contractAddress"], "latest"]
             )
