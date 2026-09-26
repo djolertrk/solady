@@ -41,6 +41,7 @@ CHECKED_LIBRARIES = (
     "LibString",
     "MerkleProofLib",
     "SafeCastLib",
+    "ECDSA",
 )
 CORE_PREFIX = "solar:core/v1/"
 # The compiler-owned modules the port may import. Under solar the compiler
@@ -588,6 +589,9 @@ def test_vectors(row, rng):
         return
     if row["library"] == "MerkleProofLib":
         yield from merkle_vectors(name, rng)
+        return
+    if row["library"] == "ECDSA":
+        yield from ecdsa_vectors(name, types, rng, blobs)
         return
     if row["library"] == "Base64":
         if name == "encode":
@@ -1235,6 +1239,165 @@ def merkle_vectors(name, rng):
         proof = [word() for _ in range(length)]
         leaf = word()
         yield [proof, merkle_fold(proof, leaf), leaf], [True]
+
+
+SECP_P = (1 << 256) - (1 << 32) - 977
+SECP_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+SECP_G = (
+    0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798,
+    0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8,
+)
+SECP_HALF_N_PLUS_1 = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A1
+
+
+def ec_add(a, b):
+    if a is None:
+        return b
+    if b is None:
+        return a
+    if a[0] == b[0] and (a[1] + b[1]) % SECP_P == 0:
+        return None
+    if a == b:
+        m = 3 * a[0] * a[0] * pow(2 * a[1], -1, SECP_P)
+    else:
+        m = (b[1] - a[1]) * pow(b[0] - a[0], -1, SECP_P)
+    x = (m * m - a[0] - b[0]) % SECP_P
+    return x, (m * (a[0] - x) - a[1]) % SECP_P
+
+
+def ec_mul(k, point):
+    result = None
+    while k:
+        if k & 1:
+            result = ec_add(result, point)
+        point = ec_add(point, point)
+        k >>= 1
+    return result
+
+
+def ec_address(point):
+    return "0x" + keccak(point[0].to_bytes(32, "big") + point[1].to_bytes(32, "big"))[12:].hex()
+
+
+def ec_sign(z, d, k):
+    point = ec_mul(k, SECP_G)
+    r = point[0] % SECP_N
+    s = pow(k, -1, SECP_N) * (z + r * d) % SECP_N
+    return 27 + (point[1] & 1), r, s
+
+
+def ec_recover(z, v, r, s):
+    # The precompile: `v` exactly 27 or 28, `r` and `s` in [1, N), and `r` an
+    # x-coordinate on the curve; the zero address stands for no answer.
+    zero = "0x" + "00" * 20
+    if v not in (27, 28) or not 0 < r < SECP_N or not 0 < s < SECP_N:
+        return zero
+    y2 = (pow(r, 3, SECP_P) + 7) % SECP_P
+    y = pow(y2, (SECP_P + 1) // 4, SECP_P)
+    if y * y % SECP_P != y2:
+        return zero
+    if y & 1 != v - 27:
+        y = SECP_P - y
+    r_inv = pow(r, -1, SECP_N)
+    point = ec_add(ec_mul(-z * r_inv % SECP_N, SECP_G), ec_mul(s * r_inv % SECP_N, (r, y)))
+    return zero if point is None else ec_address(point)
+
+
+def ecdsa_vectors(name, types, rng, blobs):
+    invalid = keccak(b"InvalidSignature()")[:4]
+    zero = "0x" + "00" * 20
+
+    def word(value):
+        return value.to_bytes(32, "big")
+
+    # (hash, v, r, s): signatures by three keys, then broken ones.
+    tuples = []
+    for key in [1, 2, rng.randrange(1, SECP_N)]:
+        for _ in range(3):
+            z = rng.getrandbits(256)
+            tuples.append((z,) + ec_sign(z, key, rng.randrange(1, SECP_N)))
+    z, v, r, s = tuples[0]
+    tuples += [
+        (z ^ 1, v, r, s),
+        (z, 55 - v, r, s),
+        (z, 0, r, s),
+        (z, 29, r, s),
+        (z, v, 0, s),
+        (z, v, r, 0),
+        (z, v, SECP_N, s),
+        (z, v, r, SECP_N),
+        (z, v, r, SECP_N - s),
+        (z, 27, 1, 1),
+    ]
+    if name in ("recover", "tryRecover") and types == ["bytes32", "uint8", "bytes32", "bytes32"]:
+        for z, v, r, s in tuples:
+            got = ec_recover(z, v, r, s)
+            yield [word(z), v, word(r), word(s)], (invalid if name == "recover" and got == zero else [got])
+        return
+    if name in ("recover", "tryRecover") and types == ["bytes32", "bytes32", "bytes32"]:
+        for z, v, r, s in tuples:
+            if v not in (27, 28) or s >> 255:
+                continue
+            vs = s | ((v - 27) << 255)
+            got = ec_recover(z, v, r, s)
+            yield [word(z), word(r), word(vs)], (invalid if name == "recover" and got == zero else [got])
+        return
+    if name in ("recover", "tryRecover", "recoverCalldata", "tryRecoverCalldata"):
+        reverting = name.startswith("recover")
+        for z, v, r, s in tuples:
+            forms = [(word(r) + word(s) + bytes([v % 256]), ec_recover(z, v, r, s))]
+            if v in (27, 28) and not s >> 255:
+                vs = s | ((v - 27) << 255)
+                forms.append((word(r) + word(vs), ec_recover(z, v, r, s)))
+            for signature, got in forms:
+                yield [word(z), signature], (invalid if reverting and got == zero else [got])
+        for signature in [b"", bytes(63), bytes(66), bytes(65), bytes(64)]:
+            yield [word(z), signature], (invalid if reverting else [zero])
+        return
+    if name == "toEthSignedMessageHash" and types == ["bytes32"]:
+        for _ in range(4):
+            h = word(rng.getrandbits(256))
+            yield [h], [keccak(b"\x19Ethereum Signed Message:\n32" + h)]
+        return
+    if name == "toEthSignedMessageHash":
+        messages = list(blobs) + [bytes(n) for n in [9, 10, 99, 100, 999, 1000, 9999, 10000]]
+        for m in messages:
+            yield [m], [keccak(b"\x19Ethereum Signed Message:\n" + str(len(m)).encode() + m)]
+        return
+
+    def canonical(r, v, s):
+        if s >= SECP_HALF_N_PLUS_1:
+            v ^= 7
+            s = (SECP_N - s) % (1 << 256)
+        return keccak(word(r) + word(s) + bytes([v % 256]))
+
+    highs = [0, 1, SECP_HALF_N_PLUS_1 - 1, SECP_HALF_N_PLUS_1, SECP_N - 1, SECP_N, SECP_N + 1, MAX]
+    if name == "canonicalHash" and types == ["uint8", "bytes32", "bytes32"]:
+        for v in [0, 27, 28, 255]:
+            for s in highs:
+                r = rng.getrandbits(256)
+                yield [v, word(r), word(s)], [canonical(r, v, s)]
+        return
+    if name == "canonicalHash" and types == ["bytes32", "bytes32"]:
+        for vs in highs + [s | (1 << 255) for s in highs if s < (1 << 255)]:
+            r = rng.getrandbits(256)
+            v, s = 27 + (vs >> 255), vs & ((1 << 255) - 1)
+            yield [word(r), word(vs)], [keccak(word(r) + word(s) + bytes([v]))]
+        return
+    if name in ("canonicalHash", "canonicalHashCalldata"):
+        for s in highs:
+            r = rng.getrandbits(256)
+            for v in [0, 27, 28, 255]:
+                yield [word(r) + word(s) + bytes([v])], [canonical(r, v, s)]
+            yield [word(r) + word(s)], [canonical(r, 27 + (s >> 255), s & ((1 << 255) - 1))]
+        for signature in [b"", bytes(1), bytes(63), bytes(66), bytes(range(100))]:
+            digest = int.from_bytes(keccak(signature), "big") ^ 0xD62F1AB2
+            yield [signature], [word(digest)]
+        return
+    if name == "emptySignature":
+        yield [], [b""]
+        return
+    raise ValueError(f"no ECDSA vectors for {name}")
 
 
 def send_transaction(url, sender, to, data):

@@ -1,80 +1,37 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.4;
+pragma solidity ^0.8.20;
 
-/// @notice Gas optimized ECDSA wrapper.
-/// @author Solady (https://github.com/vectorized/solady/blob/main/src/utils/ECDSA.sol)
-/// @author Modified from Solmate (https://github.com/transmissions11/solmate/blob/main/src/utils/ECDSA.sol)
-/// @author Modified from OpenZeppelin (https://github.com/OpenZeppelin/openzeppelin-contracts/blob/master/contracts/utils/cryptography/ECDSA.sol)
+import {Bytes} from "solar:core/v1/Bytes.sol";
+
+/// @notice Checked Solidity implementation of the pinned Solady ECDSA API.
+/// @dev Recovery goes through the `ecrecover` builtin, whose zero result is
+/// the precompile's empty answer: the `recover` variants revert with
+/// `InvalidSignature()` on it and the `tryRecover` variants return it. Every
+/// `bytes` signature may be the regular 65-byte `(r, s, v)` or the EIP-2098
+/// 64-byte `(r, vs)` form, as upstream, and no variant checks malleability.
 ///
-/// @dev Note:
-/// - The recovery functions use the ecrecover precompile (0x1).
-/// - As of Solady version 0.0.68, the `recover` variants will revert upon recovery failure.
-///   This is for more safety by default.
-///   Use the `tryRecover` variants if you need to get the zero address back
-///   upon recovery failure instead.
-/// - As of Solady version 0.0.134, all `bytes signature` variants accept both
-///   regular 65-byte `(r, s, v)` and EIP-2098 `(r, vs)` short form signatures.
-///   See: https://eips.ethereum.org/EIPS/eip-2098
-///   This is for calldata efficiency on smart accounts prevalent on L2s.
+/// A canonical hash negates `s` modulo 2**256 where the assembly does, so an
+/// `s` above the curve order hashes as it does upstream instead of reverting.
 ///
-/// WARNING! Do NOT directly use signatures as unique identifiers:
-/// - The recovery operations do NOT check if a signature is non-malleable.
-/// - Use a nonce in the digest to prevent replay attacks on the same contract.
-/// - Use EIP-712 for the digest to prevent replay attacks across different chains and contracts.
-///   EIP-712 also enables readable signing of typed data for better user safety.
-/// - If you need a unique hash from a signature, please use the `canonicalHash` functions.
+/// Two deliberate differences from the assembly: `toEthSignedMessageHash`
+/// reverts on a message longer than 999,999 bytes, where the assembly runs out
+/// of gas, and a recovery whose precompile call itself fails reverts, as the
+/// builtin does, where `tryRecover` returned zero.
 library ECDSA {
-    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
-    /*                         CONSTANTS                          */
-    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
-
     /// @dev The order of the secp256k1 elliptic curve.
-    uint256 internal constant N =
-        0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141;
+    uint256 internal constant N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141;
 
     /// @dev `N/2 + 1`. Used for checking the malleability of the signature.
     uint256 private constant _HALF_N_PLUS_1 =
         0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a1;
 
-    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
-    /*                        CUSTOM ERRORS                       */
-    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
-
     /// @dev The signature is invalid.
     error InvalidSignature();
 
-    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
-    /*                    RECOVERY OPERATIONS                     */
-    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
-
     /// @dev Recovers the signer's address from a message digest `hash`, and the `signature`.
     function recover(bytes32 hash, bytes memory signature) internal view returns (address result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            for { let m := mload(0x40) } 1 {
-                mstore(0x00, 0x8baa579f) // `InvalidSignature()`.
-                revert(0x1c, 0x04)
-            } {
-                switch mload(signature)
-                case 64 {
-                    let vs := mload(add(signature, 0x40))
-                    mstore(0x20, add(shr(255, vs), 27)) // `v`.
-                    mstore(0x60, shr(1, shl(1, vs))) // `s`.
-                }
-                case 65 {
-                    mstore(0x20, byte(0, mload(add(signature, 0x60)))) // `v`.
-                    mstore(0x60, mload(add(signature, 0x40))) // `s`.
-                }
-                default { continue }
-                mstore(0x00, hash)
-                mstore(0x40, mload(add(signature, 0x20))) // `r`.
-                result := mload(staticcall(gas(), 1, 0x00, 0x80, 0x01, 0x20))
-                mstore(0x60, 0) // Restore the zero slot.
-                mstore(0x40, m) // Restore the free memory pointer.
-                // `returndatasize()` will be `0x20` upon success, and `0x00` otherwise.
-                if returndatasize() { break }
-            }
-        }
+        result = tryRecover(hash, signature);
+        if (result == address(0)) revert InvalidSignature();
     }
 
     /// @dev Recovers the signer's address from a message digest `hash`, and the `signature`.
@@ -83,53 +40,15 @@ library ECDSA {
         view
         returns (address result)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            for { let m := mload(0x40) } 1 {
-                mstore(0x00, 0x8baa579f) // `InvalidSignature()`.
-                revert(0x1c, 0x04)
-            } {
-                switch signature.length
-                case 64 {
-                    let vs := calldataload(add(signature.offset, 0x20))
-                    mstore(0x20, add(shr(255, vs), 27)) // `v`.
-                    mstore(0x40, calldataload(signature.offset)) // `r`.
-                    mstore(0x60, shr(1, shl(1, vs))) // `s`.
-                }
-                case 65 {
-                    mstore(0x20, byte(0, calldataload(add(signature.offset, 0x40)))) // `v`.
-                    calldatacopy(0x40, signature.offset, 0x40) // Copy `r` and `s`.
-                }
-                default { continue }
-                mstore(0x00, hash)
-                result := mload(staticcall(gas(), 1, 0x00, 0x80, 0x01, 0x20))
-                mstore(0x60, 0) // Restore the zero slot.
-                mstore(0x40, m) // Restore the free memory pointer.
-                // `returndatasize()` will be `0x20` upon success, and `0x00` otherwise.
-                if returndatasize() { break }
-            }
-        }
+        result = tryRecoverCalldata(hash, signature);
+        if (result == address(0)) revert InvalidSignature();
     }
 
     /// @dev Recovers the signer's address from a message digest `hash`,
     /// and the EIP-2098 short form signature defined by `r` and `vs`.
     function recover(bytes32 hash, bytes32 r, bytes32 vs) internal view returns (address result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let m := mload(0x40) // Cache the free memory pointer.
-            mstore(0x00, hash)
-            mstore(0x20, add(shr(255, vs), 27)) // `v`.
-            mstore(0x40, r)
-            mstore(0x60, shr(1, shl(1, vs))) // `s`.
-            result := mload(staticcall(gas(), 1, 0x00, 0x80, 0x01, 0x20))
-            // `returndatasize()` will be `0x20` upon success, and `0x00` otherwise.
-            if iszero(returndatasize()) {
-                mstore(0x00, 0x8baa579f) // `InvalidSignature()`.
-                revert(0x1c, 0x04)
-            }
-            mstore(0x60, 0) // Restore the zero slot.
-            mstore(0x40, m) // Restore the free memory pointer.
-        }
+        result = tryRecover(hash, r, vs);
+        if (result == address(0)) revert InvalidSignature();
     }
 
     /// @dev Recovers the signer's address from a message digest `hash`,
@@ -139,27 +58,9 @@ library ECDSA {
         view
         returns (address result)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let m := mload(0x40) // Cache the free memory pointer.
-            mstore(0x00, hash)
-            mstore(0x20, and(v, 0xff))
-            mstore(0x40, r)
-            mstore(0x60, s)
-            result := mload(staticcall(gas(), 1, 0x00, 0x80, 0x01, 0x20))
-            // `returndatasize()` will be `0x20` upon success, and `0x00` otherwise.
-            if iszero(returndatasize()) {
-                mstore(0x00, 0x8baa579f) // `InvalidSignature()`.
-                revert(0x1c, 0x04)
-            }
-            mstore(0x60, 0) // Restore the zero slot.
-            mstore(0x40, m) // Restore the free memory pointer.
-        }
+        result = ecrecover(hash, v, r, s);
+        if (result == address(0)) revert InvalidSignature();
     }
-
-    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
-    /*                   TRY-RECOVER OPERATIONS                   */
-    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     // WARNING!
     // These functions will NOT revert upon recovery failure.
@@ -173,29 +74,17 @@ library ECDSA {
         view
         returns (address result)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            for { let m := mload(0x40) } 1 {} {
-                switch mload(signature)
-                case 64 {
-                    let vs := mload(add(signature, 0x40))
-                    mstore(0x20, add(shr(255, vs), 27)) // `v`.
-                    mstore(0x60, shr(1, shl(1, vs))) // `s`.
-                }
-                case 65 {
-                    mstore(0x20, byte(0, mload(add(signature, 0x60)))) // `v`.
-                    mstore(0x60, mload(add(signature, 0x40))) // `s`.
-                }
-                default { break }
-                mstore(0x00, hash)
-                mstore(0x40, mload(add(signature, 0x20))) // `r`.
-                pop(staticcall(gas(), 1, 0x00, 0x80, 0x40, 0x20))
-                mstore(0x60, 0) // Restore the zero slot.
-                // `returndatasize()` will be `0x20` upon success, and `0x00` otherwise.
-                result := mload(xor(0x60, returndatasize()))
-                mstore(0x40, m) // Restore the free memory pointer.
-                break
-            }
+        uint256 length = signature.length;
+        if (length == 64) {
+            return tryRecover(hash, Bytes.readBytes32(signature, 0), Bytes.readBytes32(signature, 32));
+        }
+        if (length == 65) {
+            return ecrecover(
+                hash,
+                uint8(signature[64]),
+                Bytes.readBytes32(signature, 0),
+                Bytes.readBytes32(signature, 32)
+            );
         }
     }
 
@@ -205,29 +94,13 @@ library ECDSA {
         view
         returns (address result)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            for { let m := mload(0x40) } 1 {} {
-                switch signature.length
-                case 64 {
-                    let vs := calldataload(add(signature.offset, 0x20))
-                    mstore(0x20, add(shr(255, vs), 27)) // `v`.
-                    mstore(0x40, calldataload(signature.offset)) // `r`.
-                    mstore(0x60, shr(1, shl(1, vs))) // `s`.
-                }
-                case 65 {
-                    mstore(0x20, byte(0, calldataload(add(signature.offset, 0x40)))) // `v`.
-                    calldatacopy(0x40, signature.offset, 0x40) // Copy `r` and `s`.
-                }
-                default { break }
-                mstore(0x00, hash)
-                pop(staticcall(gas(), 1, 0x00, 0x80, 0x40, 0x20))
-                mstore(0x60, 0) // Restore the zero slot.
-                // `returndatasize()` will be `0x20` upon success, and `0x00` otherwise.
-                result := mload(xor(0x60, returndatasize()))
-                mstore(0x40, m) // Restore the free memory pointer.
-                break
-            }
+        if (signature.length == 64) {
+            return tryRecover(hash, bytes32(signature[0:32]), bytes32(signature[32:64]));
+        }
+        if (signature.length == 65) {
+            return ecrecover(
+                hash, uint8(signature[64]), bytes32(signature[0:32]), bytes32(signature[32:64])
+            );
         }
     }
 
@@ -238,19 +111,7 @@ library ECDSA {
         view
         returns (address result)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let m := mload(0x40) // Cache the free memory pointer.
-            mstore(0x00, hash)
-            mstore(0x20, add(shr(255, vs), 27)) // `v`.
-            mstore(0x40, r)
-            mstore(0x60, shr(1, shl(1, vs))) // `s`.
-            pop(staticcall(gas(), 1, 0x00, 0x80, 0x40, 0x20))
-            mstore(0x60, 0) // Restore the zero slot.
-            // `returndatasize()` will be `0x20` upon success, and `0x00` otherwise.
-            result := mload(xor(0x60, returndatasize()))
-            mstore(0x40, m) // Restore the free memory pointer.
-        }
+        return ecrecover(hash, uint8(27 + (uint256(vs) >> 255)), r, bytes32((uint256(vs) << 1) >> 1));
     }
 
     /// @dev Recovers the signer's address from a message digest `hash`,
@@ -260,36 +121,15 @@ library ECDSA {
         view
         returns (address result)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let m := mload(0x40) // Cache the free memory pointer.
-            mstore(0x00, hash)
-            mstore(0x20, and(v, 0xff))
-            mstore(0x40, r)
-            mstore(0x60, s)
-            pop(staticcall(gas(), 1, 0x00, 0x80, 0x40, 0x20))
-            mstore(0x60, 0) // Restore the zero slot.
-            // `returndatasize()` will be `0x20` upon success, and `0x00` otherwise.
-            result := mload(xor(0x60, returndatasize()))
-            mstore(0x40, m) // Restore the free memory pointer.
-        }
+        return ecrecover(hash, v, r, s);
     }
-
-    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
-    /*                     HASHING OPERATIONS                     */
-    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     /// @dev Returns an Ethereum Signed Message, created from a `hash`.
     /// This produces a hash corresponding to the one signed with the
     /// [`eth_sign`](https://ethereum.org/en/developers/docs/apis/json-rpc/#eth_sign)
     /// JSON-RPC method as part of EIP-191.
     function toEthSignedMessageHash(bytes32 hash) internal pure returns (bytes32 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x20, hash) // Store into scratch space for keccak256.
-            mstore(0x00, "\x00\x00\x00\x00\x19Ethereum Signed Message:\n32") // 28 bytes.
-            result := keccak256(0x04, 0x3c) // `32 * 2 - (32 - 28) = 60 = 0x3c`.
-        }
+        return keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", hash));
     }
 
     /// @dev Returns an Ethereum Signed Message, created from `s`.
@@ -298,31 +138,31 @@ library ECDSA {
     /// JSON-RPC method as part of EIP-191.
     /// Note: Supports lengths of `s` up to 999999 bytes.
     function toEthSignedMessageHash(bytes memory s) internal pure returns (bytes32 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let sLength := mload(s)
-            let o := 0x20
-            mstore(o, "\x19Ethereum Signed Message:\n") // 26 bytes, zero-right-padded.
-            mstore(0x00, 0x00)
-            // Convert the `s.length` to ASCII decimal representation: `base10(s.length)`.
-            for { let temp := sLength } 1 {} {
-                o := sub(o, 1)
-                mstore8(o, add(48, mod(temp, 10)))
-                temp := div(temp, 10)
-                if iszero(temp) { break }
-            }
-            let n := sub(0x3a, o) // Header length: `26 + 32 - o`.
-            // Throw an out-of-offset error (consumes all gas) if the header exceeds 32 bytes.
-            returndatacopy(returndatasize(), returndatasize(), gt(n, 0x20))
-            mstore(s, or(mload(0x00), mload(n))) // Temporarily store the header.
-            result := keccak256(add(s, sub(0x20, n)), add(n, sLength))
-            mstore(s, sLength) // Restore the length.
+        // The header is the prefix and the decimal length of `s`. Up to six
+        // digits it fits in a word, spelled as an integer of one byte per
+        // digit, so the header is a fixed prefix that this compiler writes over
+        // the length word of `s` and hashes with it, as the assembly does.
+        uint256 n = s.length;
+        if (n < 10) {
+            return keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n", uint8(48 + n), s));
         }
+        if (n < 100) {
+            return keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n", uint16(_digits(n)), s));
+        }
+        if (n < 1000) {
+            return keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n", uint24(_digits(n)), s));
+        }
+        if (n < 10000) {
+            return keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n", uint32(_digits(n)), s));
+        }
+        if (n < 100000) {
+            return keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n", uint40(_digits(n)), s));
+        }
+        if (n < 1000000) {
+            return keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n", uint48(_digits(n)), s));
+        }
+        revert();
     }
-
-    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
-    /*                  CANONICAL HASH FUNCTIONS                  */
-    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     // The following functions return the hash of the signature in its canonicalized format,
     // which is the 65-byte `abi.encodePacked(r, s, uint8(v))`, where `v` is either 27 or 28.
@@ -334,34 +174,20 @@ library ECDSA {
 
     /// @dev Returns the canonical hash of `signature`.
     function canonicalHash(bytes memory signature) internal pure returns (bytes32 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let l := mload(signature)
-            for {} 1 {} {
-                mstore(0x00, mload(add(signature, 0x20))) // `r`.
-                let s := mload(add(signature, 0x40))
-                let v := mload(add(signature, 0x41))
-                if eq(l, 64) {
-                    v := add(shr(255, s), 27)
-                    s := shr(1, shl(1, s))
-                }
-                if iszero(lt(s, _HALF_N_PLUS_1)) {
-                    v := xor(v, 7)
-                    s := sub(N, s)
-                }
-                mstore(0x21, v)
-                mstore(0x20, s)
-                result := keccak256(0x00, 0x41)
-                mstore(0x21, 0) // Restore the overwritten part of the free memory pointer.
-                break
-            }
-
-            // If the length is neither 64 nor 65, return a uniquely corrupted hash.
-            if iszero(lt(sub(l, 64), 2)) {
-                // `bytes4(keccak256("InvalidSignatureLength"))`.
-                result := xor(keccak256(add(signature, 0x20), l), 0xd62f1ab2)
-            }
+        uint256 length = signature.length;
+        if (length != 64 && length != 65) {
+            // `bytes4(keccak256("InvalidSignatureLength"))`.
+            return bytes32(uint256(keccak256(signature)) ^ 0xd62f1ab2);
         }
+        uint256 s = uint256(Bytes.readBytes32(signature, 32));
+        uint8 v;
+        if (length == 64) {
+            v = uint8(27 + (s >> 255));
+            s = (s << 1) >> 1;
+        } else {
+            v = uint8(signature[64]);
+        }
+        return _canonical(Bytes.readBytes32(signature, 0), v, s);
     }
 
     /// @dev Returns the canonical hash of `signature`.
@@ -370,74 +196,55 @@ library ECDSA {
         pure
         returns (bytes32 result)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            for {} 1 {} {
-                mstore(0x00, calldataload(signature.offset)) // `r`.
-                let s := calldataload(add(signature.offset, 0x20))
-                let v := calldataload(add(signature.offset, 0x21))
-                if eq(signature.length, 64) {
-                    v := add(shr(255, s), 27)
-                    s := shr(1, shl(1, s))
-                }
-                if iszero(lt(s, _HALF_N_PLUS_1)) {
-                    v := xor(v, 7)
-                    s := sub(N, s)
-                }
-                mstore(0x21, v)
-                mstore(0x20, s)
-                result := keccak256(0x00, 0x41)
-                mstore(0x21, 0) // Restore the overwritten part of the free memory pointer.
-                break
-            }
-            // If the length is neither 64 nor 65, return a uniquely corrupted hash.
-            if iszero(lt(sub(signature.length, 64), 2)) {
-                calldatacopy(mload(0x40), signature.offset, signature.length)
-                // `bytes4(keccak256("InvalidSignatureLength"))`.
-                result := xor(keccak256(mload(0x40), signature.length), 0xd62f1ab2)
-            }
+        if (signature.length != 64 && signature.length != 65) {
+            // `bytes4(keccak256("InvalidSignatureLength"))`.
+            return bytes32(uint256(keccak256(signature)) ^ 0xd62f1ab2);
         }
+        uint256 s = uint256(bytes32(signature[32:64]));
+        uint8 v;
+        if (signature.length == 64) {
+            v = uint8(27 + (s >> 255));
+            s = (s << 1) >> 1;
+        } else {
+            v = uint8(signature[64]);
+        }
+        return _canonical(bytes32(signature[0:32]), v, s);
     }
 
     /// @dev Returns the canonical hash of `signature`.
     function canonicalHash(bytes32 r, bytes32 vs) internal pure returns (bytes32 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x00, r) // `r`.
-            let v := add(shr(255, vs), 27)
-            let s := shr(1, shl(1, vs))
-            mstore(0x21, v)
-            mstore(0x20, s)
-            result := keccak256(0x00, 0x41)
-            mstore(0x21, 0) // Restore the overwritten part of the free memory pointer.
-        }
+        return keccak256(
+            abi.encodePacked(r, (uint256(vs) << 1) >> 1, uint8(27 + (uint256(vs) >> 255)))
+        );
     }
 
     /// @dev Returns the canonical hash of `signature`.
     function canonicalHash(uint8 v, bytes32 r, bytes32 s) internal pure returns (bytes32 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x00, r) // `r`.
-            if iszero(lt(s, _HALF_N_PLUS_1)) {
-                v := xor(v, 7)
-                s := sub(N, s)
-            }
-            mstore(0x21, v)
-            mstore(0x20, s)
-            result := keccak256(0x00, 0x41)
-            mstore(0x21, 0) // Restore the overwritten part of the free memory pointer.
-        }
+        return _canonical(r, v, uint256(s));
     }
-
-    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
-    /*                   EMPTY CALLDATA HELPERS                   */
-    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     /// @dev Returns an empty calldata bytes.
     function emptySignature() internal pure returns (bytes calldata signature) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            signature.length := 0
+        return msg.data[0:0];
+    }
+
+    /// @dev The hash of `r`, `s` and `v` with `s` in the lower half of the
+    /// curve order: an upper `s` is negated modulo 2**256, which is `N - s` for
+    /// any `s` up to `N`, and `v` flips between 27 and 28.
+    function _canonical(bytes32 r, uint8 v, uint256 s) private pure returns (bytes32) {
+        if (s >= _HALF_N_PLUS_1) {
+            v ^= 7;
+            s = s <= N ? N - s : type(uint256).max - (s - N) + 1;
+        }
+        return keccak256(abi.encodePacked(r, s, v));
+    }
+
+    /// @dev The decimal digits of `n`, one ASCII byte each, as an integer.
+    function _digits(uint256 n) private pure returns (uint256 digits) {
+        for (uint256 shift;; shift += 8) {
+            digits |= (48 + n % 10) << shift;
+            n /= 10;
+            if (n == 0) return digits;
         }
     }
 }
