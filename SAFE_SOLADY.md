@@ -3,8 +3,8 @@
 **This is a partial port and a reproducible comparison. The CTO's full
 API-compatibility and equal-or-better gas target is not met.**
 
-The implementations listed below in `src/utils/` contain neither inline assembly nor
-`unchecked` blocks. Arithmetic and array indexing retain Solidity's checks;
+The implementations listed below in `src/utils/` and `src/tokens/` contain neither
+inline assembly nor `unchecked` blocks. Arithmetic and array indexing retain Solidity's checks;
 explicit bit operations and `mulmod` keep their defined Solidity semantics.
 This is the experiment's concrete meaning of “safe”, not a security audit.
 The benchmark checks the compiler AST of every safe source and dependency,
@@ -21,12 +21,188 @@ upstream repository. Derived code retains the upstream MIT license in
 author attribution. `LibBit` uses upstream's bit-permutation masks, and
 `LibSort` uses its `mulmod` hash with typed, bounds-checked array accesses.
 
-This branch replaces only the libraries below in `src/utils`: five whole,
+This branch replaces the fifteen sources in the
+[implemented surface](#implemented-surface): eleven whole, LibString,
+EfficientHashLib and MerkleProofLib without one, four and three declarations,
 and `LibBytes` down to its storage operations. Other upstream libraries and
-tests still contain assembly and unchecked blocks. LibString and LibBytes have
-reduced APIs, so the whole upstream suite and consumers of missing functions
-are not expected to compile on this branch.
+tests still contain assembly and unchecked blocks. The four partial libraries
+have reduced APIs, so the whole upstream suite and consumers of missing
+functions are not expected to compile on this branch.
 Use the scoped runner commands below for the published subset.
+
+## ERC20, slot reuse and the join edge, 2026-09-26
+
+Port commits: `f171dd6` (ERC20 and its benchmark) and `03e32f0` (upstream
+suites). Solar commits since the [next section](#calls-clones-signatures-and-proofs-2026-09-26)
+(unpushed): `df5253695` and `c8339c0dd`.
+
+[`src/tokens/ERC20.sol`](src/tokens/ERC20.sol) is the first token: a checked
+ERC20 with EIP-2612 `permit`. It keeps all 23 non-private declarations, the
+custom errors and events, the order of checks, and Permit2's allowance fixed
+at infinity while `_givePermit2InfiniteAllowance` returns true. Its header
+records two deliberate differences. State lives in ordinary Solidity variables
+from slot 0, so the token is not storage-compatible with a deployed Solady
+ERC20, and a mapping slot hashes a 64-byte key: 12 more gas per balance slot
+and 42 per allowance slot. A recipient's balance, the supply a burn lowers and
+a nonce use checked arithmetic, which only an override that breaks the
+balance-sum invariant can make revert.
+
+The matrix measures independent pure calls, so the token has a stateful runner:
+
+```sh
+uv run benchmarks/checked/erc20.py \
+  --solc "$BENCH_SOLC" --solar ../solar/target/debug/solar \
+  --runs 200 --output target/safe-solady/erc20-200
+```
+
+It deploys one benchmark token (a constant name, unrestricted mint and burn)
+per leg and replays 26 transactions and 9 views: mints, transfers to fresh
+and existing holders, to self and of zero, approvals, finite, infinite and
+Permit2 `transferFrom`, burns, and valid, replayed, expired, forged and
+Permit2 permits, with the reverting cases among them. A Python model of the
+upstream semantics checks each transaction's success, return data and events
+and the whole state after it. The runner also checks the declarations against
+upstream and that the token's ABI, with its events and errors, is the same on
+every leg. Gas is executed opcode gas per transaction, excluding intrinsic gas
+and before refunds.
+
+| Runs | Upstream best, per row | Checked / Solar | Change | Losing rows | Runtime bytes, checked Solar / upstream via-IR |
+|---|---:|---:|---:|---|---:|
+| 200 | 356,437 | 352,396 | -1.13% | `DOMAIN_SEPARATOR` view, +3 | 1,627 / 2,125 |
+| 1,000,000 | 355,261 | 350,266 | -1.41% | the four approvals, +8 to +30 | 1,975 / 2,840 |
+
+At 200 runs no transaction costs more than the better solc pipeline on the
+assembly: a transfer to an existing holder costs 12,237 gas against 12,428,
+`transferFrom` with a finite allowance 17,484 against 17,552, `permit` 50,327
+against 50,352, and `balanceOf` 2,321 against 2,529. At 1,000,000 runs the
+approvals lose by 8 to 30 gas: solc's pipelines save 27 gas on them, while
+Solar's selector table dispatches `approve` 10 gas later than its 200-run
+dispatch. Most other rows cost 3 to 140 gas less than at 200 runs, `balanceOf`
+and `name` 11 and 4 more.
+
+Before two compiler changes the benchmark prompted, the port lost
+`transferFrom` with a finite allowance by 62 gas and `permit` by 25:
+
+- `df5253695` reuses slot hashes. A slot hash writes only the scratch words it
+  then hashes, so CSE now keys it by its operands; every scratch write used to
+  drop it, so the two hashes of a nested mapping dropped each other and
+  `allowance[owner][spender]` was hashed again for the store. The e-graph also
+  numbers the reads that cannot change within a call frame, such as `caller`
+  and `address`, so the slot keyed by `msg.sender` is one value. The calldata
+  size is left out: numbering it spilled ABI decoding loops in size builds.
+  `transferFrom` with a finite allowance costs 109 gas less and `permit` 50.
+- `c8339c0dd` keeps the words carried into an `if` body on the stack. When a
+  branch goes to a successor only it enters and to a join that reads none of
+  those words, the successor takes the `JUMPI` edge with the stack and the
+  join edge pops it; before, both edges stored the words to memory. Every
+  `transferFrom` path costs 20 to 26 gas less.
+
+Elsewhere, the compiler's runtime corpus spends 0.02% less gas and 0.36% fewer
+runtime bytes with no case growing: upstream LibString 6,144 gas, and
+OpenZeppelin's governor 478 bytes, since `_executor() != address(this)` now
+folds. Its UI codegen fixtures shrink 0.48% in size builds and 0.58% in gas
+builds. The combined matrix, now ten libraries and 24,331 cases, stays at
+0.5300x of upstream's best gas, summed over the comparable cases. At 200 runs
+only the storage `get` of LibString and LibBytes moves, by 41 to 50 gas
+on four cases each: its shared data slot no longer pays for folding into two
+33-byte constants, and each harness is 52 bytes smaller; at 1,000,000 runs
+both fold. The composed workloads keep 56 wins of 61, with `ethFlow` 9 gas
+more per case and `cloneFamilies` 26 from stack shuffles. The compiler's UI
+suite and in-repo Foundry projects pass, and its external Foundry suite still
+differs from solc only on OpenZeppelin's history-block test.
+
+The pinned upstream suites of six ports now run by default and pass all 169
+tests under solc via-IR and Solar: ERC20 35, ECDSA 46, SignatureCheckerLib 28,
+LibBit 34, Base64 13, SafeCastLib 11, and two shared helpers. MerkleProofLib's
+suite calls the three `empty*` functions the port leaves out, and
+EfficientHashLib's fails only the test that `free` rewinds the free-memory
+pointer.
+
+## Calls, clones, signatures and proofs, 2026-09-26
+
+Port commits `73d135d` to `fb9d937` add eight libraries, each checked against
+the pinned upstream API and with its deliberate differences in its header:
+
+- **EfficientHashLib** (44 of 48): every fixed-arity hash is the plain
+  `keccak256(abi.encode(...))`, which Solar builds in scratch space or past the
+  free pointer; ranges hash in place through `Hash.keccak256Range`. `free` is
+  a no-op, since checked Solidity cannot rewind the free-memory pointer, and
+  the 13- and 14-word overloads are left out, since solc's legacy pipeline
+  cannot compile a wrapper that takes them.
+- **SSTORE2** (11 of 11): data contracts are deployed with `Create`, their
+  initcode laid over the data's length word as the assembly does, and read
+  back with one code-size check.
+- **LibCall** (8 of 8) and **SafeTransferLib** (25 of 25): calls go through
+  `address.call` or the bounded `Calls` intrinsics, which copy at most the
+  words a token's answer needs; forced ETH transfers deploy a contract that
+  self-destructs to the recipient, and the Permit2 helpers send exactly the
+  ABI-encoded arguments.
+- **LibClone** (122 of 122): every proxy family, its creation code kept in
+  constants and packed around the implementation or beacon, arguments read
+  back with `Code.read`.
+- **MerkleProofLib** (4 of 7): proofs fold one sibling at a time, and a
+  multiproof runs the assembly's queue in a new array, returning `false`
+  before any read past what was written. The three `empty*` helpers are left
+  out: no Solidity expression is an empty calldata array.
+- **ECDSA** (15 of 15) and **SignatureCheckerLib** (13 of 13): recovery goes
+  through the `ecrecover` builtin for 65-byte and EIP-2098 signatures, ERC1271
+  checks send exactly the assembly's calldata through
+  `Calls.staticCallBounded`, and the ERC6492 verifiers are called through
+  `Calls.callBounded`.
+
+The Solar commits of this round (`c1da61685` to `237e83285`, unpushed) hash
+calldata and views in place, add bounded calls into fresh memory and lower
+them in place, lower `Code.read` to one checked copy and zero the padding it
+leaves, check calldata ranges as solc's IR pipeline does and validate the
+words assembly sets, revert when `ecrecover`'s call fails, trust the calldata
+arguments of public functions only the ABI calls, lay packed inputs over a
+bytes object's length word, and give empty call inputs no buffer; smaller
+folds drop unchanged stores and dead context reads, merge branches to equal
+halting code, and pack bytes constants as literals.
+
+The matrix covers four of them, SignatureCheckerLib's calls against accounts
+it gives code, at 200 runs with Solar at `c8339c0dd`:
+
+| Library | Comparable cases | Wins / ties / losses | Worst gas delta |
+|---|---:|---:|---:|
+| EfficientHashLib | 847 | 847 / 0 / 0 | -10 |
+| ECDSA | 351 | 231 / 0 / 120 | +64 |
+| MerkleProofLib | 1,142 | 692 / 0 / 450 | +13,036 |
+| SignatureCheckerLib | 468 | 111 / 2 / 355 | +484 |
+
+ECDSA loses 11 to 64 gas on the canonical hashes, the EIP-2098 recoveries,
+`recoverCalldata` and `emptySignature`. MerkleProofLib's `verify` wins every
+case; `verifyCalldata` costs 159 gas per proof element against 123, and the
+multiproofs lose up to 13,036 gas in the element-by-element leaves copy and
+the checked queue. SignatureCheckerLib loses the ERC1271 and ERC6492 paths,
+by up to 484 gas, to the buffers its payload and answer take where the
+assembly writes past the free-memory pointer.
+
+The other four deploy contracts and move tokens and ETH, so
+[`composed.py`](benchmarks/checked/composed.py) chains them in eleven
+workloads; the source is identical on every leg and the six legs must agree.
+With Solar at `c8339c0dd`, all 61 cases agree:
+
+| Workload | Cases | Upstream best | Checked / Solar | Ratio | Wins / losses |
+|---|---:|---:|---:|---:|---:|
+| `tokenURI` | 6 | 114,980 | 60,366 | 0.53x | 6 / 0 |
+| `mergeLists` | 6 | 163,944 | 116,611 | 0.71x | 6 / 0 |
+| `decodeAndScan` | 6 | 155,014 | 58,378 | 0.38x | 6 / 0 |
+| `storeAndRead` | 6 | 967,566 | 971,152 | 1.00x | 1 / 5 |
+| `cloneAndCall` | 6 | 504,708 | 502,650 | 1.00x | 6 / 0 |
+| `tokenFlow` | 6 | 2,491,998 | 2,120,472 | 0.85x | 6 / 0 |
+| `callFlow` | 6 | 27,256 | 21,814 | 0.80x | 6 / 0 |
+| `permitFlow` | 6 | 1,682,254 | 1,329,514 | 0.79x | 6 / 0 |
+| `ethFlow` | 6 | 1,375,140 | 1,374,420 | 1.00x | 6 / 0 |
+| `cloneFamilies` | 6 | 8,320,050 | 8,179,823 | 0.98x | 6 / 0 |
+| `cloneArgsLimit` | 1 | 77,501,084 | 21,679 | 0.00x | 1 / 0 |
+
+`storeAndRead` still loses five cases, by 138 gas and then about 900 on the
+four that store more data: the `_codeSize` helper stays a call under the cost
+model, the read's range check cannot be proved away, and upstream's
+three-argument read copies speculatively before it checks the size.
+`cloneArgsLimit` is the overlong-argument failure, where the assembly burns
+the creation's gas and the port fails with `DeploymentFailed()`.
 
 ## Code size, second round, 2026-09-25
 
@@ -944,7 +1120,7 @@ retain zero mismatches at both optimizer-run settings. Artifacts are in
 
 ## Implemented surface
 
-| Library | Implemented non-private functions | Pinned function surface |
+| Source | Implemented non-private functions | Pinned function surface |
 |---|---:|---:|
 | SafeCastLib | 95 | 95 |
 | LibBit | 24 | 24 |
@@ -952,6 +1128,15 @@ retain zero mismatches at both optimizer-run settings. Artifacts are in
 | LibSort | 57 | 57 |
 | LibString | 56 | 57 |
 | LibBytes (storage operations only) | 7 | 42 |
+| EfficientHashLib | 44 | 48 |
+| SSTORE2 | 11 | 11 |
+| LibCall | 8 | 8 |
+| SafeTransferLib | 25 | 25 |
+| LibClone | 122 | 122 |
+| MerkleProofLib | 4 | 7 |
+| ECDSA | 15 | 15 |
+| SignatureCheckerLib | 13 | 13 |
+| `tokens/ERC20` | 23 | 23 |
 
 These are function-declaration counts, not a claim of complete source or
 behavioral compatibility. The runner checks parameter names, types and locations,
@@ -961,19 +1146,27 @@ the missing functions across the archive in `api-coverage.json`.
 
 The port currently covers checked casts, bit operations, Base64, four typed
 array overloads for sorting, copying, reversing, duplicate checks, sorted
-search, the sorted set operations, in-place compaction and grouped sums, and
-the string functions (conversion, inspection, search, slicing, splitting,
-small strings, escaping, packing, packed string storage, and direct returns):
-236 of the five libraries' 237 non-private declarations, and the seven
+search, the sorted set operations, in-place compaction and grouped sums, the
+string functions (conversion, inspection, search, slicing, splitting,
+small strings, escaping, packing, packed string storage, and direct returns),
+hashing, data contracts, calls, token transfers and permits, every clone
+family, Merkle proofs, signature recovery and checks, and an ERC20 token:
+508 of the fifteen sources' 551 non-private declarations, counting the seven
 `BytesStorage` operations of `LibBytes` that `StringStorage` is built on. The
 in-place resizing of `uniquifySorted` and `groupSum` goes through the
 compiler-owned `Arrays.truncate` and `WordArrays` primitives, packed storage
 through `Slots`, and `directReturn` through `Return`; the AST audit lists
 these modules as the trusted primitive layer. `bytesStorage` is the one
-declaration still absent (see [Scope decision](#scope-decision-2026-09-24)).
-Tokens, authentication, proxies, cryptography, storage utilities, and other
-libraries remain outside this port. Missing constants and user-defined
-types are also outside the function audit.
+LibString declaration still absent (see [Scope decision](#scope-decision-2026-09-24));
+the EfficientHashLib and MerkleProofLib gaps are explained
+[with their ports](#calls-clones-signatures-and-proofs-2026-09-26).
+The matrix measures ten of these libraries call by call; SSTORE2, LibCall,
+SafeTransferLib and LibClone, which deploy contracts and move tokens and ETH,
+run in the composed workloads, and ERC20 in its own stateful runner. The
+table's counts apply the matrix's declaration audit to every ported source.
+Accounts, authentication, the other tokens, and the remaining utilities stay
+outside this port. Missing constants and user-defined types are also outside
+the function audit.
 
 ## Scope decision, 2026-09-24
 
@@ -1828,8 +2021,10 @@ uv run --with eth-abi==5.2.0 --with 'eth-hash[pycryptodome]==0.7.1' \
   python -m unittest discover -s benchmarks/checked -p 'test_*.py'
 ```
 
-The original pinned test suites for the three complete function surfaces
-can also be run without checking out or modifying an external repository:
+The original pinned test suites of the ported libraries can also be run
+without checking out or modifying an external repository. By default the
+runner replaces SafeCastLib, LibBit, Base64, ECDSA, SignatureCheckerLib and
+ERC20; `--library` selects others by their path below `src/`:
 
 ```sh
 uv run benchmarks/checked/upstream_tests.py \
@@ -1837,15 +2032,17 @@ uv run benchmarks/checked/upstream_tests.py \
   --output target/safe-solady/upstream-tests-new
 ```
 
-The checked implementations passed **60 tests**, including fuzz tests at
-256 runs, under both solc via-IR and Solar: 11 SafeCastLib tests,
-34 LibBit tests, 13 Base64 tests, and two shared helper tests. The original
-solc baseline passed 59 and failed `testToNibblesDifferential` with
-`Insufficient memory allocation!`, independently reproducing the memory
-allocation discrepancy above. The runner retains this baseline failure and
-exits nonzero; it does not suppress the test.
+With Solar at `c8339c0dd`, the checked implementations passed all
+**169 tests**, including fuzz tests at 256 runs, under both solc via-IR and
+Solar: 35 ERC20, 46 ECDSA, 28 SignatureCheckerLib, 34 LibBit, 13 Base64 and
+11 SafeCastLib tests, and two shared helper tests. The original solc baseline
+failed only `testToNibblesDifferential`, with `Insufficient memory
+allocation!`, independently reproducing the memory allocation discrepancy
+above. The runner retains this baseline failure and exits nonzero; it does
+not suppress the test.
 
-Only the three target library files are replaced in the checked legs.
+Only the selected library files are replaced in the checked legs, which also
+receive the compiler's core modules.
 Original test helpers, including their assembly and LibString's reference
 `replace` implementation, remain in the **test harness**. They are not
 dependencies of the checked library implementations and are not included in
