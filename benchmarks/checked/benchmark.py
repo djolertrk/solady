@@ -42,6 +42,7 @@ CHECKED_LIBRARIES = (
     "MerkleProofLib",
     "SafeCastLib",
     "ECDSA",
+    "SignatureCheckerLib",
 )
 CORE_PREFIX = "solar:core/v1/"
 # The compiler-owned modules the port may import. Under solar the compiler
@@ -379,8 +380,9 @@ def prepare(
             ]
             call = row["library"] + "." + row["name"] + "(" + ", ".join(args) + ")"
             # A wrapper keeps its API's mutability: the precompile hashes are
-            # `view`, since a staticcall is not provably pure.
-            mutability = "view" if row["mutability"] == "view" else "pure"
+            # `view`, since a staticcall is not provably pure, and a function
+            # that may call out with side effects is neither.
+            mutability = {"view": "view", "pure": "pure"}.get(row["mutability"], "")
             if row["storage"]:
                 # Every struct here occupies one slot, in declaration order.
                 struct = row["params"][row["storage"][0]][0].removeprefix("struct ")
@@ -592,6 +594,9 @@ def test_vectors(row, rng):
         return
     if row["library"] == "ECDSA":
         yield from ecdsa_vectors(name, types, rng, blobs)
+        return
+    if row["library"] == "SignatureCheckerLib":
+        yield from signature_checker_vectors(name, types, rng, blobs)
         return
     if row["library"] == "Base64":
         if name == "encode":
@@ -1400,6 +1405,179 @@ def ecdsa_vectors(name, types, rng, blobs):
     raise ValueError(f"no ECDSA vectors for {name}")
 
 
+ERC1271_MAGIC = bytes.fromhex("1626ba7e")
+ERC6492_SUFFIX = bytes.fromhex("6492" * 16)
+ERC6492_VERIFIER = "0x0000bc370E4DC924F427d84e2f4B9Ec81626ba7E"
+ERC6492_REVERTING_VERIFIER = "0x00007bd799e4A591FeA53f8A8a3E9f931626Ba7e"
+
+
+def keccak_gate(expected_calldata, accept, reject):
+    # Runtime code that hashes its calldata and ends with `accept` when the
+    # hash is the one of `expected_calldata`, and with `reject` otherwise.
+    head = bytes.fromhex("365f5f37365f20") + b"\x7f" + keccak(expected_calldata) + b"\x14"
+    target = len(head) + 3 + len(reject)
+    return "0x" + (head + bytes([0x60, target, 0x57]) + reject + b"\x5b" + accept).hex()
+
+
+def return_word(word, opcode=0xF3):
+    # mstore(0, word) then return|revert(0, 32)
+    return b"\x7f" + word + bytes([0x5F, 0x52, 0x60, 0x20, 0x5F, opcode])
+
+
+def fixed_answer(data, opcode=0xF3):
+    # codecopy the bytes after the code to 0 and return|revert them.
+    return "0x" + (
+        bytes([0x60, len(data), 0x60, 0x0A, 0x5F, 0x39, 0x60, len(data), 0x5F, opcode]) + data
+    ).hex()
+
+
+def erc1271_payload(h, signature):
+    return ERC1271_MAGIC + h + (0x40).to_bytes(32, "big") + len(signature).to_bytes(32, "big") + signature
+
+
+def signature_checker_vectors(name, types, rng, blobs):
+    def word(value):
+        return value.to_bytes(32, "big")
+
+    magic_word = ERC1271_MAGIC + bytes(28)
+    wallet = "0x" + "a1" * 20
+    no_code = "0x"
+    key = rng.randrange(1, SECP_N)
+    eoa = ec_address(ec_mul(key, SECP_G))
+    h = word(rng.getrandbits(256))
+    v, r, s = ec_sign(int.from_bytes(h, "big"), key, rng.randrange(1, SECP_N))
+    long_form = word(r) + word(s) + bytes([v])
+    short_form = word(r) + word(s | ((v - 27) << 255)) if not s >> 255 else None
+
+    def recovers(signature, signer):
+        if len(signature) == 65:
+            got = ec_recover(int.from_bytes(h, "big"), signature[64], int.from_bytes(signature[:32], "big"), int.from_bytes(signature[32:64], "big"))
+        elif len(signature) == 64:
+            vs = int.from_bytes(signature[32:], "big")
+            got = ec_recover(int.from_bytes(h, "big"), 27 + (vs >> 255), int.from_bytes(signature[:32], "big"), vs & ((1 << 255) - 1))
+        else:
+            return False
+        return got != "0x" + "00" * 20 and got == signer.lower()
+
+    def wallets(payload):
+        # (code, verdict) for wallets answering the ERC1271 call `payload`.
+        return [
+            (keccak_gate(payload, return_word(magic_word), return_word(bytes(32))), True),
+            (keccak_gate(payload + b"\x00", return_word(magic_word), return_word(bytes(32))), False),
+            (fixed_answer(magic_word), True),
+            (fixed_answer(magic_word + bytes(32)), True),
+            (fixed_answer(ERC1271_MAGIC), False),
+            (fixed_answer(magic_word, 0xFD), False),
+            (fixed_answer(bytes(31) + b"\x01"), False),
+        ]
+
+    signatures = [long_form, bytes(64), bytes(65), b"", bytes(range(100))]
+    if short_form:
+        signatures.append(short_form)
+    if name in ("isValidSignatureNow", "isValidSignatureNowCalldata", "isValidERC1271SignatureNow", "isValidERC1271SignatureNowCalldata") and types[2] == "bytes":
+        erc1271_only = name.startswith("isValidERC1271")
+        for signature in signatures:
+            for signer in [eoa, "0x" + "00" * 20, "0x" + "b2" * 20]:
+                expected = False if erc1271_only else (signer != "0x" + "00" * 20 and recovers(signature, signer))
+                yield [signer, h, signature], [expected], None, None, {signer: no_code}
+            for code, verdict in wallets(erc1271_payload(h, signature)):
+                yield [wallet, h, signature], [verdict], None, None, {wallet: code}
+        return
+    if name in ("isValidSignatureNow", "isValidERC1271SignatureNow") and types[2:] == ["bytes32", "bytes32"]:
+        erc1271_only = name.startswith("isValidERC1271")
+        forms = [(r, s | ((v - 27) << 255))] if short_form else []
+        forms += [(r, s), (0, 0), (r, s | (1 << 255))]
+        for rr, vs in forms:
+            vv, ss = 27 + (vs >> 255), vs & ((1 << 255) - 1)
+            for signer in [eoa, "0x" + "00" * 20]:
+                expected = False if erc1271_only else (signer != "0x" + "00" * 20 and recovers(word(rr) + word(vs), signer))
+                yield [signer, h, word(rr), word(vs)], [expected], None, None, {signer: no_code}
+            payload = ERC1271_MAGIC + h + (0x40).to_bytes(32, "big") + (65).to_bytes(32, "big") + word(rr) + word(ss) + bytes([vv])
+            for code, verdict in wallets(payload):
+                yield [wallet, h, word(rr), word(vs)], [verdict], None, None, {wallet: code}
+        return
+    if name in ("isValidSignatureNow", "isValidERC1271SignatureNow"):
+        erc1271_only = name.startswith("isValidERC1271")
+        for vv, rr, ss in [(v, r, s), (55 - v, r, s), (0, r, s), (v, 0, s), (255, r, SECP_N - 1)]:
+            for signer in [eoa, "0x" + "00" * 20]:
+                expected = False if erc1271_only else (
+                    signer != "0x" + "00" * 20 and recovers(word(rr) + word(ss) + bytes([vv]), signer)
+                )
+                yield [signer, h, vv, word(rr), word(ss)], [expected], None, None, {signer: no_code}
+            payload = ERC1271_MAGIC + h + (0x40).to_bytes(32, "big") + (65).to_bytes(32, "big") + word(rr) + word(ss) + bytes([vv])
+            for code, verdict in wallets(payload):
+                yield [wallet, h, vv, word(rr), word(ss)], [verdict], None, None, {wallet: code}
+        return
+    if name.startswith("isValidERC6492SignatureNow"):
+        reverting = name == "isValidERC6492SignatureNow"
+        verifier = ERC6492_REVERTING_VERIFIER if reverting else ERC6492_VERIFIER
+        other = ERC6492_VERIFIER if reverting else ERC6492_REVERTING_VERIFIER
+        opcode = 0xFD if reverting else 0xF3
+
+        def inner_of(signature):
+            # The `bytes` the third head word points at, when it lies inside.
+            n = len(signature)
+            if n < 96:
+                return None
+            offset = int.from_bytes(signature[64:96], "big")
+            if offset > n - 32:
+                return None
+            length = int.from_bytes(signature[offset : offset + 32], "big")
+            if length > n - 32 - offset:
+                return None
+            return signature[offset + 32 : offset + 32 + length]
+
+        wrapped = [
+            encode(["address", "bytes", "bytes"], ["0x" + "c3" * 20, bytes(range(37)), inner])
+            + ERC6492_SUFFIX
+            for inner in [long_form, bytes(range(70))]
+        ]
+        for signature in wrapped + [long_form, ERC6492_SUFFIX]:
+            is_6492 = len(signature) >= 32 and signature[-32:] == ERC6492_SUFFIX
+            inner = inner_of(signature) if is_6492 else None
+            signers = [(eoa, no_code, False)]
+            # A wallet only sees an inner signature the assembly reads in bounds.
+            if not is_6492 or inner is not None:
+                target = inner if is_6492 else signature
+                signers += [(wallet, code, verdict) for code, verdict in wallets(erc1271_payload(h, target))[:3]]
+            for signer, signer_code, signer_verdict in signers:
+                has_code = signer_code != no_code
+                payload = bytes(12) + bytes.fromhex(signer[2:]) + h + signature
+                verifiers = [
+                    (keccak_gate(payload, return_word(word(1), opcode), bytes([0x5F, 0x5F, opcode])), True),
+                    (keccak_gate(payload + b"\x01", return_word(word(1), opcode), bytes([0x5F, 0x5F, opcode])), False),
+                    (no_code, False),
+                ]
+                for verifier_code, verifier_ok in verifiers:
+                    if is_6492:
+                        expected = (has_code and signer_verdict) or verifier_ok
+                    else:
+                        expected = has_code and signer_verdict
+                    if not has_code and not expected:
+                        expected = recovers(signature, signer)
+                    yield (
+                        [signer, h, signature],
+                        [expected],
+                        None,
+                        None,
+                        {signer: signer_code, verifier: verifier_code, other: no_code},
+                    )
+        return
+    if name == "toEthSignedMessageHash" and types == ["bytes32"]:
+        for _ in range(4):
+            value = word(rng.getrandbits(256))
+            yield [value], [keccak(b"\x19Ethereum Signed Message:\n32" + value)]
+        return
+    if name == "toEthSignedMessageHash":
+        for m in list(blobs) + [bytes(n) for n in [9, 10, 99, 100, 999, 1000]]:
+            yield [m], [keccak(b"\x19Ethereum Signed Message:\n" + str(len(m)).encode() + m)]
+        return
+    if name == "emptySignature":
+        yield [], [b""]
+        return
+    raise ValueError(f"no SignatureCheckerLib vectors for {name}")
+
+
 def send_transaction(url, sender, to, data):
     tx = rpc(
         url,
@@ -1599,11 +1777,13 @@ def run(args):
             print(
                 f"{row['library']}.{row['signature']}: {len(vectors)} cases", flush=True
             )
-            for index, (values, expected, *storage) in enumerate(vectors):
+            for index, (values, expected, *extra) in enumerate(vectors):
                 types = [t for _, (t, _) in row["wrapper_params"]]
                 signature = row["wrapper"] + "(" + ",".join(types) + ")"
                 calldata = keccak(signature.encode())[:4] + encode(types, values)
-                setup, final = (storage + [None, None])[:2]
+                # Storage the call starts from and must leave, and the code the
+                # accounts it calls hold, "0x" for none.
+                setup, final, accounts = (extra + [None, None, None])[:3]
                 slots = storage_slots(row["storage_slot"]) if setup else []
                 expected_revert = isinstance(expected, bytes)
                 expected_bytes = (
@@ -1615,6 +1795,8 @@ def run(args):
                     # The words storage starts from, written by the node itself.
                     for slot, word in zip(slots, setup or []):
                         rpc(url, "anvil_setStorageAt", [harness_address, hex(slot), "0x" + word.hex()])
+                    for account, code in (accounts or {}).items():
+                        rpc(url, "anvil_setCode", [account, code])
                     tx = {
                         "from": sender,
                         "to": harness_address,

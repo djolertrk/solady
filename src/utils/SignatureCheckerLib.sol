@@ -1,30 +1,35 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.4;
+pragma solidity ^0.8.20;
 
-/// @notice Signature verification helper that supports both ECDSA signatures from EOAs
-/// and ERC1271 signatures from smart contract wallets like Argent and Gnosis safe.
-/// @author Solady (https://github.com/vectorized/solady/blob/main/src/utils/SignatureCheckerLib.sol)
-/// @author Modified from OpenZeppelin (https://github.com/OpenZeppelin/openzeppelin-contracts/blob/master/contracts/utils/cryptography/SignatureChecker.sol)
+import {Bytes} from "solar:core/v1/Bytes.sol";
+import {Calls} from "solar:core/v1/Calls.sol";
+import {ECDSA} from "./ECDSA.sol";
+
+/// @notice Checked Solidity implementation of the pinned Solady SignatureCheckerLib API.
+/// @dev A signer without code is checked with the `ecrecover` builtin, for
+/// 65-byte and EIP-2098 64-byte signatures alike; a signer with code with
+/// ERC1271. The ERC1271 call sends the calldata the assembly builds, unpadded,
+/// through `Calls.staticCallBounded`, which copies at most the one word of the
+/// answer that is checked against the magic value.
 ///
-/// @dev Note:
-/// - The signature checking functions use the ecrecover precompile (0x1).
-/// - The `bytes memory signature` variants use the identity precompile (0x4)
-///   to copy memory internally.
-/// - Unlike ECDSA signatures, contract signatures are revocable.
-/// - As of Solady version 0.0.134, all `bytes signature` variants accept both
-///   regular 65-byte `(r, s, v)` and EIP-2098 `(r, vs)` short form signatures.
-///   See: https://eips.ethereum.org/EIPS/eip-2098
-///   This is for calldata efficiency on smart accounts prevalent on L2s.
-///
-/// WARNING! Do NOT use signatures as unique identifiers:
-/// - Use a nonce in the digest to prevent replay attacks on the same contract.
-/// - Use EIP-712 for the digest to prevent replay attacks across different chains and contracts.
-///   EIP-712 also enables readable signing of typed data for better user safety.
-/// This implementation does NOT check if a signature is non-malleable.
+/// An ERC6492 signature ends with the 32-byte magic suffix. Its inner signature
+/// is the third field of the wrapped encoding; one whose range lies past the
+/// signature counts as rejected by ERC1271, where the assembly reads whatever
+/// memory follows. The verifiers are called through `Calls.callBounded`, which
+/// copies nothing of their answer.
 library SignatureCheckerLib {
-    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
-    /*               SIGNATURE CHECKING OPERATIONS                */
-    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+    /// @dev `bytes4(keccak256("isValidSignature(bytes32,bytes)"))`.
+    bytes4 private constant _ERC1271_MAGIC = 0x1626ba7e;
+
+    /// @dev The suffix of an ERC6492 signature.
+    bytes32 private constant _ERC6492_DETECTION_SUFFIX =
+        0x6492649264926492649264926492649264926492649264926492649264926492;
+
+    /// @dev The non-reverting ERC6492 verifier.
+    address private constant _VERIFIER = 0x0000bc370E4DC924F427d84e2f4B9Ec81626ba7E;
+
+    /// @dev The reverting ERC6492 verifier.
+    address private constant _REVERTING_VERIFIER = 0x00007bd799e4A591FeA53f8A8a3E9f931626Ba7e;
 
     /// @dev Returns whether `signature` is valid for `signer` and `hash`.
     /// If `signer.code.length == 0`, then validate with `ecrecover`, else
@@ -35,43 +40,8 @@ library SignatureCheckerLib {
         returns (bool isValid)
     {
         if (signer == address(0)) return isValid;
-        /// @solidity memory-safe-assembly
-        assembly {
-            let m := mload(0x40)
-            for {} 1 {} {
-                if iszero(extcodesize(signer)) {
-                    switch mload(signature)
-                    case 64 {
-                        let vs := mload(add(signature, 0x40))
-                        mstore(0x20, add(shr(255, vs), 27)) // `v`.
-                        mstore(0x60, shr(1, shl(1, vs))) // `s`.
-                    }
-                    case 65 {
-                        mstore(0x20, byte(0, mload(add(signature, 0x60)))) // `v`.
-                        mstore(0x60, mload(add(signature, 0x40))) // `s`.
-                    }
-                    default { break }
-                    mstore(0x00, hash)
-                    mstore(0x40, mload(add(signature, 0x20))) // `r`.
-                    let recovered := mload(staticcall(gas(), 1, 0x00, 0x80, 0x01, 0x20))
-                    isValid := gt(returndatasize(), shl(96, xor(signer, recovered)))
-                    mstore(0x60, 0) // Restore the zero slot.
-                    mstore(0x40, m) // Restore the free memory pointer.
-                    break
-                }
-                let f := shl(224, 0x1626ba7e)
-                mstore(m, f) // `bytes4(keccak256("isValidSignature(bytes32,bytes)"))`.
-                mstore(add(m, 0x04), hash)
-                let d := add(m, 0x24)
-                mstore(d, 0x40) // The offset of the `signature` in the calldata.
-                // Copy the `signature` over.
-                let n := add(0x20, mload(signature))
-                let copied := staticcall(gas(), 4, signature, n, add(m, 0x44), n)
-                isValid := staticcall(gas(), signer, m, add(returndatasize(), 0x44), d, 0x20)
-                isValid := and(eq(mload(d), f), and(isValid, copied))
-                break
-            }
-        }
+        if (signer.code.length == 0) return _recovers(signer, hash, signature);
+        return isValidERC1271SignatureNow(signer, hash, signature);
     }
 
     /// @dev Returns whether `signature` is valid for `signer` and `hash`.
@@ -83,43 +53,11 @@ library SignatureCheckerLib {
         returns (bool isValid)
     {
         if (signer == address(0)) return isValid;
-        /// @solidity memory-safe-assembly
-        assembly {
-            let m := mload(0x40)
-            for {} 1 {} {
-                if iszero(extcodesize(signer)) {
-                    switch signature.length
-                    case 64 {
-                        let vs := calldataload(add(signature.offset, 0x20))
-                        mstore(0x20, add(shr(255, vs), 27)) // `v`.
-                        mstore(0x40, calldataload(signature.offset)) // `r`.
-                        mstore(0x60, shr(1, shl(1, vs))) // `s`.
-                    }
-                    case 65 {
-                        mstore(0x20, byte(0, calldataload(add(signature.offset, 0x40)))) // `v`.
-                        calldatacopy(0x40, signature.offset, 0x40) // `r`, `s`.
-                    }
-                    default { break }
-                    mstore(0x00, hash)
-                    let recovered := mload(staticcall(gas(), 1, 0x00, 0x80, 0x01, 0x20))
-                    isValid := gt(returndatasize(), shl(96, xor(signer, recovered)))
-                    mstore(0x60, 0) // Restore the zero slot.
-                    mstore(0x40, m) // Restore the free memory pointer.
-                    break
-                }
-                let f := shl(224, 0x1626ba7e)
-                mstore(m, f) // `bytes4(keccak256("isValidSignature(bytes32,bytes)"))`.
-                mstore(add(m, 0x04), hash)
-                let d := add(m, 0x24)
-                mstore(d, 0x40) // The offset of the `signature` in the calldata.
-                mstore(add(m, 0x44), signature.length)
-                // Copy the `signature` over.
-                calldatacopy(add(m, 0x64), signature.offset, signature.length)
-                isValid := staticcall(gas(), signer, m, add(signature.length, 0x64), d, 0x20)
-                isValid := and(eq(mload(d), f), isValid)
-                break
-            }
+        if (signer.code.length == 0) {
+            address recovered = ECDSA.tryRecoverCalldata(hash, signature);
+            return recovered != address(0) && recovered == signer;
         }
+        return isValidERC1271SignatureNowCalldata(signer, hash, signature);
     }
 
     /// @dev Returns whether the signature (`r`, `vs`) is valid for `signer` and `hash`.
@@ -131,35 +69,11 @@ library SignatureCheckerLib {
         returns (bool isValid)
     {
         if (signer == address(0)) return isValid;
-        /// @solidity memory-safe-assembly
-        assembly {
-            let m := mload(0x40)
-            for {} 1 {} {
-                if iszero(extcodesize(signer)) {
-                    mstore(0x00, hash)
-                    mstore(0x20, add(shr(255, vs), 27)) // `v`.
-                    mstore(0x40, r) // `r`.
-                    mstore(0x60, shr(1, shl(1, vs))) // `s`.
-                    let recovered := mload(staticcall(gas(), 1, 0x00, 0x80, 0x01, 0x20))
-                    isValid := gt(returndatasize(), shl(96, xor(signer, recovered)))
-                    mstore(0x60, 0) // Restore the zero slot.
-                    mstore(0x40, m) // Restore the free memory pointer.
-                    break
-                }
-                let f := shl(224, 0x1626ba7e)
-                mstore(m, f) // `bytes4(keccak256("isValidSignature(bytes32,bytes)"))`.
-                mstore(add(m, 0x04), hash)
-                let d := add(m, 0x24)
-                mstore(d, 0x40) // The offset of the `signature` in the calldata.
-                mstore(add(m, 0x44), 65) // Length of the signature.
-                mstore(add(m, 0x64), r) // `r`.
-                mstore(add(m, 0x84), shr(1, shl(1, vs))) // `s`.
-                mstore8(add(m, 0xa4), add(shr(255, vs), 27)) // `v`.
-                isValid := staticcall(gas(), signer, m, 0xa5, d, 0x20)
-                isValid := and(eq(mload(d), f), isValid)
-                break
-            }
+        if (signer.code.length == 0) {
+            address recovered = ECDSA.tryRecover(hash, r, vs);
+            return recovered != address(0) && recovered == signer;
         }
+        return isValidERC1271SignatureNow(signer, hash, r, vs);
     }
 
     /// @dev Returns whether the signature (`v`, `r`, `s`) is valid for `signer` and `hash`.
@@ -171,40 +85,12 @@ library SignatureCheckerLib {
         returns (bool isValid)
     {
         if (signer == address(0)) return isValid;
-        /// @solidity memory-safe-assembly
-        assembly {
-            let m := mload(0x40)
-            for {} 1 {} {
-                if iszero(extcodesize(signer)) {
-                    mstore(0x00, hash)
-                    mstore(0x20, and(v, 0xff)) // `v`.
-                    mstore(0x40, r) // `r`.
-                    mstore(0x60, s) // `s`.
-                    let recovered := mload(staticcall(gas(), 1, 0x00, 0x80, 0x01, 0x20))
-                    isValid := gt(returndatasize(), shl(96, xor(signer, recovered)))
-                    mstore(0x60, 0) // Restore the zero slot.
-                    mstore(0x40, m) // Restore the free memory pointer.
-                    break
-                }
-                let f := shl(224, 0x1626ba7e)
-                mstore(m, f) // `bytes4(keccak256("isValidSignature(bytes32,bytes)"))`.
-                mstore(add(m, 0x04), hash)
-                let d := add(m, 0x24)
-                mstore(d, 0x40) // The offset of the `signature` in the calldata.
-                mstore(add(m, 0x44), 65) // Length of the signature.
-                mstore(add(m, 0x64), r) // `r`.
-                mstore(add(m, 0x84), s) // `s`.
-                mstore8(add(m, 0xa4), v) // `v`.
-                isValid := staticcall(gas(), signer, m, 0xa5, d, 0x20)
-                isValid := and(eq(mload(d), f), isValid)
-                break
-            }
+        if (signer.code.length == 0) {
+            address recovered = ecrecover(hash, v, r, s);
+            return recovered != address(0) && recovered == signer;
         }
+        return isValidERC1271SignatureNow(signer, hash, v, r, s);
     }
-
-    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
-    /*                     ERC1271 OPERATIONS                     */
-    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     // Note: These ERC1271 operations do NOT have an ECDSA fallback.
 
@@ -214,20 +100,10 @@ library SignatureCheckerLib {
         view
         returns (bool isValid)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let m := mload(0x40)
-            let f := shl(224, 0x1626ba7e)
-            mstore(m, f) // `bytes4(keccak256("isValidSignature(bytes32,bytes)"))`.
-            mstore(add(m, 0x04), hash)
-            let d := add(m, 0x24)
-            mstore(d, 0x40) // The offset of the `signature` in the calldata.
-            // Copy the `signature` over.
-            let n := add(0x20, mload(signature))
-            let copied := staticcall(gas(), 4, signature, n, add(m, 0x44), n)
-            isValid := staticcall(gas(), signer, m, add(returndatasize(), 0x44), d, 0x20)
-            isValid := and(eq(mload(d), f), and(isValid, copied))
-        }
+        return _erc1271(
+            signer,
+            abi.encodePacked(_ERC1271_MAGIC, hash, uint256(0x40), signature.length, signature)
+        );
     }
 
     /// @dev Returns whether `signature` is valid for `hash` for an ERC1271 `signer` contract.
@@ -236,20 +112,10 @@ library SignatureCheckerLib {
         bytes32 hash,
         bytes calldata signature
     ) internal view returns (bool isValid) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let m := mload(0x40)
-            let f := shl(224, 0x1626ba7e)
-            mstore(m, f) // `bytes4(keccak256("isValidSignature(bytes32,bytes)"))`.
-            mstore(add(m, 0x04), hash)
-            let d := add(m, 0x24)
-            mstore(d, 0x40) // The offset of the `signature` in the calldata.
-            mstore(add(m, 0x44), signature.length)
-            // Copy the `signature` over.
-            calldatacopy(add(m, 0x64), signature.offset, signature.length)
-            isValid := staticcall(gas(), signer, m, add(signature.length, 0x64), d, 0x20)
-            isValid := and(eq(mload(d), f), isValid)
-        }
+        return _erc1271(
+            signer,
+            abi.encodePacked(_ERC1271_MAGIC, hash, uint256(0x40), signature.length, signature)
+        );
     }
 
     /// @dev Returns whether the signature (`r`, `vs`) is valid for `hash`
@@ -259,21 +125,18 @@ library SignatureCheckerLib {
         view
         returns (bool isValid)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let m := mload(0x40)
-            let f := shl(224, 0x1626ba7e)
-            mstore(m, f) // `bytes4(keccak256("isValidSignature(bytes32,bytes)"))`.
-            mstore(add(m, 0x04), hash)
-            let d := add(m, 0x24)
-            mstore(d, 0x40) // The offset of the `signature` in the calldata.
-            mstore(add(m, 0x44), 65) // Length of the signature.
-            mstore(add(m, 0x64), r) // `r`.
-            mstore(add(m, 0x84), shr(1, shl(1, vs))) // `s`.
-            mstore8(add(m, 0xa4), add(shr(255, vs), 27)) // `v`.
-            isValid := staticcall(gas(), signer, m, 0xa5, d, 0x20)
-            isValid := and(eq(mload(d), f), isValid)
-        }
+        return _erc1271(
+            signer,
+            abi.encodePacked(
+                _ERC1271_MAGIC,
+                hash,
+                uint256(0x40),
+                uint256(65),
+                r,
+                (uint256(vs) << 1) >> 1,
+                uint8(27 + (uint256(vs) >> 255))
+            )
+        );
     }
 
     /// @dev Returns whether the signature (`v`, `r`, `s`) is valid for `hash`
@@ -283,26 +146,10 @@ library SignatureCheckerLib {
         view
         returns (bool isValid)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let m := mload(0x40)
-            let f := shl(224, 0x1626ba7e)
-            mstore(m, f) // `bytes4(keccak256("isValidSignature(bytes32,bytes)"))`.
-            mstore(add(m, 0x04), hash)
-            let d := add(m, 0x24)
-            mstore(d, 0x40) // The offset of the `signature` in the calldata.
-            mstore(add(m, 0x44), 65) // Length of the signature.
-            mstore(add(m, 0x64), r) // `r`.
-            mstore(add(m, 0x84), s) // `s`.
-            mstore8(add(m, 0xa4), v) // `v`.
-            isValid := staticcall(gas(), signer, m, 0xa5, d, 0x20)
-            isValid := and(eq(mload(d), f), isValid)
-        }
+        return _erc1271(
+            signer, abi.encodePacked(_ERC1271_MAGIC, hash, uint256(0x40), uint256(65), r, s, v)
+        );
     }
-
-    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
-    /*                     ERC6492 OPERATIONS                     */
-    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     // Note: These ERC6492 operations now include an ECDSA fallback at the very end.
     // The calldata variants are excluded for brevity.
@@ -321,72 +168,17 @@ library SignatureCheckerLib {
         bytes32 hash,
         bytes memory signature
     ) internal returns (bool isValid) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            function callIsValidSignature(signer_, hash_, signature_) -> _isValid {
-                let m_ := mload(0x40)
-                let f_ := shl(224, 0x1626ba7e)
-                mstore(m_, f_) // `bytes4(keccak256("isValidSignature(bytes32,bytes)"))`.
-                mstore(add(m_, 0x04), hash_)
-                let d_ := add(m_, 0x24)
-                mstore(d_, 0x40) // The offset of the `signature` in the calldata.
-                let n_ := add(0x20, mload(signature_))
-                let copied_ := staticcall(gas(), 4, signature_, n_, add(m_, 0x44), n_)
-                _isValid := staticcall(gas(), signer_, m_, add(returndatasize(), 0x44), d_, 0x20)
-                _isValid := and(eq(mload(d_), f_), and(_isValid, copied_))
-            }
-            let noCode := iszero(extcodesize(signer))
-            let n := mload(signature)
-            for {} 1 {} {
-                if iszero(eq(mload(add(signature, n)), mul(0x6492, div(not(isValid), 0xffff)))) {
-                    if iszero(noCode) { isValid := callIsValidSignature(signer, hash, signature) }
-                    break
-                }
-                if iszero(noCode) {
-                    let o := add(signature, 0x20) // Signature bytes.
-                    isValid := callIsValidSignature(signer, hash, add(o, mload(add(o, 0x40))))
-                    if isValid { break }
-                }
-                let m := mload(0x40)
-                mstore(m, signer)
-                mstore(add(m, 0x20), hash)
-                pop(
-                    call(
-                        gas(), // Remaining gas.
-                        0x0000bc370E4DC924F427d84e2f4B9Ec81626ba7E, // Non-reverting verifier.
-                        0, // Send zero ETH.
-                        m, // Start of memory.
-                        add(returndatasize(), 0x40), // Length of calldata in memory.
-                        staticcall(gas(), 4, add(signature, 0x20), n, add(m, 0x40), n), // 1.
-                        0x00 // Length of returndata to write.
-                    )
-                )
-                isValid := returndatasize()
-                break
-            }
-            // Do `ecrecover` fallback if `noCode && !isValid`.
-            for {} gt(noCode, isValid) {} {
-                switch n
-                case 64 {
-                    let vs := mload(add(signature, 0x40))
-                    mstore(0x20, add(shr(255, vs), 27)) // `v`.
-                    mstore(0x60, shr(1, shl(1, vs))) // `s`.
-                }
-                case 65 {
-                    mstore(0x20, byte(0, mload(add(signature, 0x60)))) // `v`.
-                    mstore(0x60, mload(add(signature, 0x40))) // `s`.
-                }
-                default { break }
-                let m := mload(0x40)
-                mstore(0x00, hash)
-                mstore(0x40, mload(add(signature, 0x20))) // `r`.
-                let recovered := mload(staticcall(gas(), 1, 0x00, 0x80, 0x01, 0x20))
-                isValid := gt(returndatasize(), shl(96, xor(signer, recovered)))
-                mstore(0x60, 0) // Restore the zero slot.
-                mstore(0x40, m) // Restore the free memory pointer.
-                break
-            }
+        bool noCode = signer.code.length == 0;
+        if (_isERC6492(signature)) {
+            if (!noCode && _innerERC1271(signer, hash, signature)) return true;
+            (,, uint256 answered) = Calls.callBounded(
+                _VERIFIER, 0, gasleft(), abi.encodePacked(uint256(uint160(signer)), hash, signature), 0
+            );
+            isValid = answered != 0;
+        } else if (!noCode) {
+            isValid = isValidERC1271SignatureNow(signer, hash, signature);
         }
+        if (noCode && !isValid) isValid = _recovers(signer, hash, signature);
     }
 
     /// @dev Returns whether `signature` is valid for `hash`.
@@ -401,88 +193,30 @@ library SignatureCheckerLib {
         internal
         returns (bool isValid)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            function callIsValidSignature(signer_, hash_, signature_) -> _isValid {
-                let m_ := mload(0x40)
-                let f_ := shl(224, 0x1626ba7e)
-                mstore(m_, f_) // `bytes4(keccak256("isValidSignature(bytes32,bytes)"))`.
-                mstore(add(m_, 0x04), hash_)
-                let d_ := add(m_, 0x24)
-                mstore(d_, 0x40) // The offset of the `signature` in the calldata.
-                let n_ := add(0x20, mload(signature_))
-                let copied_ := staticcall(gas(), 4, signature_, n_, add(m_, 0x44), n_)
-                _isValid := staticcall(gas(), signer_, m_, add(returndatasize(), 0x44), d_, 0x20)
-                _isValid := and(eq(mload(d_), f_), and(_isValid, copied_))
-            }
-            let noCode := iszero(extcodesize(signer))
-            let n := mload(signature)
-            for {} 1 {} {
-                if iszero(eq(mload(add(signature, n)), mul(0x6492, div(not(isValid), 0xffff)))) {
-                    if iszero(noCode) { isValid := callIsValidSignature(signer, hash, signature) }
-                    break
-                }
-                if iszero(noCode) {
-                    let o := add(signature, 0x20) // Signature bytes.
-                    isValid := callIsValidSignature(signer, hash, add(o, mload(add(o, 0x40))))
-                    if isValid { break }
-                }
-                let m := mload(0x40)
-                mstore(m, signer)
-                mstore(add(m, 0x20), hash)
-                let willBeZeroIfRevertingVerifierExists :=
-                    call(
-                        gas(), // Remaining gas.
-                        0x00007bd799e4A591FeA53f8A8a3E9f931626Ba7e, // Reverting verifier.
-                        0, // Send zero ETH.
-                        m, // Start of memory.
-                        add(returndatasize(), 0x40), // Length of calldata in memory.
-                        staticcall(gas(), 4, add(signature, 0x20), n, add(m, 0x40), n), // 1.
-                        0x00 // Length of returndata to write.
-                    )
-                isValid := gt(returndatasize(), willBeZeroIfRevertingVerifierExists)
-                break
-            }
-            // Do `ecrecover` fallback if `noCode && !isValid`.
-            for {} gt(noCode, isValid) {} {
-                switch n
-                case 64 {
-                    let vs := mload(add(signature, 0x40))
-                    mstore(0x20, add(shr(255, vs), 27)) // `v`.
-                    mstore(0x60, shr(1, shl(1, vs))) // `s`.
-                }
-                case 65 {
-                    mstore(0x20, byte(0, mload(add(signature, 0x60)))) // `v`.
-                    mstore(0x60, mload(add(signature, 0x40))) // `s`.
-                }
-                default { break }
-                let m := mload(0x40)
-                mstore(0x00, hash)
-                mstore(0x40, mload(add(signature, 0x20))) // `r`.
-                let recovered := mload(staticcall(gas(), 1, 0x00, 0x80, 0x01, 0x20))
-                isValid := gt(returndatasize(), shl(96, xor(signer, recovered)))
-                mstore(0x60, 0) // Restore the zero slot.
-                mstore(0x40, m) // Restore the free memory pointer.
-                break
-            }
+        bool noCode = signer.code.length == 0;
+        if (_isERC6492(signature)) {
+            if (!noCode && _innerERC1271(signer, hash, signature)) return true;
+            // The reverting verifier always reverts, with the result as its answer.
+            (bool succeeded,, uint256 answered) = Calls.callBounded(
+                _REVERTING_VERIFIER,
+                0,
+                gasleft(),
+                abi.encodePacked(uint256(uint160(signer)), hash, signature),
+                0
+            );
+            isValid = answered > (succeeded ? 1 : 0);
+        } else if (!noCode) {
+            isValid = isValidERC1271SignatureNow(signer, hash, signature);
         }
+        if (noCode && !isValid) isValid = _recovers(signer, hash, signature);
     }
-
-    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
-    /*                     HASHING OPERATIONS                     */
-    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     /// @dev Returns an Ethereum Signed Message, created from a `hash`.
     /// This produces a hash corresponding to the one signed with the
     /// [`eth_sign`](https://eth.wiki/json-rpc/API#eth_sign)
     /// JSON-RPC method as part of EIP-191.
     function toEthSignedMessageHash(bytes32 hash) internal pure returns (bytes32 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x20, hash) // Store into scratch space for keccak256.
-            mstore(0x00, "\x00\x00\x00\x00\x19Ethereum Signed Message:\n32") // 28 bytes.
-            result := keccak256(0x04, 0x3c) // `32 * 2 - (32 - 28) = 60 = 0x3c`.
-        }
+        return ECDSA.toEthSignedMessageHash(hash);
     }
 
     /// @dev Returns an Ethereum Signed Message, created from `s`.
@@ -491,37 +225,53 @@ library SignatureCheckerLib {
     /// JSON-RPC method as part of EIP-191.
     /// Note: Supports lengths of `s` up to 999999 bytes.
     function toEthSignedMessageHash(bytes memory s) internal pure returns (bytes32 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let sLength := mload(s)
-            let o := 0x20
-            mstore(o, "\x19Ethereum Signed Message:\n") // 26 bytes, zero-right-padded.
-            mstore(0x00, 0x00)
-            // Convert the `s.length` to ASCII decimal representation: `base10(s.length)`.
-            for { let temp := sLength } 1 {} {
-                o := sub(o, 1)
-                mstore8(o, add(48, mod(temp, 10)))
-                temp := div(temp, 10)
-                if iszero(temp) { break }
-            }
-            let n := sub(0x3a, o) // Header length: `26 + 32 - o`.
-            // Throw an out-of-offset error (consumes all gas) if the header exceeds 32 bytes.
-            returndatacopy(returndatasize(), returndatasize(), gt(n, 0x20))
-            mstore(s, or(mload(0x00), mload(n))) // Temporarily store the header.
-            result := keccak256(add(s, sub(0x20, n)), add(n, sLength))
-            mstore(s, sLength) // Restore the length.
-        }
+        return ECDSA.toEthSignedMessageHash(s);
     }
-
-    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
-    /*                   EMPTY CALLDATA HELPERS                   */
-    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     /// @dev Returns an empty calldata bytes.
     function emptySignature() internal pure returns (bytes calldata signature) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            signature.length := 0
-        }
+        return msg.data[0:0];
+    }
+
+    /// @dev Whether `signature` recovers to `signer`, which a failed recovery never does.
+    function _recovers(address signer, bytes32 hash, bytes memory signature)
+        private
+        view
+        returns (bool)
+    {
+        address recovered = ECDSA.tryRecover(hash, signature);
+        return recovered != address(0) && recovered == signer;
+    }
+
+    /// @dev Whether `signer` answers the ERC1271 call `payload` with at least a
+    /// word, the first of which is the magic value.
+    function _erc1271(address signer, bytes memory payload) private view returns (bool) {
+        (bool success, bytes memory answer,) = Calls.staticCallBounded(signer, gasleft(), payload, 32);
+        return success && answer.length == 32
+            && Bytes.readBytes32(answer, 0) == bytes32(_ERC1271_MAGIC);
+    }
+
+    /// @dev Whether `signature` ends with the ERC6492 magic suffix.
+    function _isERC6492(bytes memory signature) private pure returns (bool) {
+        uint256 n = signature.length;
+        return n >= 32 && Bytes.readBytes32(signature, n - 32) == _ERC6492_DETECTION_SUFFIX;
+    }
+
+    /// @dev Whether `signer` accepts, with ERC1271, the inner signature of the
+    /// ERC6492 `signature`: the `bytes` at the offset its third word gives.
+    function _innerERC1271(address signer, bytes32 hash, bytes memory signature)
+        private
+        view
+        returns (bool)
+    {
+        uint256 n = signature.length;
+        if (n < 96) return false;
+        uint256 offset = uint256(Bytes.readBytes32(signature, 64));
+        if (offset > n - 32) return false;
+        uint256 length = uint256(Bytes.readBytes32(signature, offset));
+        if (length > n - 32 - offset) return false;
+        /// @custom:solar-view
+        bytes memory inner = Bytes.slice(signature, offset + 32, length);
+        return _erc1271(signer, abi.encodePacked(_ERC1271_MAGIC, hash, uint256(0x40), length, inner));
     }
 }
