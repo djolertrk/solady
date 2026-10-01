@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {Arrays} from "solar:core/v1/Arrays.sol";
-import {Build} from "solar:core/v1/Build.sol";
-import {Bytes} from "solar:core/v1/Bytes.sol";
-import {Hash} from "solar:core/v1/Hash.sol";
-import {Hex} from "solar:core/v1/codecs/Hex.sol";
-import {Math} from "solar:core/v1/Math.sol";
-import {Return} from "solar:core/v1/Return.sol";
-import {Strings} from "solar:core/v1/Strings.sol";
+import {Arrays} from "solar:core/Arrays.sol";
+import {Build} from "solar:core/Build.sol";
+import {Bytes} from "solar:core/Bytes.sol";
+import {Hash} from "solar:core/Hash.sol";
+import {Hex} from "solar:core/codecs/Hex.sol";
+import {Math} from "solar:core/Math.sol";
+import {Return} from "solar:core/Return.sol";
+import {Strings} from "solar:core/Strings.sol";
 import {LibBytes} from "./LibBytes.sol";
 
 /// @notice Checked Solidity replacements for the LibString APIs.

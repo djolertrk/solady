@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {Arrays} from "solar:core/v1/Arrays.sol";
-import {Bits} from "solar:core/v1/Bits.sol";
-import {Build} from "solar:core/v1/Build.sol";
-import {Bytes} from "solar:core/v1/Bytes.sol";
+import {Arrays} from "solar:core/Arrays.sol";
+import {Bits} from "solar:core/Bits.sol";
+import {Build} from "solar:core/Build.sol";
+import {Bytes} from "solar:core/Bytes.sol";
 
 /// @notice Checked Solidity implementation of the pinned Solady LibBit API.
 /// @dev Raw boolean operations require clean boolean inputs, as upstream does.

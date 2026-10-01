@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {Arrays} from "solar:core/v1/Arrays.sol";
-import {Build} from "solar:core/v1/Build.sol";
-import {Bytes} from "solar:core/v1/Bytes.sol";
-import {CalldataBytes} from "solar:core/v1/CalldataBytes.sol";
-import {Slots} from "solar:core/v1/Slots.sol";
+import {Arrays} from "solar:core/Arrays.sol";
+import {Build} from "solar:core/Build.sol";
+import {Bytes} from "solar:core/Bytes.sol";
+import {CalldataBytes} from "solar:core/CalldataBytes.sol";
+import {Slots} from "solar:core/Slots.sol";
 
 /// @notice Checked Solidity replacements for the byte storage operations of
 /// LibBytes.

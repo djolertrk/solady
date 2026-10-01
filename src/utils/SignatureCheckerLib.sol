@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {Bytes} from "solar:core/v1/Bytes.sol";
-import {Calls} from "solar:core/v1/Calls.sol";
+import {Bytes} from "solar:core/Bytes.sol";
+import {Calls} from "solar:core/Calls.sol";
 import {ECDSA} from "./ECDSA.sol";
 
 /// @notice Checked Solidity implementation of the pinned Solady SignatureCheckerLib API.

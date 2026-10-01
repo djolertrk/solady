@@ -18,8 +18,8 @@ class CoreSourcesTests(unittest.TestCase):
             self.assertEqual(
                 benchmark.core_sources(root),
                 {
-                    "solar:core/v1/Bytes.sol": {"content": "library Bytes {}"},
-                    "solar:core/v1/codecs/Base64.sol": {"content": "library Base64 {}"},
+                    "solar:core/Bytes.sol": {"content": "library Bytes {}"},
+                    "solar:core/codecs/Base64.sol": {"content": "library Base64 {}"},
                 },
             )
 

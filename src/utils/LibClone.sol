@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {Bytes} from "solar:core/v1/Bytes.sol";
-import {Calls} from "solar:core/v1/Calls.sol";
-import {Code} from "solar:core/v1/Code.sol";
-import {Create} from "solar:core/v1/Create.sol";
-import {Hash} from "solar:core/v1/Hash.sol";
-import {Revert} from "solar:core/v1/Revert.sol";
+import {Bytes} from "solar:core/Bytes.sol";
+import {Calls} from "solar:core/Calls.sol";
+import {Code} from "solar:core/Code.sol";
+import {Create} from "solar:core/Create.sol";
+import {Hash} from "solar:core/Hash.sol";
+import {Revert} from "solar:core/Revert.sol";
 
 /// @notice Checked Solidity implementation of the pinned Solady LibClone API:
 /// minimal proxies (plain, PUSH0 and with immutable arguments), minimal ERC1967

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {Arrays} from "solar:core/v1/Arrays.sol";
-import {WordArrays} from "solar:core/v1/WordArrays.sol";
+import {Arrays} from "solar:core/Arrays.sol";
+import {WordArrays} from "solar:core/WordArrays.sol";
 
 /// @notice Checked Solidity sorting without type punning or sentinel reads.
 /// @dev Shrinking an array in place has no Solidity spelling, so the APIs

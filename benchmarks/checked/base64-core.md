@@ -52,7 +52,7 @@ retained in `v5` through `v11`. The previous measurements below are historical.
 
 
 The checked Solady wrapper now calls the compiler-owned
-`solar:core/v1/codecs/Base64.sol` API. Solar lowers these calls to a codec;
+`solar:core/codecs/Base64.sol` API. Solar lowers these calls to a codec;
 solc and Solar's `-Zno-core-intrinsics` execute the checked reference body.
 No assembly or `unchecked` block was added to the port or codec body.
 The compiler implementation is part of the trusted core layer.

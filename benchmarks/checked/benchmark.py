@@ -44,11 +44,11 @@ CHECKED_LIBRARIES = (
     "ECDSA",
     "SignatureCheckerLib",
 )
-CORE_PREFIX = "solar:core/v1/"
+CORE_PREFIX = "solar:core/"
 # The compiler-owned modules the port may import. Under solar the compiler
 # supplies them itself and sets a supplied copy aside; the copy is what lets
 # the solc legs resolve the same import.
-DEFAULT_CORE_MODULES = REPO.parent / "solar/crates/sema/src/core/v1"
+DEFAULT_CORE_MODULES = REPO.parent / "solar/crates/std/solidity"
 MAX = (1 << 256) - 1
 # EIP-170's limit on deployed runtime code, in bytes.
 CODE_SIZE_LIMIT = 0x6000
@@ -2088,7 +2088,7 @@ if __name__ == "__main__":
         "--core-modules",
         type=Path,
         default=DEFAULT_CORE_MODULES,
-        help="directory holding the compiler-owned solar:core/v1 module sources",
+        help="directory holding the compiler-owned solar:core module sources",
     )
     parser.add_argument(
         "--upstream-override",

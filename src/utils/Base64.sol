@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {Base64 as CoreBase64} from "solar:core/v1/codecs/Base64.sol";
+import {Base64 as CoreBase64} from "solar:core/codecs/Base64.sol";
 
 /// @notice Checked Solidity implementation of the pinned Solady Base64 API.
 /// @dev Decode accepts the documented standard, URL and IMAP alphabets and

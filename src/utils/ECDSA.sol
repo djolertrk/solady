@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {Bytes} from "solar:core/v1/Bytes.sol";
+import {Bytes} from "solar:core/Bytes.sol";
 
 /// @notice Checked Solidity implementation of the pinned Solady ECDSA API.
 /// @dev Recovery goes through the `ecrecover` builtin, whose zero result is

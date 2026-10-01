@@ -938,7 +938,7 @@ def main():
         "--core-modules",
         type=Path,
         default=benchmark.DEFAULT_CORE_MODULES,
-        help="directory holding the compiler-owned solar:core/v1 module sources",
+        help="directory holding the compiler-owned solar:core module sources",
     )
     raise SystemExit(run(parser.parse_args()))
 

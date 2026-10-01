@@ -280,7 +280,7 @@ bytes).
 
 Port commits: `f372883` and `5685b37`. Fast paths that only pay for
 themselves in gas are guarded by `Build.gasFirst()` from the new
-compiler-owned `solar:core/v1/Build.sol`, a constant that is false in builds
+compiler-owned `solar:core/Build.sol`, a constant that is false in builds
 optimizing for size, and those builds take one compact path with the same
 result: `get`, `set` and `setCalldata` of `LibBytes` with one head word and
 one `Slots` copy of whole words for every length, `fromSmallString` and
@@ -1244,7 +1244,7 @@ uv run benchmarks/checked/benchmark.py \
 
 The runner reads `src/` and the compiler's core modules when it runs, so a long
 sweep uses a frozen copy: a `git worktree add --detach` of this repository and
-`--core-modules` pointing at a copy of `solar/crates/sema/src/core/v1`.
+`--core-modules` pointing at a copy of `solar/crates/std/solidity`.
 
 Output directories must be fresh. **The current comparison exits 1** because
 of the compatibility discrepancies below; it still writes the full results.

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {Calls} from "solar:core/v1/Calls.sol";
-import {Code} from "solar:core/v1/Code.sol";
-import {Create} from "solar:core/v1/Create.sol";
+import {Calls} from "solar:core/Calls.sol";
+import {Code} from "solar:core/Code.sol";
+import {Create} from "solar:core/Create.sol";
 
 /// @notice Checked Solidity implementation of the pinned Solady SSTORE2 API.
 /// @dev A data contract holds `data` as its code after one STOP byte, so it

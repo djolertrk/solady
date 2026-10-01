@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {Bytes} from "solar:core/v1/Bytes.sol";
-import {Hash} from "solar:core/v1/Hash.sol";
+import {Bytes} from "solar:core/Bytes.sol";
+import {Hash} from "solar:core/Hash.sol";
 
 /// @notice Checked Solidity hashing without assembly.
 /// @dev The upstream library exists because `abi.encode` allocates before

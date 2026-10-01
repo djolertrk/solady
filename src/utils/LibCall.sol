@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {Bytes} from "solar:core/v1/Bytes.sol";
-import {Calls} from "solar:core/v1/Calls.sol";
-import {Revert} from "solar:core/v1/Revert.sol";
+import {Bytes} from "solar:core/Bytes.sol";
+import {Calls} from "solar:core/Calls.sol";
+import {Revert} from "solar:core/Revert.sol";
 
 /// @notice Checked Solidity implementation of the pinned Solady LibCall API.
 /// @dev The contract calls copy the whole response, as `address.call` does,
