@@ -52,6 +52,10 @@ DEFAULT_CORE_MODULES = REPO.parent / "solar/crates/std/solidity"
 MAX = (1 << 256) - 1
 # EIP-170's limit on deployed runtime code, in bytes.
 CODE_SIZE_LIMIT = 0x6000
+# Harnesses Solar builds for size in every optimized build: built for gas, the combined
+# LibString harness exceeds EIP-170 at high optimizer runs. Other compilers read the
+# `@custom:solar-optimize` tag as documentation.
+SIZE_HARNESSES = frozenset({"LibString"})
 
 
 def mask(n):
@@ -361,6 +365,8 @@ def prepare(
         if path not in port_only:
             harness += f'import "{path}";\n'
     for library in sorted({r["library"] for r in harness_apis}):
+        if library in SIZE_HARNESSES:
+            harness += "/// @custom:solar-optimize size\n"
         harness += f"contract {library}Harness {{\n"
         rows = [row for row in harness_apis if row["library"] == library]
         slots = 0
