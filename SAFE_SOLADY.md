@@ -30,6 +30,45 @@ have reduced APIs, so the whole upstream suite and consumers of missing
 functions are not expected to compile on this branch.
 Use the scoped runner commands below for the published subset.
 
+## LibString built for size, 2026-10-01
+
+Port commits: `9dea21d` (core module paths) and `046b098` (the LibString
+harness built for size). Solar commits since the [next section](#erc20-slot-reuse-and-the-join-edge-2026-09-26):
+the reviewed core-library and optimization branches, rebased onto main
+`4cc64e740`, and `06df9f560` (unpushed), which adds `@custom:solar-optimize`.
+
+Review moved the compiler's core modules to `crates/std/solidity`, imported as
+`solar:core/<Module>.sol` without `v1`. The ports, the runner's default
+`--core-modules` and these notes follow; the module APIs did not change. Solar's
+main branch also removed the compiler's EIP-170 size rescue, so the combined
+LibString harness built for gas at 1,000,000 runs grew back to 25,682 bytes,
+over EIP-170. Instead of rescuing a build behind its back, the compiler now lets
+the source choose: a contract documented `@custom:solar-optimize size` is
+compiled as a `-O size` build would compile it, the rest of the build keeps its
+objective, and other compilers read the tag as documentation. The runner
+documents `LibStringHarness` so in every leg.
+
+| LibString in the Solar leg | 200 runs | 1,000,000 runs |
+|---|---:|---:|
+| Harness runtime bytes | 16,953 → 7,207 | 25,682 → 7,207 |
+| Wins / losses of 3,190 comparable cases | 3,190 / 0 → 1,647 / 1,543 | 3,190 / 0 → 1,614 / 1,576 |
+| Worst gas delta | −44 → +84,483 | −50 → +84,522 |
+| Gas against upstream's best, summed | 0.7312x → 1.0576x | 0.7202x → 1.0794x |
+
+Size-first code gives up the word-at-a-time paths: `is7BitASCII` scans bytes
+and costs up to 20 times its gas build on long inputs (+85,578 gas), the hex
+encodings about 4 times, `toHexStringChecksummed` 5.6 times and `slice` twice;
+of the 56 LibString APIs only the storage `isEmpty` gets cheaper. Solar's build
+of the upstream library shrinks too, from 7,189 and 9,287 bytes to 6,829. The
+other nine libraries measure the same gas, so with the rebased compiler the
+matrix moves from 0.5328x to 0.5728x of upstream's best gas at 200 runs, and
+from 0.5237x to 0.5678x at 1,000,000 runs. The tag leaves solc's builds alone,
+except that the comment shifts AST IDs, which moves solc's via-IR LibSort
+harness by 350 bytes without changing a gas row. The 154 mismatching executions
+are the same upstream discrepancies as before, the upstream suites still pass
+all 169 tests under solc via-IR and Solar, and the ERC20 runner matches all 26
+transactions and 9 views.
+
 ## ERC20, slot reuse and the join edge, 2026-09-26
 
 Port commits: `f171dd6` (ERC20 and its benchmark) and `03e32f0` (upstream
