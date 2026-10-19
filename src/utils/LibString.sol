@@ -407,7 +407,7 @@ library LibString {
         if (start > s.length) start = s.length;
         if (start >= end) return "";
         bytes memory out = new bytes(end - start);
-        _copyInto(out, 0, s, start, end - start);
+        _copyFresh(out, 0, s, start, end - start);
         return string(out);
     }
 
@@ -418,7 +418,7 @@ library LibString {
         bytes memory s = bytes(subject);
         if (start >= s.length) return "";
         bytes memory out = new bytes(s.length - start);
-        _copyInto(out, 0, s, start, s.length - start);
+        _copyFresh(out, 0, s, start, s.length - start);
         return string(out);
     }
 
@@ -833,101 +833,163 @@ library LibString {
             bytes memory expanded = new bytes(s.length + (s.length + 1) * r.length);
             uint256 o;
             for (uint256 i; i <= s.length; ++i) {
-                _copyInto(expanded, o, r, 0, r.length);
+                _copyFresh(expanded, o, r, 0, r.length);
                 o += r.length;
                 if (i < s.length) expanded[o++] = s[i];
             }
             return string(expanded);
         }
         uint256 last = s.length - n.length;
-        uint256 width = n.length < 32 ? n.length : 32;
-        bytes32 head = _readBytesN(n, 0, width);
-        // A replacement no longer than the needle never grows the subject, so
-        // one pass builds the result at the subject's length and cuts it down.
-        // A longer one first counts the matches to size the result.
-        bytes memory out;
-        if (r.length <= n.length) {
-            out = new bytes(s.length);
-        } else {
-            uint256 count;
-            for (uint256 at = _find(s, 0, last, n, head, width); at != NOT_FOUND;) {
-                ++count;
-                at += n.length;
-                if (at > last) break;
-                at = _find(s, at, last, n, head, width);
+        bytes32 head = _head(n);
+        // A replacement no longer than the needle never grows the subject. A
+        // longer one grows it by at most `growth` per needle-length piece; while
+        // that bound stays within a few times the subject, it sizes the result
+        // and saves counting the matches first.
+        uint256 size = s.length;
+        if (r.length > n.length) {
+            uint256 growth = r.length - n.length;
+            uint256 most = s.length / n.length;
+            if (most * growth > 4 * s.length + 1024) {
+                most = _count(s, last, n, head);
+                if (most == 0) return subject;
             }
-            if (count == 0) return subject;
-            out = new bytes(s.length + count * (r.length - n.length));
+            size += most * growth;
         }
+        bytes memory out = new bytes(size);
         uint256 copied;
         uint256 o;
-        for (uint256 at = _find(s, 0, last, n, head, width); at != NOT_FOUND;) {
-            if (at != copied) {
-                _copyInto(out, o, s, copied, at - copied);
-                o += at - copied;
-            }
-            if (r.length != 0) {
-                _copyInto(out, o, r, 0, r.length);
+        uint256 at = _find(s, 0, last, n, head);
+        while (at != NOT_FOUND) {
+            _copyFresh(out, o, s, copied, at - copied);
+            o += at - copied;
+            // The match at `at`, then each match right after the previous one.
+            do {
+                _copyFresh(out, o, r, 0, r.length);
                 o += r.length;
-            }
-            copied = at + n.length;
-            if (copied > last) break;
-            at = _find(s, copied, last, n, head, width);
+                copied = at + n.length;
+                at = copied;
+            } while (copied <= last && _matchAt(s, copied, n, head));
+            at = copied > last ? NOT_FOUND : _scan(s, copied + 1, last, n, head);
         }
-        _copyInto(out, o, s, copied, s.length - copied);
+        _copyFresh(out, o, s, copied, s.length - copied);
         o += s.length - copied;
         if (o != out.length) _truncate(out, o);
         return string(out);
     }
 
-    /// @dev Whether `needle` occurs in `subject` at `at`, where `at + needle.length`
-    /// fits the subject. `head` is the needle's first `width` bytes, `width`
-    /// being its length up to a word: the word of the subject at `at` decides a
-    /// needle of up to a word, and a longer one is confirmed by its hash, as the
-    /// assembly does.
+    /// @dev The first bytes of `needle`, up to a word, left-aligned.
     /// @custom:solar-inline
-    function _matchAt(bytes memory subject, uint256 at, bytes memory needle, bytes32 head, uint256 width)
+    function _head(bytes memory needle) private pure returns (bytes32) {
+        return _readBytesN(needle, 0, needle.length < 32 ? needle.length : 32);
+    }
+
+    /// @dev Whether `needle` occurs in `subject` at `at`, where `at + needle.length`
+    /// fits the subject. `head` is the needle's first bytes, up to a word: the
+    /// word of the subject at `at` decides a needle of up to a word, and the
+    /// rest of a longer one is compared a word at a time. Upstream compares the
+    /// hashes of the two ranges; equal bytes are equal hashes, and a different
+    /// range with the needle's hash is a keccak-256 collision.
+    /// @custom:solar-inline
+    function _matchAt(bytes memory subject, uint256 at, bytes memory needle, bytes32 head)
         private
         pure
         returns (bool)
     {
+        uint256 width = needle.length < 32 ? needle.length : 32;
         if (_readBytesN(subject, at, width) != head) return false;
-        return needle.length <= 32 || _keccak256Range(subject, at, needle.length) == keccak256(needle);
+        return needle.length <= 32 || _tailMatchesAt(subject, at, needle);
+    }
+
+    /// @dev Whether the bytes of `needle` past its first word occur in `subject`
+    /// past `at + 32`, where `at + needle.length` fits the subject.
+    function _tailMatchesAt(bytes memory subject, uint256 at, bytes memory needle)
+        private
+        pure
+        returns (bool)
+    {
+        for (uint256 i = 32; i < needle.length; i += 32) {
+            uint256 count = needle.length - i < 32 ? needle.length - i : 32;
+            if (_readBytesN(subject, at + i, count) != _readBytesN(needle, i, count)) return false;
+        }
+        return true;
     }
 
     /// @dev The first offset in `[from, last]` at which `needle` occurs in
     /// `subject`, or `NOT_FOUND`; `last + needle.length` fits the subject and
-    /// `head` and `width` are as `_matchAt` takes them. Thirty-two offsets go at
-    /// once: the needle's first byte is compared with every byte of a word, and
-    /// only the offsets where it occurs are matched.
+    /// `head` is as `_matchAt` takes it. The offset `from`
+    /// itself, where the next match of a run is, is tried before any scan.
+    /// @custom:solar-inline
     function _find(
         bytes memory subject,
         uint256 from,
         uint256 last,
         bytes memory needle,
-        bytes32 head,
-        uint256 width
+        bytes32 head
     ) private pure returns (uint256) {
-        // A match right at `from`, as in a run of matches, needs no scan.
-        if (_matchAt(subject, from, needle, head, width)) return from;
-        uint256 pattern = (uint256(head) >> 248) * LANES_01;
-        uint256 n = subject.length;
+        if (_matchAt(subject, from, needle, head)) return from;
+        return _scan(subject, from + 1, last, needle, head);
+    }
+
+    /// @dev `_find` past its first offset. Thirty-two offsets go at once: the
+    /// needle's first byte is compared with every byte of a word, a longer
+    /// needle's second byte with every byte of the word one byte further on,
+    /// and only the offsets where both occur are matched.
+    function _scan(
+        bytes memory subject,
+        uint256 from,
+        uint256 last,
+        bytes memory needle,
+        bytes32 head
+    ) private pure returns (uint256) {
+        uint256 first = (uint256(head) >> 248) * LANES_01;
+        uint256 second = ((uint256(head) >> 240) & 0xff) * LANES_01;
+        bool pair = needle.length > 1;
         for (uint256 i = from; i <= last; i += 32) {
-            uint256 rest = n - i;
-            uint256 word = rest < 32 ? uint256(_readBytesN(subject, i, rest)) : uint256(_readBytes32(subject, i));
-            // A byte equal to the first byte is zero after the exclusive-or, and
-            // the top bit marks each zero byte exactly.
-            uint256 z = word ^ pattern;
-            uint256 hits = ~(((z & LANES_7F) + LANES_7F) | z | LANES_7F);
+            uint256 hits = _zeroBytes(_wordAt(subject, i) ^ first);
+            // `i + 1 <= last + 1 < subject.length` for a needle of two bytes or more.
+            if (pair) hits &= _zeroBytes(_wordAt(subject, i + 1) ^ second);
             // Offsets past `last` do not count.
             if (last - i < 31) hits &= ~(type(uint256).max >> (8 * (last - i + 1)));
             while (hits != 0) {
                 uint256 lane = _leadingByte(hits);
-                if (_matchAt(subject, i + lane, needle, head, width)) return i + lane;
+                if (_matchAt(subject, i + lane, needle, head)) return i + lane;
                 hits &= ~(uint256(1) << (255 - 8 * lane));
             }
         }
         return NOT_FOUND;
+    }
+
+    /// @dev The bytes of `b` from `i`, up to a word, left-aligned: the word at
+    /// `i` zero-padded past the end of `b`, where `i < b.length`.
+    /// @custom:solar-inline
+    function _wordAt(bytes memory b, uint256 i) private pure returns (uint256) {
+        uint256 rest = b.length - i;
+        return rest < 32 ? uint256(_readBytesN(b, i, rest)) : uint256(_readBytes32(b, i));
+    }
+
+    /// @dev `0x80` in each byte of `z` that is zero, and zero in every other
+    /// byte: the low seven bits of a byte plus `0x7f` carry into its top bit
+    /// unless they are all clear, and never into the next byte.
+    /// @custom:solar-inline
+    function _zeroBytes(uint256 z) private pure returns (uint256) {
+        return ~(((z & LANES_7F) + LANES_7F) | z | LANES_7F);
+    }
+
+    /// @dev The number of non-overlapping occurrences of `needle` in `subject`
+    /// at offsets up to `last`, as `_find` takes them.
+    function _count(bytes memory subject, uint256 last, bytes memory needle, bytes32 head)
+        private
+        pure
+        returns (uint256 count)
+    {
+        uint256 at = _find(subject, 0, last, needle, head);
+        while (at != NOT_FOUND) {
+            do {
+                ++count;
+                at += needle.length;
+            } while (at <= last && _matchAt(subject, at, needle, head));
+            at = at > last ? NOT_FOUND : _scan(subject, at + 1, last, needle, head);
+        }
     }
 
     /// @dev The index, from the top, of the first nonzero byte of `x`, which
@@ -956,7 +1018,7 @@ library LibString {
     function _indicesOf(string memory subject, string memory needle)
         private
         pure
-        returns (uint256[] memory)
+        returns (uint256[] memory found)
     {
         bytes memory s = bytes(subject);
         bytes memory n = bytes(needle);
@@ -967,24 +1029,23 @@ library LibString {
             return every;
         }
         uint256 last = s.length - n.length;
-        uint256 width = n.length < 32 ? n.length : 32;
-        bytes32 head = _readBytesN(n, 0, width);
+        bytes32 head = _head(n);
+        // At most `last / n.length + 1` matches fit. A bound of a few words
+        // sizes the result, which is cut down after; a larger one is counted.
+        uint256 most = last / n.length + 1;
+        if (most > 64) most = _count(s, last, n, head);
+        found = new uint256[](most);
         uint256 count;
-        for (uint256 at = _find(s, 0, last, n, head, width); at != NOT_FOUND;) {
-            ++count;
-            at += n.length;
-            if (at > last) break;
-            at = _find(s, at, last, n, head, width);
+        uint256 at = _find(s, 0, last, n, head);
+        while (at != NOT_FOUND) {
+            // The match at `at`, then each match right after the previous one.
+            do {
+                found[count++] = at;
+                at += n.length;
+            } while (at <= last && _matchAt(s, at, n, head));
+            at = at > last ? NOT_FOUND : _scan(s, at + 1, last, n, head);
         }
-        uint256[] memory found = new uint256[](count);
-        count = 0;
-        for (uint256 at = found.length == 0 ? NOT_FOUND : _find(s, 0, last, n, head, width); at != NOT_FOUND;) {
-            found[count++] = at;
-            at += n.length;
-            if (at > last) break;
-            at = _find(s, at, last, n, head, width);
-        }
-        return found;
+        if (count != most) _truncateWords(found, count);
     }
 
     /// @dev The byte offset of the first occurrence of `needle` at or after
@@ -1001,8 +1062,7 @@ library LibString {
         if (n.length > s.length) return NOT_FOUND;
         uint256 last = s.length - n.length;
         if (from > last) return NOT_FOUND;
-        uint256 width = n.length < 32 ? n.length : 32;
-        return _find(s, from, last, n, _readBytesN(n, 0, width), width);
+        return _find(s, from, last, n, _head(n));
     }
 
     /// @dev The byte offset of the last occurrence of `needle` at or before
@@ -1017,11 +1077,10 @@ library LibString {
         if (n.length > s.length) return NOT_FOUND;
         uint256 last = s.length - n.length;
         if (from > last) from = last;
-        uint256 width = n.length < 32 ? n.length : 32;
-        bytes32 head = _readBytesN(n, 0, width);
+        bytes32 head = _head(n);
         for (uint256 i = from + 1; i != 0;) {
             --i;
-            if (_matchAt(s, i, n, head, width)) return i;
+            if (_matchAt(s, i, n, head)) return i;
         }
         return NOT_FOUND;
     }
@@ -1047,7 +1106,7 @@ library LibString {
         if (times == 0 || s.length == 0) return "";
         uint256 total = s.length * times;
         bytes memory out = new bytes(total);
-        _copyInto(out, 0, s, 0, s.length);
+        _copyFresh(out, 0, s, 0, s.length);
         uint256 filled = s.length;
         while (filled < total) {
             uint256 rest = total - filled;
@@ -1075,16 +1134,39 @@ library LibString {
             }
             return result;
         }
-        uint256[] memory indices = _indicesOf(subject, delimiter);
-        result = new string[](indices.length + 1);
-        uint256 previous;
-        for (uint256 i; i <= indices.length; ++i) {
-            uint256 end = i == indices.length ? s.length : indices[i];
-            bytes memory part = new bytes(end - previous);
-            _copyInto(part, 0, s, previous, part.length);
-            result[i] = string(part);
-            previous = end + d.length;
+        if (d.length > s.length) {
+            result = new string[](1);
+            result[0] = string(_sliceFresh(s, 0, s.length));
+            return result;
         }
+        uint256 last = s.length - d.length;
+        bytes32 head = _head(d);
+        // At most one part more than `last / d.length + 1` delimiters. A bound
+        // of a few words sizes the result, which is cut down after; a larger
+        // one is counted.
+        uint256 most = last / d.length + 2;
+        if (most > 64) most = _count(s, last, d, head) + 1;
+        result = new string[](most);
+        uint256 count;
+        uint256 previous;
+        for (uint256 at = _find(s, 0, last, d, head); at != NOT_FOUND;) {
+            result[count++] = string(_sliceFresh(s, previous, at));
+            previous = at + d.length;
+            at = previous > last ? NOT_FOUND : _find(s, previous, last, d, head);
+        }
+        result[count++] = string(_sliceFresh(s, previous, s.length));
+        if (count != most) _truncateStrings(result, count);
+    }
+
+    /// @dev A new buffer holding the bytes of `s` from `start` to `end`.
+    /// @custom:solar-inline
+    function _sliceFresh(bytes memory s, uint256 start, uint256 end)
+        private
+        pure
+        returns (bytes memory part)
+    {
+        part = new bytes(end - start);
+        _copyFresh(part, 0, s, start, end - start);
     }
 
     /// @dev The low `byteCount` bytes of `value` as lowercase hexadecimal, two
@@ -1326,6 +1408,26 @@ library LibString {
         }
     }
 
+    /// @dev Shrinks `a` to its first `n` words in place. Solidity cannot spell
+    /// a shorter length for an existing array.
+    /// @custom:solar-trusted
+    function _truncateWords(uint256[] memory a, uint256 n) private pure {
+        if (n > a.length) n = new uint256[](0)[0];
+        assembly ("memory-safe") {
+            mstore(a, n)
+        }
+    }
+
+    /// @dev Shrinks `a` to its first `n` strings in place. Solidity cannot spell
+    /// a shorter length for an existing array.
+    /// @custom:solar-trusted
+    function _truncateStrings(string[] memory a, uint256 n) private pure {
+        if (n > a.length) n = new uint256[](0)[0];
+        assembly ("memory-safe") {
+            mstore(a, n)
+        }
+    }
+
     /// @dev Ends the call, returning `s` ABI-encoded as the single result of a
     /// function that returns `string`. A `return` statement leaves only the
     /// function it is in.
@@ -1362,6 +1464,22 @@ library LibString {
             for (uint256 k; k < count; ++k) {
                 dst[dstOffset + k] = src[srcOffset + k];
             }
+        }
+    }
+
+    /// @dev Copies `count` bytes from `src` at `srcOffset` to `dst` at
+    /// `dstOffset`, front to back. Callers pass a `dst` they have just
+    /// allocated, so the ranges never overlap and a word copy may move them.
+    /// @custom:solar-inline
+    function _copyFresh(
+        bytes memory dst,
+        uint256 dstOffset,
+        bytes memory src,
+        uint256 srcOffset,
+        uint256 count
+    ) private pure {
+        for (uint256 k; k < count; ++k) {
+            dst[dstOffset + k] = src[srcOffset + k];
         }
     }
 
