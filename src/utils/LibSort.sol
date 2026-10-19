@@ -546,6 +546,7 @@ library LibSort {
     }
 
     /// @dev Exchanges the keys and the values at `i` and `j`.
+    /// @custom:solar-inline
     function _swap(uint256[] memory keys, uint256[] memory values, uint256 i, uint256 j)
         private
         pure
@@ -799,6 +800,7 @@ library LibSort {
     }
 
     /// @dev Exchanges the keys and the values at `i` and `j`.
+    /// @custom:solar-inline
     function _swap(int256[] memory keys, uint256[] memory values, uint256 i, uint256 j)
         private
         pure
@@ -1050,6 +1052,7 @@ library LibSort {
     }
 
     /// @dev Exchanges the keys and the values at `i` and `j`.
+    /// @custom:solar-inline
     function _swap(address[] memory keys, uint256[] memory values, uint256 i, uint256 j)
         private
         pure
@@ -1301,6 +1304,7 @@ library LibSort {
     }
 
     /// @dev Exchanges the keys and the values at `i` and `j`.
+    /// @custom:solar-inline
     function _swap(bytes32[] memory keys, uint256[] memory values, uint256 i, uint256 j)
         private
         pure
@@ -1455,24 +1459,84 @@ library LibSort {
         }
     }
 
-    /// @dev Sorts all of `a`.
+    /// @dev Sorts all of `a`, as the assembly does: an array already in order
+    /// is left alone and one in reverse order is reversed, each found by one
+    /// scan from the end, before the quicksort runs.
     function _sortAll(uint256[] memory a) private pure {
-        if (a.length > 1) _sort(a, 0, a.length);
+        uint256 n = a.length;
+        if (n < 2) return;
+        uint256 j = n - 1;
+        while (j != 0 && a[j - 1] <= a[j]) --j;
+        if (j == 0) return;
+        j = n - 1;
+        while (j != 0 && a[j - 1] >= a[j]) --j;
+        if (j == 0) {
+            for (uint256 i; i < n / 2; ++i) {
+                (a[i], a[n - 1 - i]) = (a[n - 1 - i], a[i]);
+            }
+            return;
+        }
+        _sort(a, 0, n);
     }
 
-    /// @dev Sorts all of `a`.
+    /// @dev Sorts all of `a`, as the assembly does: an array already in order
+    /// is left alone and one in reverse order is reversed, each found by one
+    /// scan from the end, before the quicksort runs.
     function _sortAll(int256[] memory a) private pure {
-        if (a.length > 1) _sort(a, 0, a.length);
+        uint256 n = a.length;
+        if (n < 2) return;
+        uint256 j = n - 1;
+        while (j != 0 && a[j - 1] <= a[j]) --j;
+        if (j == 0) return;
+        j = n - 1;
+        while (j != 0 && a[j - 1] >= a[j]) --j;
+        if (j == 0) {
+            for (uint256 i; i < n / 2; ++i) {
+                (a[i], a[n - 1 - i]) = (a[n - 1 - i], a[i]);
+            }
+            return;
+        }
+        _sort(a, 0, n);
     }
 
-    /// @dev Sorts all of `a`.
+    /// @dev Sorts all of `a`, as the assembly does: an array already in order
+    /// is left alone and one in reverse order is reversed, each found by one
+    /// scan from the end, before the quicksort runs.
     function _sortAll(address[] memory a) private pure {
-        if (a.length > 1) _sort(a, 0, a.length);
+        uint256 n = a.length;
+        if (n < 2) return;
+        uint256 j = n - 1;
+        while (j != 0 && a[j - 1] <= a[j]) --j;
+        if (j == 0) return;
+        j = n - 1;
+        while (j != 0 && a[j - 1] >= a[j]) --j;
+        if (j == 0) {
+            for (uint256 i; i < n / 2; ++i) {
+                (a[i], a[n - 1 - i]) = (a[n - 1 - i], a[i]);
+            }
+            return;
+        }
+        _sort(a, 0, n);
     }
 
-    /// @dev Sorts all of `a`.
+    /// @dev Sorts all of `a`, as the assembly does: an array already in order
+    /// is left alone and one in reverse order is reversed, each found by one
+    /// scan from the end, before the quicksort runs.
     function _sortAll(bytes32[] memory a) private pure {
-        if (a.length > 1) _sort(a, 0, a.length);
+        uint256 n = a.length;
+        if (n < 2) return;
+        uint256 j = n - 1;
+        while (j != 0 && a[j - 1] <= a[j]) --j;
+        if (j == 0) return;
+        j = n - 1;
+        while (j != 0 && a[j - 1] >= a[j]) --j;
+        if (j == 0) {
+            for (uint256 i; i < n / 2; ++i) {
+                (a[i], a[n - 1 - i]) = (a[n - 1 - i], a[i]);
+            }
+            return;
+        }
+        _sort(a, 0, n);
     }
 
     /// @dev Raises the `Panic(0x32)` an out-of-range index raises.
