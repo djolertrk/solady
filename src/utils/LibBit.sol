@@ -1,16 +1,27 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {Arrays} from "solar:core/Arrays.sol";
-import {Bits} from "solar:core/Bits.sol";
-import {Build} from "solar:core/Build.sol";
-import {Bytes} from "solar:core/Bytes.sol";
-
 /// @notice Checked Solidity implementation of the pinned Solady LibBit API.
 /// @dev Raw boolean operations require clean boolean inputs, as upstream does.
-/// The bit scans and the population count are `Bits`: a table search on a
-/// target without `clz`, the instruction on one that has it.
+/// The bit scans find the byte holding the highest set bit with five
+/// comparisons and finish inside it with a table. The population count's last
+/// step multiplies with wrap-around, which only `_rawMul` may do.
+/// @custom:solar-safe memory arithmetic
 library LibBit {
+    /// @dev Selects a table slot from a byte value: shifted right by the byte
+    /// and masked to five bits, it gives a distinct slot for each position the
+    /// byte's highest set bit can have, and slot 30 for a zero byte.
+    uint256 private constant _SELECTOR = 0x8421084210842108cc6318c6db6d54be;
+
+    /// @dev The highest set bit's index within a byte, per selector slot.
+    bytes32 private constant _HIGHEST =
+        0x0706060506020504060203020504030106050205030304010505030400000000;
+
+    /// @dev The same table complemented to 255, so that a leading-zero count
+    /// is the byte position exclusive-ored with the slot.
+    bytes32 private constant _LEADING =
+        0xf8f9f9faf9fdfafbf9fdfcfdfafbfcfef9fafdfafcfcfbfefafafcfbffffffff;
+
     /// @dev Nibble-spreading masks, one per halving of the packing.
     uint256 private constant _MASK_64 =
         0x0000000000000000ffffffffffffffff0000000000000000ffffffffffffffff;
@@ -24,19 +35,49 @@ library LibBit {
         0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f;
 
     function fls(uint256 x) internal pure returns (uint256 r) {
-        return Bits.highestSetBit(x);
+        // Zero is seeded with 256: every comparison is then false and its
+        // slot contributes nothing.
+        r = (x == 0 ? 256 : 0) | (x > type(uint128).max ? 128 : 0);
+        r |= (x >> r) > type(uint64).max ? 64 : 0;
+        r |= (x >> r) > type(uint32).max ? 32 : 0;
+        r |= (x >> r) > type(uint16).max ? 16 : 0;
+        r |= (x >> r) > type(uint8).max ? 8 : 0;
+        r |= uint8(_HIGHEST[(_SELECTOR >> (x >> r)) & 31]);
     }
 
     function clz(uint256 x) internal pure returns (uint256 r) {
-        return Bits.leadingZeros(x);
+        // The same search as `fls`. `r` only holds bits at or above three and
+        // the slot value has all of those set, so the exclusive-or subtracts.
+        // Zero reaches the last slot, 255, and the final term makes it 256.
+        r = x > type(uint128).max ? 128 : 0;
+        r |= (x >> r) > type(uint64).max ? 64 : 0;
+        r |= (x >> r) > type(uint32).max ? 32 : 0;
+        r |= (x >> r) > type(uint16).max ? 16 : 0;
+        r |= (x >> r) > type(uint8).max ? 8 : 0;
+        r = (r ^ uint8(_LEADING[(_SELECTOR >> (x >> r)) & 31])) + (x == 0 ? 1 : 0);
     }
 
     function ffs(uint256 x) internal pure returns (uint256 r) {
-        return Bits.trailingZeros(x);
+        // Isolating the lowest set bit leaves a power of two whose highest set
+        // bit is the same bit.
+        if (x == 0) return 256;
+        return fls(x & ~(x - 1));
     }
 
     function popCount(uint256 x) internal pure returns (uint256 c) {
-        return Bits.popCount(x);
+        // Sum bits in ever wider lanes: pairs, nibbles, bytes, then all bytes
+        // at once through a product that stacks them into the top byte. No
+        // lane carries into its neighbour, so the lane steps cannot overflow;
+        // the product wraps on purpose. That byte holds at most 255, so the
+        // lowest bit is counted apart and the lanes see 255 bits.
+        uint256 lowest = x & 1;
+        x >>= 1;
+        x = x - ((x >> 1) & 0x5555555555555555555555555555555555555555555555555555555555555555);
+        x = (x & 0x3333333333333333333333333333333333333333333333333333333333333333)
+            + ((x >> 2) & 0x3333333333333333333333333333333333333333333333333333333333333333);
+        x = (x + (x >> 4)) & 0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f;
+        return (_rawMul(x, 0x0101010101010101010101010101010101010101010101010101010101010101) >> 248)
+            + lowest;
     }
 
     // Every input byte is zero or one, so the sum is at most 32 and fits the
@@ -52,8 +93,7 @@ library LibBit {
     }
 
     // The two loops below are left a byte at a time on purpose: the compiler
-    // recognizes the shape and counts a word per step, which a hand-written
-    // word loop over `Bytes.readBytes32` measured slower than.
+    // recognizes the shape and counts a word per step.
     function countZeroBytes(bytes memory s) internal pure returns (uint256 c) {
         for (uint256 i; i < s.length; ++i) {
             if (s[i] == 0) ++c;
@@ -109,22 +149,13 @@ library LibBit {
 
     function toNibbles(bytes memory s) internal pure returns (bytes memory result) {
         uint256 n = s.length;
-        if (!Build.gasFirst()) {
-            // Each byte's high nibble, then its low one.
-            result = new bytes(n * 2);
-            for (uint256 i; i < n; ++i) {
-                uint8 b = uint8(s[i]);
-                (result[2 * i], result[2 * i + 1]) = (bytes1(b >> 4), bytes1(b & 15));
-            }
-            return result;
-        }
         // Below one block the input fits one word, zero-padded by the
-        // conversion: its nibbles fill one word, cut down to the output. An
-        // empty input has none to spread.
+        // conversion: its nibbles fill one word, of which the output takes
+        // the first `2 * n` bytes. An empty input has none to spread.
         if (n < 16) {
             if (n == 0) return "";
-            result = abi.encodePacked(bytes32(_spread(uint256(bytes32(s)) >> 128)));
-            Arrays.truncate(result, n * 2);
+            result = new bytes(n * 2);
+            _writeBytesN(result, bytes32(_spread(uint256(bytes32(s)) >> 128)), n * 2);
             return result;
         }
         result = new bytes(n * 2);
@@ -134,12 +165,12 @@ library LibBit {
         // written out here rather than called, so that the loop is straight
         // code whose reads and writes the loop condition already bounds.
         while (i + 16 <= n) {
-            uint256 x = uint128(Bytes.readBytes16(s, i));
+            uint256 x = uint128(_readBytes16(s, i));
             x = (x | (x << 64)) & _MASK_64;
             x = (x | (x << 32)) & _MASK_32;
             x = (x | (x << 16)) & _MASK_16;
             x = (x | (x << 8)) & _MASK_8;
-            Bytes.writeBytes32(result, o, bytes32((x | (x << 4)) & _MASK_4));
+            _writeBytes32(result, o, bytes32((x | (x << 4)) & _MASK_4));
             i += 16;
             o += 32;
         }
@@ -147,8 +178,8 @@ library LibBit {
         // What is left is shorter than a block. One more block pulled back to
         // end where the input ends covers it, rewriting the nibbles it shares
         // with the block before.
-        uint256 tail = uint128(Bytes.readBytes16(s, n - 16));
-        Bytes.writeBytes32(result, (n - 16) * 2, bytes32(_spread(tail)));
+        uint256 tail = uint128(_readBytes16(s, n - 16));
+        _writeBytes32(result, (n - 16) * 2, bytes32(_spread(tail)));
     }
 
     /// @dev The nibbles of `x`, which must be below `2 ** 128`, one to a byte:
@@ -199,5 +230,38 @@ library LibBit {
 
     function toUint(bool b) internal pure returns (uint256 z) {
         return b ? 1 : 0;
+    }
+
+    /// @dev `x * y` modulo `2**256`.
+    /// @custom:solar-trusted
+    function _rawMul(uint256 x, uint256 y) private pure returns (uint256 z) {
+        unchecked {
+            z = x * y;
+        }
+    }
+
+    /// @dev Writes the leading `count` bytes of `value` at the start of `b`.
+    function _writeBytesN(bytes memory b, bytes32 value, uint256 count) private pure {
+        for (uint256 k; k < count; ++k) {
+            b[k] = value[k];
+        }
+    }
+
+    /// @dev The 16 bytes of `b` at `offset`.
+    function _readBytes16(bytes memory b, uint256 offset)
+        private
+        pure
+        returns (bytes16 result)
+    {
+        for (uint256 k; k < 16; ++k) {
+            result |= bytes16(b[offset + k]) >> (8 * k);
+        }
+    }
+
+    /// @dev Writes `value` into `b` at `offset`.
+    function _writeBytes32(bytes memory b, uint256 offset, bytes32 value) private pure {
+        for (uint256 k; k < 32; ++k) {
+            b[offset + k] = value[k];
+        }
     }
 }
