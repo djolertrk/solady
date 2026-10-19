@@ -181,10 +181,15 @@ library LibString {
     }
 
     function is7BitASCII(string memory s) internal pure returns (bool result) {
+        // A word at a time: any byte with its top bit set fails the whole word.
         bytes memory b = bytes(s);
-        for (uint256 i; i < b.length; ++i) {
-            if (b[i] > 0x7f) return false;
+        uint256 n = b.length;
+        uint256 i;
+        while (i + 32 <= n) {
+            if (uint256(_readBytes32(b, i)) & _HIGH_BITS != 0) return false;
+            i += 32;
         }
+        if (i < n) return uint256(_readBytesN(b, i, n - i)) & _HIGH_BITS == 0;
         return true;
     }
 
@@ -1276,5 +1281,16 @@ library LibString {
     /// portable spelling of a failed range check.
     function _outOfBounds() private pure returns (uint256) {
         return new uint256[](0)[0];
+    }
+
+    /// @dev The leading `count` bytes of `b` from `offset`, at most a word, left-aligned.
+    function _readBytesN(bytes memory b, uint256 offset, uint256 count)
+        private
+        pure
+        returns (bytes32 result)
+    {
+        for (uint256 k; k < count; ++k) {
+            result |= bytes32(b[offset + k]) >> (8 * k);
+        }
     }
 }

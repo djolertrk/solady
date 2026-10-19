@@ -92,17 +92,31 @@ library LibBit {
         return _sumBytes(~(((x & m) + m) | x | m) >> 7);
     }
 
-    // The two loops below are left a byte at a time on purpose: the compiler
-    // recognizes the shape and counts a word per step.
+    // Both loops count a word at a time. The tail's word is read with only its
+    // bytes, and the bytes past them are set, so they never count as zero.
     function countZeroBytes(bytes memory s) internal pure returns (uint256 c) {
-        for (uint256 i; i < s.length; ++i) {
-            if (s[i] == 0) ++c;
+        uint256 n = s.length;
+        uint256 i;
+        while (i + 32 <= n) {
+            c += countZeroBytes(uint256(_readBytes32(s, i)));
+            i += 32;
+        }
+        if (i < n) {
+            uint256 rest = n - i;
+            c += countZeroBytes(uint256(_readBytesN(s, i, rest)) | (type(uint256).max >> (8 * rest)));
         }
     }
 
     function countZeroBytesCalldata(bytes calldata s) internal pure returns (uint256 c) {
-        for (uint256 i; i < s.length; ++i) {
-            if (s[i] == 0) ++c;
+        uint256 n = s.length;
+        uint256 i;
+        while (i + 32 <= n) {
+            c += countZeroBytes(uint256(bytes32(s[i:i + 32])));
+            i += 32;
+        }
+        if (i < n) {
+            uint256 rest = n - i;
+            c += countZeroBytes(uint256(bytes32(s[i:])) | (type(uint256).max >> (8 * rest)));
         }
     }
 
@@ -262,6 +276,28 @@ library LibBit {
     function _writeBytes32(bytes memory b, uint256 offset, bytes32 value) private pure {
         for (uint256 k; k < 32; ++k) {
             b[offset + k] = value[k];
+        }
+    }
+
+    /// @dev The leading `count` bytes of `b` from `offset`, at most a word, left-aligned.
+    function _readBytesN(bytes memory b, uint256 offset, uint256 count)
+        private
+        pure
+        returns (bytes32 result)
+    {
+        for (uint256 k; k < count; ++k) {
+            result |= bytes32(b[offset + k]) >> (8 * k);
+        }
+    }
+
+    /// @dev The 32 bytes of `b` at `offset`.
+    function _readBytes32(bytes memory b, uint256 offset)
+        private
+        pure
+        returns (bytes32 result)
+    {
+        for (uint256 k; k < 32; ++k) {
+            result |= bytes32(b[offset + k]) >> (8 * k);
         }
     }
 }
