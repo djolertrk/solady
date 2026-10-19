@@ -211,6 +211,7 @@ library LibBytes {
     }
 
     /// @dev The 32 bytes of `b` at `offset`.
+    /// @custom:solar-inline
     function _readBytes32(bytes memory b, uint256 offset)
         private
         pure
@@ -222,6 +223,7 @@ library LibBytes {
     }
 
     /// @dev Writes `value` into `b` at `offset`.
+    /// @custom:solar-inline
     function _writeBytes32(bytes memory b, uint256 offset, bytes32 value) private pure {
         for (uint256 k; k < 32; ++k) {
             b[offset + k] = value[k];
@@ -229,6 +231,7 @@ library LibBytes {
     }
 
     /// @dev The 32 bytes of `b` at `offset`.
+    /// @custom:solar-inline
     function _calldataReadBytes32(bytes calldata b, uint256 offset)
         private
         pure

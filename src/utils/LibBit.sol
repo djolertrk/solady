@@ -255,6 +255,7 @@ library LibBit {
     }
 
     /// @dev Writes the leading `count` bytes of `value` at the start of `b`.
+    /// @custom:solar-inline
     function _writeBytesN(bytes memory b, bytes32 value, uint256 count) private pure {
         for (uint256 k; k < count; ++k) {
             b[k] = value[k];
@@ -262,6 +263,7 @@ library LibBit {
     }
 
     /// @dev The 16 bytes of `b` at `offset`.
+    /// @custom:solar-inline
     function _readBytes16(bytes memory b, uint256 offset)
         private
         pure
@@ -273,6 +275,7 @@ library LibBit {
     }
 
     /// @dev Writes `value` into `b` at `offset`.
+    /// @custom:solar-inline
     function _writeBytes32(bytes memory b, uint256 offset, bytes32 value) private pure {
         for (uint256 k; k < 32; ++k) {
             b[offset + k] = value[k];
@@ -280,6 +283,7 @@ library LibBit {
     }
 
     /// @dev The leading `count` bytes of `b` from `offset`, at most a word, left-aligned.
+    /// @custom:solar-inline
     function _readBytesN(bytes memory b, uint256 offset, uint256 count)
         private
         pure
@@ -291,6 +295,7 @@ library LibBit {
     }
 
     /// @dev The 32 bytes of `b` at `offset`.
+    /// @custom:solar-inline
     function _readBytes32(bytes memory b, uint256 offset)
         private
         pure

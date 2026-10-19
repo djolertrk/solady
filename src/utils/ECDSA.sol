@@ -248,6 +248,7 @@ library ECDSA {
     }
 
     /// @dev The 32 bytes of `b` at `offset`.
+    /// @custom:solar-inline
     function _readBytes32(bytes memory b, uint256 offset)
         private
         pure

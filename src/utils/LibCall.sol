@@ -104,6 +104,7 @@ library LibCall {
     }
 
     /// @dev Writes `value` into `b` at `offset`.
+    /// @custom:solar-inline
     function _writeBytes4(bytes memory b, uint256 offset, bytes4 value) private pure {
         for (uint256 k; k < 4; ++k) {
             b[offset + k] = value[k];

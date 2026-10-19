@@ -252,6 +252,7 @@ library Base64 {
     }
 
     /// @dev The 24 bytes of `b` at `offset`.
+    /// @custom:solar-inline
     function _readBytes24(bytes memory b, uint256 offset)
         private
         pure
@@ -263,6 +264,7 @@ library Base64 {
     }
 
     /// @dev Writes `value` into `b` at `offset`.
+    /// @custom:solar-inline
     function _writeBytes32(bytes memory b, uint256 offset, bytes32 value) private pure {
         for (uint256 k; k < 32; ++k) {
             b[offset + k] = value[k];

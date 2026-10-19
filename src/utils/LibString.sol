@@ -839,9 +839,11 @@ library LibString {
             }
             return string(expanded);
         }
+        uint256 width = n.length < 32 ? n.length : 32;
+        bytes32 head = _readBytesN(n, 0, width);
         uint256 count;
         for (uint256 i; i + n.length <= s.length;) {
-            if (_matchAt(s, n, i)) {
+            if (_matchAt(s, i, n, head, width)) {
                 ++count;
                 i += n.length;
             } else {
@@ -853,7 +855,7 @@ library LibString {
         uint256 copied;
         uint256 o;
         while (at + n.length <= s.length) {
-            if (_matchAt(s, n, at)) {
+            if (_matchAt(s, at, n, head, width)) {
                 _copyInto(out, o, s, copied, at - copied);
                 o += at - copied;
                 _copyInto(out, o, r, 0, r.length);
@@ -868,16 +870,19 @@ library LibString {
         return string(out);
     }
 
-    /// @dev Whether `needle` occurs in `subject` at `at`.
-    function _matchAt(bytes memory subject, bytes memory needle, uint256 at)
+    /// @dev Whether `needle` occurs in `subject` at `at`, where `at + needle.length`
+    /// fits the subject. `head` is the needle's first `width` bytes, `width`
+    /// being its length up to a word: the word of the subject at `at` decides a
+    /// needle of up to a word, and a longer one is confirmed by its hash, as the
+    /// assembly does.
+    /// @custom:solar-inline
+    function _matchAt(bytes memory subject, uint256 at, bytes memory needle, bytes32 head, uint256 width)
         private
         pure
         returns (bool)
     {
-        for (uint256 i; i < needle.length; ++i) {
-            if (subject[at + i] != needle[i]) return false;
-        }
-        return true;
+        if (_readBytesN(subject, at, width) != head) return false;
+        return needle.length <= 32 || _keccak256Range(subject, at, needle.length) == keccak256(needle);
     }
 
     /// @dev The byte offsets of each non-overlapping occurrence of `needle`.
@@ -894,9 +899,11 @@ library LibString {
             for (uint256 i; i <= s.length; ++i) every[i] = i;
             return every;
         }
+        uint256 width = n.length < 32 ? n.length : 32;
+        bytes32 head = _readBytesN(n, 0, width);
         uint256 count;
         for (uint256 i; i + n.length <= s.length;) {
-            if (_matchAt(s, n, i)) {
+            if (_matchAt(s, i, n, head, width)) {
                 ++count;
                 i += n.length;
             } else {
@@ -906,7 +913,7 @@ library LibString {
         uint256[] memory found = new uint256[](count);
         count = 0;
         for (uint256 i; i + n.length <= s.length;) {
-            if (_matchAt(s, n, i)) {
+            if (_matchAt(s, i, n, head, width)) {
                 found[count++] = i;
                 i += n.length;
             } else {
@@ -929,8 +936,10 @@ library LibString {
         if (n.length == 0) return from > s.length ? s.length : from;
         if (n.length > s.length) return NOT_FOUND;
         uint256 last = s.length - n.length;
+        uint256 width = n.length < 32 ? n.length : 32;
+        bytes32 head = _readBytesN(n, 0, width);
         for (uint256 i = from; i <= last; ++i) {
-            if (_matchAt(s, n, i)) return i;
+            if (_matchAt(s, i, n, head, width)) return i;
         }
         return NOT_FOUND;
     }
@@ -947,9 +956,11 @@ library LibString {
         if (n.length > s.length) return NOT_FOUND;
         uint256 last = s.length - n.length;
         if (from > last) from = last;
+        uint256 width = n.length < 32 ? n.length : 32;
+        bytes32 head = _readBytesN(n, 0, width);
         for (uint256 i = from + 1; i != 0;) {
             --i;
-            if (_matchAt(s, n, i)) return i;
+            if (_matchAt(s, i, n, head, width)) return i;
         }
         return NOT_FOUND;
     }
@@ -1228,6 +1239,7 @@ library LibString {
     }
 
     /// @dev The 16 bytes of `b` at `offset`.
+    /// @custom:solar-inline
     function _readBytes16(bytes memory b, uint256 offset)
         private
         pure
@@ -1239,6 +1251,7 @@ library LibString {
     }
 
     /// @dev The 32 bytes of `b` at `offset`.
+    /// @custom:solar-inline
     function _readBytes32(bytes memory b, uint256 offset)
         private
         pure
@@ -1250,6 +1263,7 @@ library LibString {
     }
 
     /// @dev Writes `value` into `b` at `offset`.
+    /// @custom:solar-inline
     function _writeBytes32(bytes memory b, uint256 offset, bytes32 value) private pure {
         for (uint256 k; k < 32; ++k) {
             b[offset + k] = value[k];
@@ -1257,6 +1271,7 @@ library LibString {
     }
 
     /// @dev Writes `value` into `b` at `offset`.
+    /// @custom:solar-inline
     function _writeBytes8(bytes memory b, uint256 offset, bytes8 value) private pure {
         for (uint256 k; k < 8; ++k) {
             b[offset + k] = value[k];
@@ -1284,6 +1299,7 @@ library LibString {
     }
 
     /// @dev The leading `count` bytes of `b` from `offset`, at most a word, left-aligned.
+    /// @custom:solar-inline
     function _readBytesN(bytes memory b, uint256 offset, uint256 count)
         private
         pure
