@@ -1339,10 +1339,8 @@ library LibString {
     function _packOne(string memory value) private pure returns (bytes32 result) {
         bytes memory input = bytes(value);
         if (input.length == 0 || input.length > 31) return 0;
-        result = bytes32(input.length << 248);
-        for (uint256 i; i < input.length; ++i) {
-            result |= bytes32(uint256(uint8(input[i])) << ((30 - i) * 8));
-        }
+        // The length byte, then the contents in the rest of the word.
+        result = bytes32(input.length << 248) | (_readBytesN(input, 0, input.length) >> 8);
     }
 
     /// @dev Reconstructs a string produced by `_packOne`.
@@ -1350,7 +1348,7 @@ library LibString {
         uint256 n = uint8(packed[0]);
         if (n > 31) n = 31;
         bytes memory out = new bytes(n);
-        for (uint256 i; i < n; ++i) out[i] = packed[i + 1];
+        _writeBytesN(out, 0, packed << 8, n);
         return string(out);
     }
 
@@ -1361,14 +1359,10 @@ library LibString {
         bytes memory y = bytes(b);
         uint256 total = x.length + y.length;
         if (total == 0 || total > 30) return 0;
-        result = bytes32(x.length << 248);
-        for (uint256 i; i < x.length; ++i) {
-            result |= bytes32(uint256(uint8(x[i])) << ((30 - i) * 8));
-        }
-        result |= bytes32(y.length << ((30 - x.length) * 8));
-        for (uint256 i; i < y.length; ++i) {
-            result |= bytes32(uint256(uint8(y[i])) << ((29 - x.length - i) * 8));
-        }
+        // Each length byte, then its string's contents.
+        result = bytes32(x.length << 248) | (_readBytesN(x, 0, x.length) >> 8)
+            | bytes32(y.length << ((30 - x.length) * 8))
+            | (_readBytesN(y, 0, y.length) >> ((x.length + 2) * 8));
     }
 
     /// @dev Reconstructs two strings produced by `_packTwo`.
@@ -1380,11 +1374,11 @@ library LibString {
         uint256 aLength = uint8(packed[0]);
         if (aLength > 30) aLength = 30;
         bytes memory a = new bytes(aLength);
-        for (uint256 i; i < aLength; ++i) a[i] = packed[i + 1];
+        _writeBytesN(a, 0, packed << 8, aLength);
         uint256 bLength = uint8(packed[aLength + 1]);
         if (bLength > 30 - aLength) bLength = 30 - aLength;
         bytes memory b = new bytes(bLength);
-        for (uint256 i; i < bLength; ++i) b[i] = packed[aLength + i + 2];
+        _writeBytesN(b, 0, packed << ((aLength + 2) * 8), bLength);
         return (string(a), string(b));
     }
 
