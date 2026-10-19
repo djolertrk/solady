@@ -94,18 +94,60 @@ def walk(node):
             yield from walk(value)
 
 
+TRUSTED_TAG = "@custom:solar-trusted"
+
+
+def is_trusted(node):
+    """Whether a declaration's NatSpec has a line starting with the trusted tag."""
+    documentation = node.get("documentation")
+    text = documentation.get("text", "") if isinstance(documentation, dict) else ""
+    return any(line.strip().startswith(TRUSTED_TAG) for line in text.splitlines())
+
+
+def unsafe_nodes(node):
+    """Yields assembly and unchecked blocks outside declarations tagged trusted."""
+    if isinstance(node, dict):
+        if node.get("nodeType") in {
+            "ContractDefinition",
+            "FunctionDefinition",
+            "ModifierDefinition",
+        } and is_trusted(node):
+            return
+        if node.get("nodeType") in {"InlineAssembly", "UncheckedBlock"}:
+            yield node
+        for value in node.values():
+            yield from unsafe_nodes(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from unsafe_nodes(value)
+
+
 def safety_violations(output):
-    # The compiler-owned modules are the trusted primitive layer: their bodies
-    # spell operations that have no other Solidity spelling, and the compiler
-    # lowers them directly rather than compiling the body. They are recorded
-    # in the audit by hash instead of being held to the port's policy.
+    # The port has no compiler-owned library. Capabilities with no Solidity
+    # spelling (shrinking an array in place, a raw revert, creating code from
+    # bytes, arbitrary storage slots) stay in small declarations tagged
+    # `@custom:solar-trusted`, which Solar's `@custom:solar-safe` profile also
+    # recognizes. Every other line of every safe source and dependency is held
+    # to the policy.
     return [
         (path, node["nodeType"])
         for path, source in output["sources"].items()
         if not path.startswith(CORE_PREFIX)
-        for node in walk(source["ast"])
-        if node.get("nodeType") in {"InlineAssembly", "UncheckedBlock"}
+        for node in unsafe_nodes(source["ast"])
     ]
+
+
+def trusted_declarations(output):
+    """The `@custom:solar-trusted` declarations of every safe source, for the audit."""
+    found = []
+    for path, source in output["sources"].items():
+        for node in walk(source["ast"]):
+            if node.get("nodeType") == "ContractDefinition":
+                for item in [node, *node.get("nodes", [])]:
+                    if is_trusted(item):
+                        name = node["name"] + ("" if item is node else "." + item.get("name", ""))
+                        found.append(f"{path}:{name}")
+    return sorted(set(found))
 
 
 def core_sources(core_dir):
@@ -410,7 +452,8 @@ def prepare(
     audit = {
         "archive": str(ARCHIVE.relative_to(REPO)),
         "archive_sha256": digest(ARCHIVE.read_bytes()),
-        "policy": "no InlineAssembly or UncheckedBlock in any safe source or dependency; compiler-owned solar:core modules are the trusted primitive layer and are exempt",
+        "policy": "no InlineAssembly or UncheckedBlock in any safe source or dependency outside declarations tagged @custom:solar-trusted",
+        "trusted_declarations": trusted_declarations(safe_ast),
         "core_modules": {
             p: digest(v["content"].encode()) for p, v in safe.items() if p.startswith(CORE_PREFIX)
         },

@@ -84,6 +84,46 @@ class SafetyAuditTests(unittest.TestCase):
             ],
         )
 
+    def test_trusted_declarations_may_hold_assembly(self):
+        trusted = {"nodeType": "StructuredDocumentation", "text": "@dev Shrinks.\n @custom:solar-trusted"}
+        output = {
+            "sources": {
+                "src/Lib.sol": {
+                    "ast": {
+                        "nodeType": "SourceUnit",
+                        "nodes": [
+                            {
+                                "nodeType": "ContractDefinition",
+                                "name": "Lib",
+                                "nodes": [
+                                    {
+                                        "nodeType": "FunctionDefinition",
+                                        "name": "_truncate",
+                                        "documentation": trusted,
+                                        "body": {"statements": [{"nodeType": "InlineAssembly"}]},
+                                    },
+                                    {
+                                        "nodeType": "FunctionDefinition",
+                                        "name": "f",
+                                        "body": {"statements": [{"nodeType": "UncheckedBlock"}]},
+                                    },
+                                ],
+                            }
+                        ],
+                    }
+                }
+            }
+        }
+        self.assertEqual(
+            benchmark.safety_violations(output), [("src/Lib.sol", "UncheckedBlock")]
+        )
+        self.assertEqual(benchmark.trusted_declarations(output), ["src/Lib.sol:Lib._truncate"])
+
+    def test_a_mention_of_the_tag_is_not_the_tag(self):
+        prose = {"nodeType": "StructuredDocumentation", "text": "Not `@custom:solar-trusted` here."}
+        node = {"nodeType": "FunctionDefinition", "documentation": prose}
+        self.assertFalse(benchmark.is_trusted(node))
+
     def test_comments_do_not_create_false_violations(self):
         output = {
             "sources": {
