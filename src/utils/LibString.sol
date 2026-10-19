@@ -1035,52 +1035,118 @@ library LibString {
         returns (string memory)
     {
         bytes memory out = new bytes(byteCount * 2);
-        uint256 i = byteCount;
-        while (i != 0) {
-            --i;
-            out[i * 2 + 1] = _DIGITS[value & 15];
-            value >>= 4;
-            out[i * 2] = _DIGITS[value & 15];
-            value >>= 4;
-        }
-        if (value != 0) revert HexLengthInsufficient();
+        _hexInto(out, 0, value, byteCount);
         return string(out);
     }
 
     /// @dev `_toHexStringNoPrefix(value, byteCount)` after `0x`.
     function _toHexString(uint256 value, uint256 byteCount) private pure returns (string memory) {
-        return string.concat("0x", _toHexStringNoPrefix(value, byteCount));
+        bytes memory out = new bytes(byteCount * 2 + 2);
+        (out[0], out[1]) = ("0", "x");
+        _hexInto(out, 2, value, byteCount);
+        return string(out);
     }
 
     /// @dev `value` as lowercase hexadecimal in its fewest whole bytes, at
     /// least one, without a prefix.
     function _toHexStringNoPrefix(uint256 value) private pure returns (string memory) {
-        uint256 n = 1;
-        for (uint256 x = value; x > 255; x >>= 8) ++n;
-        return _toHexStringNoPrefix(value, n);
+        return _toHexStringNoPrefix(value, _byteLength(value));
     }
 
     /// @dev `_toHexStringNoPrefix(value)` after `0x`.
     function _toHexString(uint256 value) private pure returns (string memory) {
-        return string.concat("0x", _toHexStringNoPrefix(value));
+        return _toHexString(value, _byteLength(value));
+    }
+
+    /// @dev The fewest whole bytes that hold `value`, at least one.
+    function _byteLength(uint256 value) private pure returns (uint256) {
+        return (_nibbleLength(value) + 1) >> 1;
+    }
+
+    /// @dev The fewest hexadecimal digits that spell `value`, at least one,
+    /// found by halving the remaining width.
+    function _nibbleLength(uint256 value) private pure returns (uint256 n) {
+        n = 1;
+        if (value >> 128 != 0) {
+            value >>= 128;
+            n += 32;
+        }
+        if (value >> 64 != 0) {
+            value >>= 64;
+            n += 16;
+        }
+        if (value >> 32 != 0) {
+            value >>= 32;
+            n += 8;
+        }
+        if (value >> 16 != 0) {
+            value >>= 16;
+            n += 4;
+        }
+        if (value >> 8 != 0) {
+            value >>= 8;
+            n += 2;
+        }
+        if (value >> 4 != 0) ++n;
+    }
+
+    /// @dev Writes the low `byteCount` bytes of `value` into `out` at `offset`
+    /// as `2 * byteCount` lowercase hexadecimal digits. Reverts with
+    /// `HexLengthInsufficient()` when `value` does not fit in them. Sixteen
+    /// bytes make a word of digits; bytes past the word's are zeros.
+    function _hexInto(bytes memory out, uint256 offset, uint256 value, uint256 byteCount)
+        private
+        pure
+    {
+        if (byteCount < 32 && value >> (8 * byteCount) != 0) revert HexLengthInsufficient();
+        uint256 o = offset;
+        for (; byteCount > 32; --byteCount) {
+            (out[o], out[o + 1]) = ("0", "0");
+            o += 2;
+        }
+        if (byteCount > 16) {
+            // The high bytes' digits are the last ones of their word.
+            uint256 high = byteCount - 16;
+            uint256 digits = uint256(_hexWord(value >> 128)) << (8 * (32 - 2 * high));
+            _writeBytesN(out, o, bytes32(digits), 2 * high);
+            _writeBytes32(out, o + 2 * high, _hexWord(value & type(uint128).max));
+        } else if (byteCount != 0) {
+            uint256 digits = uint256(_hexWord(value)) << (8 * (32 - 2 * byteCount));
+            _writeBytesN(out, o, bytes32(digits), 2 * byteCount);
+        }
     }
 
     /// @dev Minimal lowercase hexadecimal digits without a prefix.
     function _toMinimalHexStringNoPrefix(uint256 value) private pure returns (string memory) {
-        uint256 n = 1;
-        for (uint256 x = value; x > 15; x >>= 4) ++n;
+        uint256 n = _nibbleLength(value);
         bytes memory out = new bytes(n);
-        while (n != 0) {
-            --n;
-            out[n] = _DIGITS[value & 15];
-            value >>= 4;
-        }
+        _minimalHexInto(out, 0, value, n);
         return string(out);
     }
 
     /// @dev Minimal lowercase hexadecimal digits after `0x`.
     function _toMinimalHexString(uint256 value) private pure returns (string memory) {
-        return string.concat("0x", _toMinimalHexStringNoPrefix(value));
+        uint256 n = _nibbleLength(value);
+        bytes memory out = new bytes(n + 2);
+        (out[0], out[1]) = ("0", "x");
+        _minimalHexInto(out, 2, value, n);
+        return string(out);
+    }
+
+    /// @dev Writes the last `n` of the 64 digits of `value` into `out` at `offset`.
+    function _minimalHexInto(bytes memory out, uint256 offset, uint256 value, uint256 n)
+        private
+        pure
+    {
+        if (n > 32) {
+            uint256 high = n - 32;
+            uint256 digits = uint256(_hexWord(value >> 128)) << (8 * (32 - high));
+            _writeBytesN(out, offset, bytes32(digits), high);
+            _writeBytes32(out, offset + high, _hexWord(value & type(uint128).max));
+        } else {
+            uint256 digits = uint256(_hexWord(value & type(uint128).max)) << (8 * (32 - n));
+            _writeBytesN(out, offset, bytes32(digits), n);
+        }
     }
 
     /// @dev The digits of `data`, without a prefix.
@@ -1307,6 +1373,17 @@ library LibString {
     {
         for (uint256 k; k < count; ++k) {
             result |= bytes32(b[offset + k]) >> (8 * k);
+        }
+    }
+
+    /// @dev Writes the leading `count` bytes of `value`, at most a word, to `b` at `offset`.
+    /// @custom:solar-inline
+    function _writeBytesN(bytes memory b, uint256 offset, bytes32 value, uint256 count)
+        private
+        pure
+    {
+        for (uint256 k; k < count; ++k) {
+            b[offset + k] = value[k];
         }
     }
 }
