@@ -108,18 +108,23 @@ library MerkleProofLib {
         uint256 front;
         uint256 used;
         for (uint256 i; i < flags.length; ++i) {
+            // Each index is checked before it steps, so the step cannot wrap.
             if (front == back) return (false, 0);
-            bytes32 a = hashes[front++];
+            bytes32 a = hashes[front];
+            ++front;
             bytes32 b;
             if (flags[i]) {
                 if (front == back) return (false, 0);
-                b = hashes[front++];
+                b = hashes[front];
+                ++front;
             } else {
                 if (used == proof.length) return (false, 0);
-                b = proof[used++];
+                b = proof[used];
+                ++used;
             }
             if (a > b) (a, b) = (b, a);
-            hashes[back++] = keccak256(abi.encode(a, b));
+            hashes[back] = keccak256(abi.encode(a, b));
+            ++back;
         }
         return (used == proof.length, hashes[back - 1]);
     }
@@ -134,18 +139,23 @@ library MerkleProofLib {
         uint256 front;
         uint256 used;
         for (uint256 i; i < flags.length; ++i) {
+            // Each index is checked before it steps, so the step cannot wrap.
             if (front == back) return (false, 0);
-            bytes32 a = hashes[front++];
+            bytes32 a = hashes[front];
+            ++front;
             bytes32 b;
             if (flags[i]) {
                 if (front == back) return (false, 0);
-                b = hashes[front++];
+                b = hashes[front];
+                ++front;
             } else {
                 if (used == proof.length) return (false, 0);
-                b = proof[used++];
+                b = proof[used];
+                ++used;
             }
             if (a > b) (a, b) = (b, a);
-            hashes[back++] = keccak256(abi.encode(a, b));
+            hashes[back] = keccak256(abi.encode(a, b));
+            ++back;
         }
         return (used == proof.length, hashes[back - 1]);
     }
