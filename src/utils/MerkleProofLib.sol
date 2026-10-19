@@ -18,6 +18,7 @@ pragma solidity ^0.8.20;
 /// `bool`, so a flag word other than zero or one reverts where the assembly
 /// treats it as true, and `emptyProof`, `emptyLeaves` and `emptyFlags` are left
 /// out, since no Solidity expression is an empty calldata array.
+/// @custom:solar-safe memory arithmetic
 library MerkleProofLib {
     /// @dev Returns whether `leaf` exists in the Merkle tree with `root`, given `proof`.
     function verify(bytes32[] memory proof, bytes32 root, bytes32 leaf)

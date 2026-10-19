@@ -20,6 +20,7 @@ pragma solidity ^0.8.20;
 ///   with checked arithmetic. Only an override that breaks the invariant that
 ///   balances sum to the total supply can make one wrap, which panics here
 ///   where the assembly wraps.
+/// @custom:solar-safe memory arithmetic
 abstract contract ERC20 {
     /// @dev The total supply has overflowed.
     error TotalSupplyOverflow();
