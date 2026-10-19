@@ -58,10 +58,27 @@ library LibBit {
     }
 
     function ffs(uint256 x) internal pure returns (uint256 r) {
-        // Isolating the lowest set bit leaves a power of two whose highest set
-        // bit is the same bit.
         if (x == 0) return 256;
-        return fls(x & ~(x - 1));
+        // Isolate the lowest set bit; `x` is not zero, so `~x + 1` cannot wrap.
+        x &= ~x + 1;
+        // The upper three bits of the index come from a De Bruijn-like lookup of
+        // the product's top six bits (credit to adhusson,
+        // https://blog.adhusson.com/cheap-find-first-set-evm/), the lower five
+        // from a De Bruijn lookup of the bit within its 32-bit lane.
+        r = (
+            (
+                uint256(0x8040405543005266443200005020610674053026020000107506200176117077)
+                    << (
+                        (_rawMul(x, 0xb6db6db6ddddddddd34d34d349249249210842108c6318c639ce739cffffffff) >> 250)
+                            << 2
+                    )
+            ) >> 252
+        ) << 5;
+        r |= uint8(
+            bytes32(0x001f0d1e100c1d070f090b19131c1706010e11080a1a141802121b1503160405)[
+                (0xd76453e0 / (x >> r)) & 0x1f
+            ]
+        );
     }
 
     function popCount(uint256 x) internal pure returns (uint256 c) {
