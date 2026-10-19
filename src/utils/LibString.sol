@@ -724,7 +724,22 @@ library LibString {
         bytes memory out = new bytes(input.length * 6 + 2);
         uint256 o;
         if (addDoubleQuotes) out[o++] = '"';
+        // Bytes before `bytewise` belong to a word with a byte to replace.
+        uint256 bytewise;
         for (uint256 i; i < input.length; ++i) {
+            // A word without `"`, `\` or a control byte copies whole; `out` has
+            // room, as every input byte before it took at most six.
+            if (i >= bytewise) {
+                while (input.length - i >= 32) {
+                    uint256 w = uint256(_readBytes32(input, i));
+                    if (_jsonSpecials(w) != 0) break;
+                    _writeBytes32(out, o, bytes32(w));
+                    o += 32;
+                    i += 32;
+                }
+                if (i == input.length) break;
+                bytewise = i + 32;
+            }
             bytes1 c = input[i];
             if (c == '"' || c == "\\") {
                 out[o++] = "\\";
@@ -764,7 +779,22 @@ library LibString {
         bytes memory input = bytes(s);
         bytes memory out = new bytes(input.length * 6);
         uint256 o;
+        // Bytes before `bytewise` belong to a word with a byte to replace.
+        uint256 bytewise;
         for (uint256 i; i < input.length; ++i) {
+            // A word without `"`, `&`, `'`, `<` or `>` copies whole; `out` has
+            // room, as every input byte before it took at most six.
+            if (i >= bytewise) {
+                while (input.length - i >= 32) {
+                    uint256 w = uint256(_readBytes32(input, i));
+                    if (_htmlSpecials(w) != 0) break;
+                    _writeBytes32(out, o, bytes32(w));
+                    o += 32;
+                    i += 32;
+                }
+                if (i == input.length) break;
+                bytewise = i + 32;
+            }
             bytes1 c = input[i];
             if (c == '"') {
                 o = _put(out, o, "&quot;", 6);
@@ -786,6 +816,7 @@ library LibString {
 
     /// @dev Writes the leading `count` bytes of `text` into `out` at `o` and
     /// returns the offset after them.
+    /// @custom:solar-inline
     function _put(bytes memory out, uint256 o, bytes32 text, uint256 count)
         private
         pure
@@ -975,6 +1006,23 @@ library LibString {
         return ~(((z & LANES_7F) + LANES_7F) | z | LANES_7F);
     }
 
+    /// @dev Nonzero when a byte of `w` is one `escapeHTML` replaces. `&` and
+    /// `'` differ in the low bit, `<` and `>` in the next one.
+    /// @custom:solar-inline
+    function _htmlSpecials(uint256 w) private pure returns (uint256) {
+        return _zeroBytes(w ^ (0x22 * LANES_01)) | _zeroBytes((w | LANES_01) ^ (0x27 * LANES_01))
+            | _zeroBytes((w | (0x02 * LANES_01)) ^ (0x3e * LANES_01));
+    }
+
+    /// @dev Nonzero when a byte of `w` is one `escapeJSON` escapes: `"`, `\`,
+    /// or below 0x20, which neither has its top bit set nor reaches it by
+    /// adding 0x60 to its low seven bits.
+    /// @custom:solar-inline
+    function _jsonSpecials(uint256 w) private pure returns (uint256) {
+        return _zeroBytes(w ^ (0x22 * LANES_01)) | _zeroBytes(w ^ (0x5c * LANES_01))
+            | (~(((w & LANES_7F) + 0x60 * LANES_01) | w) & _HIGH_BITS);
+    }
+
     /// @dev The number of non-overlapping occurrences of `needle` in `subject`
     /// at offsets up to `last`, as `_find` takes them.
     function _count(bytes memory subject, uint256 last, bytes memory needle, bytes32 head)
@@ -1094,6 +1142,12 @@ library LibString {
         // One nibble per value of the top six bits, at four times that value.
         uint256 lengths = 0x6544333322222222222222222222222211111111111111111111111111111111;
         for (uint256 i; i < s.length; ++count) {
+            // A word of bytes below 0x80 is 32 runes of one byte each.
+            while (s.length - i >= 32 && uint256(_readBytes32(s, i)) & _HIGH_BITS == 0) {
+                count += 32;
+                i += 32;
+            }
+            if (i == s.length) break;
             i += (lengths >> (uint8(s[i]) & 0xfc)) & 15;
         }
     }
