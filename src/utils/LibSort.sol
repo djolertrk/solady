@@ -603,8 +603,14 @@ library LibSort {
     function _uniquifySorted(uint256[] memory a) private pure {
         if (a.length < 2) return;
         uint256 write = 1;
+        // The last kept element, which `a[write - 1]` holds.
+        uint256 last = a[0];
         for (uint256 read = 1; read < a.length; ++read) {
-            if (a[read] != a[write - 1]) a[write++] = a[read];
+            uint256 x = a[read];
+            if (x != last) {
+                a[write++] = x;
+                last = x;
+            }
         }
         _truncate(a, write);
     }
@@ -691,12 +697,16 @@ library LibSort {
         _sort(keys, values, 0, n);
         uint256 kept;
         uint256 sum = values[0];
+        // The last kept key, which `keys[kept]` holds.
+        uint256 last = keys[0];
         for (uint256 i = 1; i < keys.length; ++i) {
-            if (keys[i] == keys[kept]) {
+            uint256 key = keys[i];
+            if (key == last) {
                 sum += values[i];
             } else {
                 values[kept] = sum;
-                keys[++kept] = keys[i];
+                keys[++kept] = key;
+                last = key;
                 sum = values[i];
             }
         }
@@ -872,8 +882,14 @@ library LibSort {
     function _uniquifySorted(int256[] memory a) private pure {
         if (a.length < 2) return;
         uint256 write = 1;
+        // The last kept element, which `a[write - 1]` holds.
+        int256 last = a[0];
         for (uint256 read = 1; read < a.length; ++read) {
-            if (a[read] != a[write - 1]) a[write++] = a[read];
+            int256 x = a[read];
+            if (x != last) {
+                a[write++] = x;
+                last = x;
+            }
         }
         _truncate(a, write);
     }
@@ -960,12 +976,16 @@ library LibSort {
         _sort(keys, values, 0, n);
         uint256 kept;
         uint256 sum = values[0];
+        // The last kept key, which `keys[kept]` holds.
+        int256 last = keys[0];
         for (uint256 i = 1; i < keys.length; ++i) {
-            if (keys[i] == keys[kept]) {
+            int256 key = keys[i];
+            if (key == last) {
                 sum += values[i];
             } else {
                 values[kept] = sum;
-                keys[++kept] = keys[i];
+                keys[++kept] = key;
+                last = key;
                 sum = values[i];
             }
         }
@@ -1125,8 +1145,14 @@ library LibSort {
     function _uniquifySorted(address[] memory a) private pure {
         if (a.length < 2) return;
         uint256 write = 1;
+        // The last kept element, which `a[write - 1]` holds.
+        address last = a[0];
         for (uint256 read = 1; read < a.length; ++read) {
-            if (a[read] != a[write - 1]) a[write++] = a[read];
+            address x = a[read];
+            if (x != last) {
+                a[write++] = x;
+                last = x;
+            }
         }
         _truncate(a, write);
     }
@@ -1213,12 +1239,16 @@ library LibSort {
         _sort(keys, values, 0, n);
         uint256 kept;
         uint256 sum = values[0];
+        // The last kept key, which `keys[kept]` holds.
+        address last = keys[0];
         for (uint256 i = 1; i < keys.length; ++i) {
-            if (keys[i] == keys[kept]) {
+            address key = keys[i];
+            if (key == last) {
                 sum += values[i];
             } else {
                 values[kept] = sum;
-                keys[++kept] = keys[i];
+                keys[++kept] = key;
+                last = key;
                 sum = values[i];
             }
         }
@@ -1392,8 +1422,14 @@ library LibSort {
     function _uniquifySorted(bytes32[] memory a) private pure {
         if (a.length < 2) return;
         uint256 write = 1;
+        // The last kept element, which `a[write - 1]` holds.
+        bytes32 last = a[0];
         for (uint256 read = 1; read < a.length; ++read) {
-            if (a[read] != a[write - 1]) a[write++] = a[read];
+            bytes32 x = a[read];
+            if (x != last) {
+                a[write++] = x;
+                last = x;
+            }
         }
         _truncate(a, write);
     }
@@ -1480,12 +1516,16 @@ library LibSort {
         _sort(keys, values, 0, n);
         uint256 kept;
         uint256 sum = values[0];
+        // The last kept key, which `keys[kept]` holds.
+        bytes32 last = keys[0];
         for (uint256 i = 1; i < keys.length; ++i) {
-            if (keys[i] == keys[kept]) {
+            bytes32 key = keys[i];
+            if (key == last) {
                 sum += values[i];
             } else {
                 values[kept] = sum;
-                keys[++kept] = keys[i];
+                keys[++kept] = key;
+                last = key;
                 sum = values[i];
             }
         }
