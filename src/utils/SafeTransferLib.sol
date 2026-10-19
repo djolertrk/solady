@@ -1,14 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {Bytes} from "solar:core/Bytes.sol";
-import {Calls} from "solar:core/Calls.sol";
-import {Create} from "solar:core/Create.sol";
-
 /// @notice Checked Solidity implementation of the pinned Solady
 /// SafeTransferLib API.
-/// @dev A token's answer is read with `Calls.callBounded`, at most one word of
-/// it, so a token cannot make the caller copy more. A transfer or approval
+/// @dev A token's answer is read with the trusted `_callBounded`, at most one
+/// word of it, so a token cannot make the caller copy more. A transfer or approval
 /// succeeds when the call does and the token answers `true`, or answers
 /// nothing and has code, as upstream decides it. A forced transfer deploys a
 /// contract that self-destructs to its recipient, as the assembly does, and
@@ -20,6 +16,7 @@ import {Create} from "solar:core/Create.sol";
 /// where the assembly runs `INVALID` if its balance grew; and a DAI-style
 /// permit sends the nonce zero where the assembly sends its buffer's old word
 /// if the token's `nonces` call fails.
+/// @custom:solar-safe memory arithmetic
 library SafeTransferLib {
     /// @dev The ETH transfer has failed.
     error ETHTransferFailed();
@@ -130,7 +127,7 @@ library SafeTransferLib {
             // transfer is judged by the balance it adds, in case `SELFDESTRUCT`
             // no longer sends.
             uint256 balanceBefore = to.balance;
-            Calls.callBounded(ETH_MOVER, amount, gasleft(), abi.encode(to), 0);
+            _callBounded(ETH_MOVER, amount, gasleft(), abi.encode(to), 0);
             if (to.balance >= amount + balanceBefore) return address(0);
             assert(address(this).balance <= selfBalanceBefore);
         }
@@ -142,10 +139,10 @@ library SafeTransferLib {
             to,
             hex"33146025575b600160005260206000f35b3d3d3d3d47335af1601a5760003dfd"
         );
-        vault = Create.predict2(address(this), 0, keccak256(initcode));
-        (,, uint256 answered) = Calls.callBounded(vault, amount, gasleft(), "", 0);
+        vault = _createPredict2(address(this), 0, keccak256(initcode));
+        (,, uint256 answered) = _callBounded(vault, amount, gasleft(), "", 0);
         if (answered == 0) {
-            (bool created,) = Create.tryDeploy2(initcode, 0, 0);
+            (bool created,) = _createTryDeploy2(initcode, 0, 0);
             if (!created) revert ETHTransferFailed();
         }
     }
@@ -215,7 +212,7 @@ library SafeTransferLib {
     function safeApproveWithRetry(address token, address to, uint256 amount) internal {
         if (_accepted(token, abi.encodeWithSelector(0x095ea7b3, to, amount))) return;
         // The reset's answer is ignored, as upstream ignores it.
-        Calls.callBounded(token, 0, gasleft(), abi.encodeWithSelector(0x095ea7b3, to, 0), 0);
+        _callBounded(token, 0, gasleft(), abi.encodeWithSelector(0x095ea7b3, to, 0), 0);
         if (!_accepted(token, abi.encodeWithSelector(0x095ea7b3, to, amount))) {
             revert ApproveFailed();
         }
@@ -266,7 +263,7 @@ library SafeTransferLib {
         bool tokenHasCode = token.code.length != 0;
         // `transferFrom(address,address,uint160,address)`, with the whole
         // amount word, which Permit2 rejects past 160 bits.
-        (bool success,,) = Calls.callBounded(
+        (bool success,,) = _callBounded(
             PERMIT2, 0, gasleft(), abi.encodeWithSelector(0x36c78516, from, to, amount, token), 0
         );
         if (!(success && tokenHasCode && exists)) {
@@ -318,7 +315,7 @@ library SafeTransferLib {
         internal
     {
         // `approve(address,address,uint160,uint48)`.
-        (bool success,,) = Calls.callBounded(
+        (bool success,,) = _callBounded(
             PERMIT2,
             0,
             gasleft(),
@@ -331,7 +328,7 @@ library SafeTransferLib {
     /// @dev Revokes an approval for `token` and `spender` for `address(this)`.
     function permit2Lockdown(address token, address spender) internal {
         // `lockdown((address,address)[])` with the one pair.
-        (bool success,,) = Calls.callBounded(
+        (bool success,,) = _callBounded(
             PERMIT2,
             0,
             gasleft(),
@@ -357,13 +354,13 @@ library SafeTransferLib {
     ) private returns (bool success) {
         if (token == WETH9) return false;
         (bool answered, bytes memory answer, uint256 total) =
-            Calls.staticCallBounded(token, 5000, abi.encodeWithSelector(0x3644e515), 32);
-        if (!answered || total != 32 || Bytes.readBytes32(answer, 0) == 0) return false;
-        if (Bytes.readBytes32(answer, 0) == DAI_DOMAIN_SEPARATOR) {
+            _staticCallBounded(token, 5000, abi.encodeWithSelector(0x3644e515), 32);
+        if (!answered || total != 32 || _readBytes32(answer, 0) == 0) return false;
+        if (_readBytes32(answer, 0) == DAI_DOMAIN_SEPARATOR) {
             return _daiPermit(token, owner, spender, amount != 0, deadline, v, r, s);
         }
         // `IERC20Permit.permit`.
-        (success,,) = Calls.callBounded(
+        (success,,) = _callBounded(
             token,
             0,
             gasleft(),
@@ -380,11 +377,11 @@ library SafeTransferLib {
         view
         returns (uint256)
     {
-        (bool success, bytes memory answer, uint256 total) = Calls.staticCallBounded(
+        (bool success, bytes memory answer, uint256 total) = _staticCallBounded(
             PERMIT2, gasleft(), abi.encodeWithSelector(0x927da105, owner, token, spender), 96
         );
         if (!success || total < 96) revert Permit2Failed();
-        return uint256(Bytes.readBytes32(answer, 64));
+        return uint256(_readBytes32(answer, 64));
     }
 
     /// @dev `Permit2.permit` (PermitSingle variant): the details, with
@@ -399,7 +396,7 @@ library SafeTransferLib {
         uint256 deadline,
         bytes memory signature
     ) private returns (bool success) {
-        (success,,) = Calls.callBounded(
+        (success,,) = _callBounded(
             PERMIT2,
             0,
             gasleft(),
@@ -433,7 +430,7 @@ library SafeTransferLib {
     ) private returns (bool success) {
         (bool known, uint256 nonce) = _word(token, abi.encodeWithSelector(0x7ecebe00, owner));
         // `IDAIPermit.permit`.
-        (success,,) = Calls.callBounded(
+        (success,,) = _callBounded(
             token,
             0,
             gasleft(),
@@ -449,24 +446,24 @@ library SafeTransferLib {
     /// `amount` wei it is created with to `to` without calling it.
     function _forceSendETH(address to, uint256 amount) private {
         // PUSH20 to, SELFDESTRUCT
-        (bool created,) = Create.tryDeploy(abi.encodePacked(hex"73", to, hex"ff"), amount);
+        (bool created,) = _createTryDeploy(abi.encodePacked(hex"73", to, hex"ff"), amount);
         if (!created) revert ETHTransferFailed();
     }
 
     /// @dev Sends `amount` wei to `to` with `gasLimit` gas and no calldata,
     /// copying none of the answer.
     function _sendETH(address to, uint256 amount, uint256 gasLimit) private returns (bool success) {
-        (success,,) = Calls.callBounded(to, amount, gasLimit, "", 0);
+        (success,,) = _callBounded(to, amount, gasLimit, "", 0);
     }
 
     /// @dev Whether `token` accepted the call `payload`: the call succeeded and
     /// the token answered `true`, or answered nothing and has code.
     function _accepted(address token, bytes memory payload) private returns (bool) {
         (bool success, bytes memory answer, uint256 total) =
-            Calls.callBounded(token, 0, gasleft(), payload, 32);
+            _callBounded(token, 0, gasleft(), payload, 32);
         if (!success) return false;
         if (total == 0) return token.code.length != 0;
-        return answer.length == 32 && uint256(Bytes.readBytes32(answer, 0)) == 1;
+        return answer.length == 32 && uint256(_readBytes32(answer, 0)) == 1;
     }
 
     /// @dev The first word `token` answers the static call `payload` with, and
@@ -476,8 +473,102 @@ library SafeTransferLib {
         view
         returns (bool answered, uint256 word)
     {
-        (bool success, bytes memory answer,) = Calls.staticCallBounded(token, gasleft(), payload, 32);
+        (bool success, bytes memory answer,) = _staticCallBounded(token, gasleft(), payload, 32);
         if (!success || answer.length < 32) return (false, 0);
-        return (true, uint256(Bytes.readBytes32(answer, 0)));
+        return (true, uint256(_readBytes32(answer, 0)));
+    }
+
+    /// @dev The 32 bytes of `b` at `offset`.
+    function _readBytes32(bytes memory b, uint256 offset)
+        private
+        pure
+        returns (bytes32 result)
+    {
+        for (uint256 k; k < 32; ++k) {
+            result |= bytes32(b[offset + k]) >> (8 * k);
+        }
+    }
+
+    /// @dev Calls `target` with `payload`, `value` wei and `gasLimit` gas, and
+    /// copies at most `maxCopy` bytes of the response into a new buffer sized to
+    /// what it holds, allocated after the call. `totalSize` is how many bytes
+    /// there were.
+    /// @custom:solar-trusted
+    function _callBounded(
+        address target,
+        uint256 value,
+        uint256 gasLimit,
+        bytes memory payload,
+        uint256 maxCopy
+    ) private returns (bool success, bytes memory output, uint256 totalSize) {
+        assembly ("memory-safe") {
+            success := call(gasLimit, target, value, add(payload, 0x20), mload(payload), 0x00, 0x00)
+            totalSize := returndatasize()
+            let copied := totalSize
+            if gt(copied, maxCopy) { copied := maxCopy }
+            output := mload(0x40)
+            mstore(output, copied)
+            returndatacopy(add(output, 0x20), 0x00, copied)
+            mstore(0x40, and(add(add(output, 0x3f), copied), not(0x1f)))
+        }
+    }
+
+    /// @dev Static-calls `target` with `payload` and `gasLimit` gas, and copies
+    /// at most `maxCopy` bytes of the response into a new buffer, as
+    /// `callBounded` does.
+    /// @custom:solar-trusted
+    function _staticCallBounded(address target, uint256 gasLimit, bytes memory payload, uint256 maxCopy)
+        private
+        view
+        returns (bool success, bytes memory output, uint256 totalSize)
+    {
+        assembly ("memory-safe") {
+            success := staticcall(gasLimit, target, add(payload, 0x20), mload(payload), 0x00, 0x00)
+            totalSize := returndatasize()
+            let copied := totalSize
+            if gt(copied, maxCopy) { copied := maxCopy }
+            output := mload(0x40)
+            mstore(output, copied)
+            returndatacopy(add(output, 0x20), 0x00, copied)
+            mstore(0x40, and(add(add(output, 0x3f), copied), not(0x1f)))
+        }
+    }
+
+    /// @dev The address `deploy2` gives `deployer` for `salt` and initcode
+    /// hashing to `initcodeHash`. Computes only; deploys nothing.
+    function _createPredict2(address deployer, bytes32 salt, bytes32 initcodeHash)
+        private
+        pure
+        returns (address)
+    {
+        return address(
+            uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), deployer, salt, initcodeHash))))
+        );
+    }
+
+    /// @dev Like `deploy`, but a creation that returns no address is `false`
+    /// and the zero address, not a revert.
+    /// @custom:solar-trusted
+    function _createTryDeploy(bytes memory initcode, uint256 value)
+        private
+        returns (bool success, address deployed)
+    {
+        assembly ("memory-safe") {
+            deployed := create(value, add(initcode, 0x20), mload(initcode))
+        }
+        success = deployed != address(0);
+    }
+
+    /// @dev Like `deploy2`, but a creation that returns no address is `false`
+    /// and the zero address, not a revert.
+    /// @custom:solar-trusted
+    function _createTryDeploy2(bytes memory initcode, bytes32 salt, uint256 value)
+        private
+        returns (bool success, address deployed)
+    {
+        assembly ("memory-safe") {
+            deployed := create2(value, add(initcode, 0x20), mload(initcode), salt)
+        }
+        success = deployed != address(0);
     }
 }

@@ -1,21 +1,18 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {Calls} from "solar:core/Calls.sol";
-import {Code} from "solar:core/Code.sol";
-import {Create} from "solar:core/Create.sol";
-
 /// @notice Checked Solidity implementation of the pinned Solady SSTORE2 API.
 /// @dev A data contract holds `data` as its code after one STOP byte, so it
-/// cannot be called. Writing deploys it with `Create`; reading copies a range of
-/// it with `Code`, checked against the code's size, where the assembly copies
-/// past the end and trims. The creation code is `abi.encodePacked` of a fixed
+/// cannot be called. Writing deploys it with the trusted `_createDeploy`;
+/// reading copies a range of it with the trusted `_codeRead`, checked against
+/// the code's size, where the assembly copies past the end and trims. The creation code is `abi.encodePacked` of a fixed
 /// prefix and `data`, written where it is used, which this compiler lays out over
 /// the length word of `data` instead of copying it, as the assembly does. Two
 /// deliberate differences from the assembly: data too long for the two-byte
 /// length the creation code pushes fails with `DeploymentFailed()` instead of
 /// running out of gas, and reading an account without code fails with
 /// `Panic(0x11)` instead of running out of gas.
+/// @custom:solar-safe memory arithmetic
 library SSTORE2 {
     /// @dev The creation code of the CREATE3 proxy.
     bytes internal constant _CREATE3_PROXY_INITCODE = hex"67363d3d37363d34f03d5260086018f3";
@@ -29,7 +26,7 @@ library SSTORE2 {
 
     /// @dev Writes `data` into the bytecode of a storage contract and returns its address.
     function write(bytes memory data) internal returns (address pointer) {
-        return Create.deploy(
+        return _createDeploy(
             abi.encodePacked(hex"61", _codeSize(data), hex"80600a3d393df300", data), 0
         );
     }
@@ -40,7 +37,7 @@ library SSTORE2 {
         internal
         returns (address pointer)
     {
-        return Create.deploy2(
+        return _createDeploy2(
             abi.encodePacked(hex"61", _codeSize(data), hex"80600a3d393df300", data), salt, 0
         );
     }
@@ -52,10 +49,10 @@ library SSTORE2 {
         internal
         returns (address pointer)
     {
-        address proxy = Create.deploy2(_CREATE3_PROXY_INITCODE, salt, 0);
+        address proxy = _createDeploy2(_CREATE3_PROXY_INITCODE, salt, 0);
         pointer = _proxyDeployment(proxy);
         // The proxy creates a contract from its calldata and returns nothing.
-        (bool success,,) = Calls.callBounded(
+        (bool success,,) = _callBounded(
             proxy,
             0,
             gasleft(),
@@ -87,7 +84,7 @@ library SSTORE2 {
         pure
         returns (address predicted)
     {
-        return Create.predict2(deployer, salt, initCodeHash(data));
+        return _createPredict2(deployer, salt, initCodeHash(data));
     }
 
     /// @dev Equivalent to `predictDeterministicAddress(salt, address(this))`.
@@ -101,7 +98,7 @@ library SSTORE2 {
         pure
         returns (address pointer)
     {
-        return _proxyDeployment(Create.predict2(deployer, salt, CREATE3_PROXY_INITCODE_HASH));
+        return _proxyDeployment(_createPredict2(deployer, salt, CREATE3_PROXY_INITCODE_HASH));
     }
 
     /// @dev Equivalent to `read(pointer, 0, 2 ** 256 - 1)`.
@@ -127,7 +124,7 @@ library SSTORE2 {
         uint256 n = pointer.code.length - 1;
         if (end > n) end = n;
         if (start >= end) return "";
-        return Code.read(pointer, start + 1, end - start);
+        return _codeRead(pointer, start + 1, end - start);
     }
 
     /// @dev The code size the creation code of the storage contract for `data`
@@ -144,5 +141,100 @@ library SSTORE2 {
     /// CREATE, at nonce one.
     function _proxyDeployment(address proxy) private pure returns (address) {
         return address(uint160(uint256(keccak256(abi.encodePacked(hex"d694", proxy, hex"01")))));
+    }
+
+
+
+    /// @dev Calls `target` with `payload`, `value` wei and `gasLimit` gas, and
+    /// copies at most `maxCopy` bytes of the response into a new buffer sized to
+    /// what it holds, allocated after the call. `totalSize` is how many bytes
+    /// there were.
+    /// @custom:solar-trusted
+    function _callBounded(
+        address target,
+        uint256 value,
+        uint256 gasLimit,
+        bytes memory payload,
+        uint256 maxCopy
+    ) private returns (bool success, bytes memory output, uint256 totalSize) {
+        assembly ("memory-safe") {
+            success := call(gasLimit, target, value, add(payload, 0x20), mload(payload), 0x00, 0x00)
+            totalSize := returndatasize()
+            let copied := totalSize
+            if gt(copied, maxCopy) { copied := maxCopy }
+            output := mload(0x40)
+            mstore(output, copied)
+            returndatacopy(add(output, 0x20), 0x00, copied)
+            mstore(0x40, and(add(add(output, 0x3f), copied), not(0x1f)))
+        }
+    }
+
+    /// @dev Deploys `initcode` with `value` wei and returns the new address.
+    /// @custom:solar-trusted
+    function _createDeploy(bytes memory initcode, uint256 value) private returns (address deployed) {
+        assembly ("memory-safe") {
+            deployed := create(value, add(initcode, 0x20), mload(initcode))
+        }
+        if (deployed == address(0)) revert DeploymentFailed();
+    }
+
+    /// @dev Deploys `initcode` with `value` wei at the address `salt` selects.
+    /// @custom:solar-trusted
+    function _createDeploy2(bytes memory initcode, bytes32 salt, uint256 value)
+        private
+        returns (address deployed)
+    {
+        assembly ("memory-safe") {
+            deployed := create2(value, add(initcode, 0x20), mload(initcode), salt)
+        }
+        if (deployed == address(0)) revert DeploymentFailed();
+    }
+
+    /// @dev The address `deploy2` gives `deployer` for `salt` and initcode
+    /// hashing to `initcodeHash`. Computes only; deploys nothing.
+    function _createPredict2(address deployer, bytes32 salt, bytes32 initcodeHash)
+        private
+        pure
+        returns (address)
+    {
+        return address(
+            uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), deployer, salt, initcodeHash))))
+        );
+    }
+
+    /// @dev The `count` bytes of `target`'s code from `start`, as a new buffer.
+    function _codeRead(address target, uint256 start, uint256 count)
+        private
+        view
+        returns (bytes memory out)
+    {
+        out = new bytes(count);
+        _codeCopyInto(out, 0, target, start, count);
+    }
+
+
+    /// @dev Copies `count` bytes of `target`'s code from `start` into `dst`
+    /// at `dstOffset`.
+    /// @custom:solar-trusted
+    function _codeCopyInto(bytes memory dst, uint256 dstOffset, address target, uint256 start, uint256 count)
+        private
+        view
+    {
+        if (count > dst.length || dstOffset > dst.length - count) count = _outOfBounds();
+        uint256 size = target.code.length;
+        if (count > size || start > size - count) count = _outOfBounds();
+        assembly ("memory-safe") {
+            extcodecopy(target, add(add(dst, 0x20), dstOffset), start, count)
+        }
+    }
+
+
+
+
+
+    /// @dev Raises the `Panic(0x32)` an out-of-range index raises, which is the
+    /// portable spelling of a failed range check.
+    function _outOfBounds() private pure returns (uint256) {
+        return new uint256[](0)[0];
     }
 }

@@ -1,16 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {Bytes} from "solar:core/Bytes.sol";
-import {Calls} from "solar:core/Calls.sol";
-import {Revert} from "solar:core/Revert.sol";
-
 /// @notice Checked Solidity implementation of the pinned Solady LibCall API.
 /// @dev The contract calls copy the whole response, as `address.call` does,
-/// bubble a revert with `Revert.raw`, and reject an empty response from an
-/// account without code. The try calls copy at most `maxCopy` bytes of the
-/// response with `Calls.callBounded`, into a buffer allocated once its size is
-/// known, so a callee cannot make the caller copy more than it asked for.
+/// bubble a revert with the trusted `_revertRaw`, and reject an empty response
+/// from an account without code. The try calls copy at most `maxCopy` bytes of
+/// the response with the trusted `_callBounded`, into a buffer allocated once
+/// its size is known, so a callee cannot make the caller copy more than it
+/// asked for.
+/// @custom:solar-safe memory arithmetic
 library LibCall {
     /// @dev The target of the call is not a contract.
     error TargetIsNotContract();
@@ -70,7 +68,7 @@ library LibCall {
         bytes memory data
     ) internal returns (bool success, bool exceededMaxCopy, bytes memory result) {
         uint256 total;
-        (success, result, total) = Calls.callBounded(target, value, gasStipend, data, maxCopy);
+        (success, result, total) = _callBounded(target, value, gasStipend, data, maxCopy);
         exceededMaxCopy = total > maxCopy;
     }
 
@@ -83,25 +81,85 @@ library LibCall {
         returns (bool success, bool exceededMaxCopy, bytes memory result)
     {
         uint256 total;
-        (success, result, total) = Calls.staticCallBounded(target, gasStipend, data, maxCopy);
+        (success, result, total) = _staticCallBounded(target, gasStipend, data, maxCopy);
         exceededMaxCopy = total > maxCopy;
     }
 
     /// @dev Bubbles up the revert.
     function bubbleUpRevert(bytes memory revertReturnData) internal pure {
-        Revert.raw(revertReturnData);
+        _revertRaw(revertReturnData);
     }
 
     /// @dev In-place replaces the function selector of encoded contract call data.
     function setSelector(bytes4 newSelector, bytes memory data) internal pure {
         if (data.length < 4) revert DataTooShort();
-        Bytes.writeBytes4(data, 0, newSelector);
+        _writeBytes4(data, 0, newSelector);
     }
 
     /// @dev Bubbles a failed call's revert, and rejects an empty response from
     /// an account without code, which a call to it succeeds with.
     function _check(address target, bool success, bytes memory result) private view {
-        if (!success) Revert.raw(result);
+        if (!success) _revertRaw(result);
         if (result.length == 0 && target.code.length == 0) revert TargetIsNotContract();
+    }
+
+    /// @dev Writes `value` into `b` at `offset`.
+    function _writeBytes4(bytes memory b, uint256 offset, bytes4 value) private pure {
+        for (uint256 k; k < 4; ++k) {
+            b[offset + k] = value[k];
+        }
+    }
+
+    /// @dev Calls `target` with `payload`, `value` wei and `gasLimit` gas, and
+    /// copies at most `maxCopy` bytes of the response into a new buffer sized to
+    /// what it holds, allocated after the call. `totalSize` is how many bytes
+    /// there were.
+    /// @custom:solar-trusted
+    function _callBounded(
+        address target,
+        uint256 value,
+        uint256 gasLimit,
+        bytes memory payload,
+        uint256 maxCopy
+    ) private returns (bool success, bytes memory output, uint256 totalSize) {
+        assembly ("memory-safe") {
+            success := call(gasLimit, target, value, add(payload, 0x20), mload(payload), 0x00, 0x00)
+            totalSize := returndatasize()
+            let copied := totalSize
+            if gt(copied, maxCopy) { copied := maxCopy }
+            output := mload(0x40)
+            mstore(output, copied)
+            returndatacopy(add(output, 0x20), 0x00, copied)
+            mstore(0x40, and(add(add(output, 0x3f), copied), not(0x1f)))
+        }
+    }
+
+    /// @dev Static-calls `target` with `payload` and `gasLimit` gas, and copies
+    /// at most `maxCopy` bytes of the response into a new buffer, as
+    /// `callBounded` does.
+    /// @custom:solar-trusted
+    function _staticCallBounded(address target, uint256 gasLimit, bytes memory payload, uint256 maxCopy)
+        private
+        view
+        returns (bool success, bytes memory output, uint256 totalSize)
+    {
+        assembly ("memory-safe") {
+            success := staticcall(gasLimit, target, add(payload, 0x20), mload(payload), 0x00, 0x00)
+            totalSize := returndatasize()
+            let copied := totalSize
+            if gt(copied, maxCopy) { copied := maxCopy }
+            output := mload(0x40)
+            mstore(output, copied)
+            returndatacopy(add(output, 0x20), 0x00, copied)
+            mstore(0x40, and(add(add(output, 0x3f), copied), not(0x1f)))
+        }
+    }
+
+    /// @dev Reverts the current call with exactly `data`.
+    /// @custom:solar-trusted
+    function _revertRaw(bytes memory data) private pure {
+        assembly ("memory-safe") {
+            revert(add(data, 0x20), mload(data))
+        }
     }
 }

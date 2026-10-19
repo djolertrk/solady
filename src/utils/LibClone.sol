@@ -1,28 +1,22 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {Bytes} from "solar:core/Bytes.sol";
-import {Calls} from "solar:core/Calls.sol";
-import {Code} from "solar:core/Code.sol";
-import {Create} from "solar:core/Create.sol";
-import {Hash} from "solar:core/Hash.sol";
-import {Revert} from "solar:core/Revert.sol";
-
 /// @notice Checked Solidity implementation of the pinned Solady LibClone API:
 /// minimal proxies (plain, PUSH0 and with immutable arguments), minimal ERC1967
 /// and ERC1967I proxies, ERC1967 and ERC1967I beacon proxies, each with and
 /// without immutable arguments, and the ERC1967 bootstrap.
 /// @dev Each proxy's creation code is the bytes the assembly writes, assembled
 /// with `abi.encodePacked` around its implementation or beacon, and deployed
-/// with `Create`, which fails with the same `DeploymentFailed()`. A proxy's
-/// arguments follow its runtime code and are read back with `Code.read`,
-/// checked against the code's size. Three deliberate differences from the
+/// with the trusted `_createDeploy`, which fails with the same
+/// `DeploymentFailed()`. A proxy's arguments follow its runtime code and are
+/// read back with the trusted `_codeRead`, checked against the code's size. Three deliberate differences from the
 /// assembly: arguments too long for the two-byte runtime size fail with
 /// `DeploymentFailed()` where the assembly runs out of gas outside a
 /// deployment; reading the arguments of an account whose code is shorter than
 /// the proxy's fails with `Panic(0x11)` instead of running out of gas; and
 /// `argLoad` reads zeros past the end of `args`, where the assembly reads
 /// whatever memory follows, which the `argsOn` functions leave zeroed.
+/// @custom:solar-safe memory arithmetic
 library LibClone {
     /// @dev The keccak256 of deployed code for the clone proxy,
     /// with the implementation set to `address(0)`.
@@ -141,7 +135,7 @@ library LibClone {
     /// @dev Deploys a clone of `implementation`.
     /// Deposits `value` ETH during deployment.
     function clone(uint256 value, address implementation) internal returns (address instance) {
-        return Create.deploy(abi.encodePacked(_CLONE_HEAD, implementation, _CLONE_TAIL), value);
+        return _createDeploy(abi.encodePacked(_CLONE_HEAD, implementation, _CLONE_TAIL), value);
     }
 
     /// @dev Deploys a deterministic clone of `implementation` with `salt`.
@@ -158,7 +152,7 @@ library LibClone {
         internal
         returns (address instance)
     {
-        return Create.deploy2(
+        return _createDeploy2(
             abi.encodePacked(_CLONE_HEAD, implementation, _CLONE_TAIL), salt, value
         );
     }
@@ -196,7 +190,7 @@ library LibClone {
         internal
         returns (address instance)
     {
-        return Create.deploy(
+        return _createDeploy(
             abi.encodePacked(_PUSH0_CLONE_HEAD, implementation, _PUSH0_CLONE_TAIL), value
         );
     }
@@ -215,7 +209,7 @@ library LibClone {
         internal
         returns (address instance)
     {
-        return Create.deploy2(
+        return _createDeploy2(
             abi.encodePacked(_PUSH0_CLONE_HEAD, implementation, _PUSH0_CLONE_TAIL), salt, value
         );
     }
@@ -253,7 +247,7 @@ library LibClone {
         internal
         returns (address instance)
     {
-        return Create.deploy(
+        return _createDeploy(
             abi.encodePacked(
                 hex"61", _runtimeSize(0x2d, args), _CWIA_ARGS_HEAD, implementation, _CWIA_TAIL, args
             ),
@@ -278,7 +272,7 @@ library LibClone {
         bytes memory args,
         bytes32 salt
     ) internal returns (address instance) {
-        return Create.deploy2(
+        return _createDeploy2(
             abi.encodePacked(
                 hex"61", _runtimeSize(0x2d, args), _CWIA_ARGS_HEAD, implementation, _CWIA_TAIL, args
             ),
@@ -393,7 +387,7 @@ library LibClone {
         internal
         returns (address instance)
     {
-        return Create.deploy(abi.encodePacked(_ERC1967_HEAD, implementation, _ERC1967_TAIL), value);
+        return _createDeploy(abi.encodePacked(_ERC1967_HEAD, implementation, _ERC1967_TAIL), value);
     }
 
     /// @dev Deploys a deterministic minimal ERC1967 proxy with `implementation` and `salt`.
@@ -411,7 +405,7 @@ library LibClone {
         returns (address instance)
     {
         return
-            Create.deploy2(
+            _createDeploy2(
                 abi.encodePacked(_ERC1967_HEAD, implementation, _ERC1967_TAIL), salt, value
             );
     }
@@ -475,7 +469,7 @@ library LibClone {
         internal
         returns (address instance)
     {
-        return Create.deploy(
+        return _createDeploy(
             abi.encodePacked(
                 hex"61",
                 _runtimeSize(0x3d, args),
@@ -504,7 +498,7 @@ library LibClone {
         bytes memory args,
         bytes32 salt
     ) internal returns (address instance) {
-        return Create.deploy2(
+        return _createDeploy2(
             abi.encodePacked(
                 hex"61",
                 _runtimeSize(0x3d, args),
@@ -639,7 +633,7 @@ library LibClone {
         internal
         returns (address instance)
     {
-        return Create.deploy(
+        return _createDeploy(
             abi.encodePacked(_ERC1967I_HEAD, implementation, _ERC1967I_TAIL), value
         );
     }
@@ -658,7 +652,7 @@ library LibClone {
         internal
         returns (address instance)
     {
-        return Create.deploy2(
+        return _createDeploy2(
             abi.encodePacked(_ERC1967I_HEAD, implementation, _ERC1967I_TAIL), salt, value
         );
     }
@@ -721,7 +715,7 @@ library LibClone {
         internal
         returns (address instance)
     {
-        return Create.deploy(
+        return _createDeploy(
             abi.encodePacked(
                 hex"61",
                 _runtimeSize(0x52, args),
@@ -750,7 +744,7 @@ library LibClone {
         bytes memory args,
         bytes32 salt
     ) internal returns (address instance) {
-        return Create.deploy2(
+        return _createDeploy2(
             abi.encodePacked(
                 hex"61",
                 _runtimeSize(0x52, args),
@@ -883,14 +877,14 @@ library LibClone {
     function erc1967Bootstrap(address authorizedUpgrader) internal returns (address bootstrap) {
         bytes memory c = initCodeERC1967Bootstrap(authorizedUpgrader);
         bootstrap = predictDeterministicAddress(keccak256(c), bytes32(0), address(this));
-        if (bootstrap.code.length == 0) Create.deploy2(c, bytes32(0), 0);
+        if (bootstrap.code.length == 0) _createDeploy2(c, bytes32(0), 0);
     }
 
     /// @dev Replaces the implementation at `instance`.
     function bootstrapERC1967(address instance, address implementation) internal {
         // The bootstrap takes the new implementation as its whole calldata.
         (bool success,,) =
-            Calls.callBounded(instance, 0, gasleft(), abi.encodePacked(implementation), 0);
+            _callBounded(instance, 0, gasleft(), abi.encodePacked(implementation), 0);
         if (!success) revert DeploymentFailed();
     }
 
@@ -902,7 +896,7 @@ library LibClone {
         (bool success, bytes memory result) = instance.call(abi.encodePacked(implementation, data));
         if (!success) {
             if (result.length == 0) revert DeploymentFailed();
-            Revert.raw(result);
+            _revertRaw(result);
         }
     }
 
@@ -955,7 +949,7 @@ library LibClone {
         internal
         returns (address instance)
     {
-        return Create.deploy(
+        return _createDeploy(
             abi.encodePacked(_ERC1967_BEACON_PROXY_HEAD, beacon, _ERC1967_BEACON_PROXY_TAIL), value
         );
     }
@@ -974,7 +968,7 @@ library LibClone {
         internal
         returns (address instance)
     {
-        return Create.deploy2(
+        return _createDeploy2(
             abi.encodePacked(_ERC1967_BEACON_PROXY_HEAD, beacon, _ERC1967_BEACON_PROXY_TAIL),
             salt,
             value
@@ -1047,7 +1041,7 @@ library LibClone {
         internal
         returns (address instance)
     {
-        return Create.deploy(
+        return _createDeploy(
             abi.encodePacked(
                 hex"61",
                 _runtimeSize(0x52, args),
@@ -1076,7 +1070,7 @@ library LibClone {
         bytes memory args,
         bytes32 salt
     ) internal returns (address instance) {
-        return Create.deploy2(
+        return _createDeploy2(
             abi.encodePacked(
                 hex"61",
                 _runtimeSize(0x52, args),
@@ -1211,7 +1205,7 @@ library LibClone {
         internal
         returns (address instance)
     {
-        return Create.deploy(
+        return _createDeploy(
             abi.encodePacked(_ERC1967I_BEACON_PROXY_HEAD, beacon, _ERC1967I_BEACON_PROXY_TAIL),
             value
         );
@@ -1231,7 +1225,7 @@ library LibClone {
         internal
         returns (address instance)
     {
-        return Create.deploy2(
+        return _createDeploy2(
             abi.encodePacked(_ERC1967I_BEACON_PROXY_HEAD, beacon, _ERC1967I_BEACON_PROXY_TAIL),
             salt,
             value
@@ -1303,7 +1297,7 @@ library LibClone {
         internal
         returns (address instance)
     {
-        return Create.deploy(
+        return _createDeploy(
             abi.encodePacked(
                 hex"61",
                 _runtimeSize(0x57, args),
@@ -1332,7 +1326,7 @@ library LibClone {
         bytes memory args,
         bytes32 salt
     ) internal returns (address instance) {
-        return Create.deploy2(
+        return _createDeploy2(
             abi.encodePacked(
                 hex"61",
                 _runtimeSize(0x57, args),
@@ -1461,18 +1455,18 @@ library LibClone {
         // The first 0x57 bytes of the code, and zeros past its end.
         uint256 size = instance.code.length;
         bytes memory code = new bytes(0x57);
-        Code.copyInto(code, 0, instance, 0, size < 0x57 ? size : 0x57);
+        _codeCopyInto(code, 0, instance, 0, size < 0x57 ? size : 0x57);
         if (
-            Bytes.readBytes32(code, 0x2d) != 0
-                && (Hash.keccak256Range(code, 0, 0x52) == ERC1967I_CODE_HASH
+            _readBytes32(code, 0x2d) != 0
+                && (_keccak256Range(code, 0, 0x52) == ERC1967I_CODE_HASH
                     || keccak256(code) == ERC1967I_BEACON_PROXY_CODE_HASH)
         ) {
             // Called with one byte, an ERC1967I proxy answers its implementation. What it
             // answers replaces the start of the code, as the assembly reads it.
             (, bytes memory answer,) =
-                Calls.staticCallBounded(instance, gasleft(), Bytes.slice(code, 0, 1), 32);
-            Bytes.copyInto(code, 0, answer, 0, answer.length);
-            return address(uint160(uint256(Bytes.readBytes32(code, 0))));
+                _staticCallBounded(instance, gasleft(), _slice(code, 0, 1), 32);
+            _copyInto(code, 0, answer, 0, answer.length);
+            return address(uint160(uint256(_readBytes32(code, 0))));
         }
         // A minimal proxy holds its implementation at 0x0b, a clone with arguments at 0x0a,
         // and a PUSH0 proxy at 0x09: each is recognized by the hash of its code head with
@@ -1489,7 +1483,7 @@ library LibClone {
         pure
         returns (address predicted)
     {
-        return Create.predict2(deployer, salt, hash);
+        return _createPredict2(deployer, salt, hash);
     }
 
     /// @dev Requires that `salt` starts with either the zero address or `by`.
@@ -1503,11 +1497,11 @@ library LibClone {
     function argLoad(bytes memory args, uint256 offset) internal pure returns (bytes32 result) {
         if (offset >= args.length) return 0;
         uint256 available = args.length - offset;
-        if (available >= 32) return Bytes.readBytes32(args, offset);
+        if (available >= 32) return _readBytes32(args, offset);
         // The word runs past the end of `args`: the missing bytes read as zeros.
         bytes memory word = new bytes(32);
-        Bytes.copyInto(word, 0, args, offset, available);
-        return Bytes.readBytes32(word, 0);
+        _copyInto(word, 0, args, offset, available);
+        return _readBytes32(word, 0);
     }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -1529,9 +1523,9 @@ library LibClone {
         returns (bool alreadyDeployed, address instance)
     {
         instance = predictDeterministicAddress(keccak256(c), salt, address(this));
-        if (instance.code.length == 0) return (false, Create.deploy2(c, salt, value));
+        if (instance.code.length == 0) return (false, _createDeploy2(c, salt, value));
         if (value != 0) {
-            (bool sent,,) = Calls.callBounded(instance, value, gasleft(), "", 0);
+            (bool sent,,) = _callBounded(instance, value, gasleft(), "", 0);
             if (!sent) revert ETHTransferFailed();
         }
         return (true, instance);
@@ -1540,7 +1534,7 @@ library LibClone {
     /// @dev The arguments of the proxy `instance`, whose code before them is
     /// `base` bytes.
     function _argsOn(address instance, uint256 base) private view returns (bytes memory) {
-        return Code.read(instance, base, instance.code.length - base);
+        return _codeRead(instance, base, instance.code.length - base);
     }
 
     /// @dev The arguments of the proxy `instance` from `start`.
@@ -1551,7 +1545,7 @@ library LibClone {
     {
         uint256 n = instance.code.length - base;
         if (start >= n) return "";
-        return Code.read(instance, base + start, n - start);
+        return _codeRead(instance, base + start, n - start);
     }
 
     /// @dev The arguments of the proxy `instance` from `start` to `end`, which is
@@ -1565,7 +1559,7 @@ library LibClone {
         if (end > n) end = n;
         if (end > 0xffff) end = 0xffff;
         if (start >= end) return "";
-        return Code.read(instance, base + start, end - start);
+        return _codeRead(instance, base + start, end - start);
     }
 
     /// @dev The hash of the first `length` bytes of `code` with the 20 bytes at
@@ -1575,13 +1569,226 @@ library LibClone {
         pure
         returns (bytes32)
     {
-        bytes memory head = Bytes.slice(code, 0, length);
-        Bytes.fill(head, at, 20, 0x00);
+        bytes memory head = _slice(code, 0, length);
+        _fill(head, at, 20, 0x00);
         return keccak256(head);
     }
 
     /// @dev The address held in the 20 bytes of `code` at `at`.
     function _addressAt(bytes memory code, uint256 at) private pure returns (address) {
-        return address(Bytes.readBytes20(code, at));
+        return address(_readBytes20(code, at));
     }
+
+
+
+    /// @dev Copies `count` bytes from `src` at `srcOffset` to `dst` at
+    /// `dstOffset`. The ranges may overlap: the result is as if the source
+    /// were read in full before the first write.
+    function _copyInto(
+        bytes memory dst,
+        uint256 dstOffset,
+        bytes memory src,
+        uint256 srcOffset,
+        uint256 count
+    ) private pure {
+        // Both ranges are validated before anything is written, so a copy
+        // running downwards fails on its range the way one running upwards
+        // does, rather than on the arithmetic reaching its far end.
+        if (
+            count > dst.length || dstOffset > dst.length - count || count > src.length
+                || srcOffset > src.length - count
+        ) count = _outOfBounds();
+        if (dstOffset > srcOffset) {
+            for (uint256 k = count; k > 0; --k) {
+                dst[dstOffset + k - 1] = src[srcOffset + k - 1];
+            }
+        } else {
+            for (uint256 k; k < count; ++k) {
+                dst[dstOffset + k] = src[srcOffset + k];
+            }
+        }
+    }
+
+    /// @dev Sets `count` bytes of `dst` at `offset` to `value`.
+    function _fill(bytes memory dst, uint256 offset, uint256 count, bytes1 value) private pure {
+        for (uint256 k; k < count; ++k) {
+            dst[offset + k] = value;
+        }
+    }
+
+    /// @dev The 20 bytes of `b` at `offset`.
+    function _readBytes20(bytes memory b, uint256 offset)
+        private
+        pure
+        returns (bytes20 result)
+    {
+        for (uint256 k; k < 20; ++k) {
+            result |= bytes20(b[offset + k]) >> (8 * k);
+        }
+    }
+
+    /// @dev The 32 bytes of `b` at `offset`.
+    function _readBytes32(bytes memory b, uint256 offset)
+        private
+        pure
+        returns (bytes32 result)
+    {
+        for (uint256 k; k < 32; ++k) {
+            result |= bytes32(b[offset + k]) >> (8 * k);
+        }
+    }
+
+    /// @dev A copy of the `count` bytes of `b` at `offset`. Reverts with
+    /// `Panic(0x32)` unless they all lie inside `b`, before allocating.
+    /// Declared under the `solar-view` custom tag, the result reads the bytes
+    /// of `b` in place instead; the compiler then rejects every write to them
+    /// while the view is still read, so the program behaves as if the copy
+    /// were made.
+    function _slice(bytes memory b, uint256 offset, uint256 count)
+        private
+        pure
+        returns (bytes memory result)
+    {
+        if (offset > b.length || count > b.length - offset) offset = _outOfBounds();
+        result = new bytes(count);
+        for (uint256 k; k < count; ++k) {
+            result[k] = b[offset + k];
+        }
+    }
+
+    /// @dev The keccak-256 hash of the `count` bytes of `b` at `offset`.
+    function _keccak256Range(bytes memory b, uint256 offset, uint256 count)
+        private
+        pure
+        returns (bytes32)
+    {
+        if (count > b.length || offset > b.length - count) count = _outOfBounds();
+        bytes memory range = new bytes(count);
+        for (uint256 k; k < count; ++k) {
+            range[k] = b[offset + k];
+        }
+        return keccak256(range);
+    }
+
+    /// @dev Calls `target` with `payload`, `value` wei and `gasLimit` gas, and
+    /// copies at most `maxCopy` bytes of the response into a new buffer sized to
+    /// what it holds, allocated after the call. `totalSize` is how many bytes
+    /// there were.
+    /// @custom:solar-trusted
+    function _callBounded(
+        address target,
+        uint256 value,
+        uint256 gasLimit,
+        bytes memory payload,
+        uint256 maxCopy
+    ) private returns (bool success, bytes memory output, uint256 totalSize) {
+        assembly ("memory-safe") {
+            success := call(gasLimit, target, value, add(payload, 0x20), mload(payload), 0x00, 0x00)
+            totalSize := returndatasize()
+            let copied := totalSize
+            if gt(copied, maxCopy) { copied := maxCopy }
+            output := mload(0x40)
+            mstore(output, copied)
+            returndatacopy(add(output, 0x20), 0x00, copied)
+            mstore(0x40, and(add(add(output, 0x3f), copied), not(0x1f)))
+        }
+    }
+
+    /// @dev Static-calls `target` with `payload` and `gasLimit` gas, and copies
+    /// at most `maxCopy` bytes of the response into a new buffer, as
+    /// `callBounded` does.
+    /// @custom:solar-trusted
+    function _staticCallBounded(address target, uint256 gasLimit, bytes memory payload, uint256 maxCopy)
+        private
+        view
+        returns (bool success, bytes memory output, uint256 totalSize)
+    {
+        assembly ("memory-safe") {
+            success := staticcall(gasLimit, target, add(payload, 0x20), mload(payload), 0x00, 0x00)
+            totalSize := returndatasize()
+            let copied := totalSize
+            if gt(copied, maxCopy) { copied := maxCopy }
+            output := mload(0x40)
+            mstore(output, copied)
+            returndatacopy(add(output, 0x20), 0x00, copied)
+            mstore(0x40, and(add(add(output, 0x3f), copied), not(0x1f)))
+        }
+    }
+
+    /// @dev Deploys `initcode` with `value` wei and returns the new address.
+    /// @custom:solar-trusted
+    function _createDeploy(bytes memory initcode, uint256 value) private returns (address deployed) {
+        assembly ("memory-safe") {
+            deployed := create(value, add(initcode, 0x20), mload(initcode))
+        }
+        if (deployed == address(0)) revert DeploymentFailed();
+    }
+
+    /// @dev Deploys `initcode` with `value` wei at the address `salt` selects.
+    /// @custom:solar-trusted
+    function _createDeploy2(bytes memory initcode, bytes32 salt, uint256 value)
+        private
+        returns (address deployed)
+    {
+        assembly ("memory-safe") {
+            deployed := create2(value, add(initcode, 0x20), mload(initcode), salt)
+        }
+        if (deployed == address(0)) revert DeploymentFailed();
+    }
+
+    /// @dev The address `deploy2` gives `deployer` for `salt` and initcode
+    /// hashing to `initcodeHash`. Computes only; deploys nothing.
+    function _createPredict2(address deployer, bytes32 salt, bytes32 initcodeHash)
+        private
+        pure
+        returns (address)
+    {
+        return address(
+            uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), deployer, salt, initcodeHash))))
+        );
+    }
+
+    /// @dev Copies `count` bytes of `target`'s code from `start` into `dst`
+    /// at `dstOffset`.
+    /// @custom:solar-trusted
+    function _codeCopyInto(bytes memory dst, uint256 dstOffset, address target, uint256 start, uint256 count)
+        private
+        view
+    {
+        if (count > dst.length || dstOffset > dst.length - count) count = _outOfBounds();
+        uint256 size = target.code.length;
+        if (count > size || start > size - count) count = _outOfBounds();
+        assembly ("memory-safe") {
+            extcodecopy(target, add(add(dst, 0x20), dstOffset), start, count)
+        }
+    }
+
+
+    /// @dev The `count` bytes of `target`'s code from `start`, as a new buffer.
+    function _codeRead(address target, uint256 start, uint256 count)
+        private
+        view
+        returns (bytes memory out)
+    {
+        out = new bytes(count);
+        _codeCopyInto(out, 0, target, start, count);
+    }
+
+
+    /// @dev Reverts the current call with exactly `data`.
+    /// @custom:solar-trusted
+    function _revertRaw(bytes memory data) private pure {
+        assembly ("memory-safe") {
+            revert(add(data, 0x20), mload(data))
+        }
+    }
+
+    /// @dev Raises the `Panic(0x32)` an out-of-range index raises, which is the
+    /// portable spelling of a failed range check.
+    function _outOfBounds() private pure returns (uint256) {
+        return new uint256[](0)[0];
+    }
+
+
+
 }
