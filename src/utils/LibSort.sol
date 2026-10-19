@@ -576,10 +576,25 @@ library LibSort {
         return false;
     }
 
+    /// @dev Copies `a[from:]` into `c` at `at`, and returns the index past it.
+    /// @custom:solar-inline
+    function _copyTail(uint256[] memory c, uint256 at, uint256[] memory a, uint256 from)
+        private
+        pure
+        returns (uint256)
+    {
+        uint256 n = a.length - from;
+        for (uint256 t; t < n; ++t) {
+            c[at + t] = a[from + t];
+        }
+        return at + n;
+    }
+
     /// @dev A new array holding the elements of `a`.
     function _copy(uint256[] memory a) private pure returns (uint256[] memory c) {
-        c = new uint256[](a.length);
-        for (uint256 i; i < a.length; ++i) {
+        uint256 n = a.length;
+        c = new uint256[](n);
+        for (uint256 i; i < n; ++i) {
             c[i] = a[i];
         }
     }
@@ -615,8 +630,8 @@ library LibSort {
                 ++i;
             }
         }
-        while (i < a.length) c[k++] = a[i++];
-        while (j < b.length) c[k++] = b[j++];
+        k = _copyTail(c, k, a, i);
+        k = _copyTail(c, k, b, j);
         _truncate(c, k);
     }
 
@@ -661,7 +676,7 @@ library LibSort {
                 ++i;
             }
         }
-        while (i < a.length) c[k++] = a[i++];
+        k = _copyTail(c, k, a, i);
         _truncate(c, k);
     }
 
@@ -830,10 +845,25 @@ library LibSort {
         return false;
     }
 
+    /// @dev Copies `a[from:]` into `c` at `at`, and returns the index past it.
+    /// @custom:solar-inline
+    function _copyTail(int256[] memory c, uint256 at, int256[] memory a, uint256 from)
+        private
+        pure
+        returns (uint256)
+    {
+        uint256 n = a.length - from;
+        for (uint256 t; t < n; ++t) {
+            c[at + t] = a[from + t];
+        }
+        return at + n;
+    }
+
     /// @dev A new array holding the elements of `a`.
     function _copy(int256[] memory a) private pure returns (int256[] memory c) {
-        c = new int256[](a.length);
-        for (uint256 i; i < a.length; ++i) {
+        uint256 n = a.length;
+        c = new int256[](n);
+        for (uint256 i; i < n; ++i) {
             c[i] = a[i];
         }
     }
@@ -869,8 +899,8 @@ library LibSort {
                 ++i;
             }
         }
-        while (i < a.length) c[k++] = a[i++];
-        while (j < b.length) c[k++] = b[j++];
+        k = _copyTail(c, k, a, i);
+        k = _copyTail(c, k, b, j);
         _truncate(c, k);
     }
 
@@ -915,7 +945,7 @@ library LibSort {
                 ++i;
             }
         }
-        while (i < a.length) c[k++] = a[i++];
+        k = _copyTail(c, k, a, i);
         _truncate(c, k);
     }
 
@@ -1084,8 +1114,9 @@ library LibSort {
 
     /// @dev A new array holding the elements of `a`.
     function _copy(address[] memory a) private pure returns (address[] memory c) {
-        c = new address[](a.length);
-        for (uint256 i; i < a.length; ++i) {
+        uint256 n = a.length;
+        c = new address[](n);
+        for (uint256 i; i < n; ++i) {
             c[i] = a[i];
         }
     }
@@ -1334,10 +1365,25 @@ library LibSort {
         return false;
     }
 
+    /// @dev Copies `a[from:]` into `c` at `at`, and returns the index past it.
+    /// @custom:solar-inline
+    function _copyTail(bytes32[] memory c, uint256 at, bytes32[] memory a, uint256 from)
+        private
+        pure
+        returns (uint256)
+    {
+        uint256 n = a.length - from;
+        for (uint256 t; t < n; ++t) {
+            c[at + t] = a[from + t];
+        }
+        return at + n;
+    }
+
     /// @dev A new array holding the elements of `a`.
     function _copy(bytes32[] memory a) private pure returns (bytes32[] memory c) {
-        c = new bytes32[](a.length);
-        for (uint256 i; i < a.length; ++i) {
+        uint256 n = a.length;
+        c = new bytes32[](n);
+        for (uint256 i; i < n; ++i) {
             c[i] = a[i];
         }
     }
@@ -1373,8 +1419,8 @@ library LibSort {
                 ++i;
             }
         }
-        while (i < a.length) c[k++] = a[i++];
-        while (j < b.length) c[k++] = b[j++];
+        k = _copyTail(c, k, a, i);
+        k = _copyTail(c, k, b, j);
         _truncate(c, k);
     }
 
@@ -1419,7 +1465,7 @@ library LibSort {
                 ++i;
             }
         }
-        while (i < a.length) c[k++] = a[i++];
+        k = _copyTail(c, k, a, i);
         _truncate(c, k);
     }
 
