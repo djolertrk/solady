@@ -839,34 +839,44 @@ library LibString {
             }
             return string(expanded);
         }
+        uint256 last = s.length - n.length;
         uint256 width = n.length < 32 ? n.length : 32;
         bytes32 head = _readBytesN(n, 0, width);
-        uint256 count;
-        for (uint256 i; i + n.length <= s.length;) {
-            if (_matchAt(s, i, n, head, width)) {
+        // A replacement no longer than the needle never grows the subject, so
+        // one pass builds the result at the subject's length and cuts it down.
+        // A longer one first counts the matches to size the result.
+        bytes memory out;
+        if (r.length <= n.length) {
+            out = new bytes(s.length);
+        } else {
+            uint256 count;
+            for (uint256 at = _find(s, 0, last, n, head, width); at != NOT_FOUND;) {
                 ++count;
-                i += n.length;
-            } else {
-                ++i;
+                at += n.length;
+                if (at > last) break;
+                at = _find(s, at, last, n, head, width);
             }
+            if (count == 0) return subject;
+            out = new bytes(s.length + count * (r.length - n.length));
         }
-        bytes memory out = new bytes(s.length + count * r.length - count * n.length);
-        uint256 at;
         uint256 copied;
         uint256 o;
-        while (at + n.length <= s.length) {
-            if (_matchAt(s, at, n, head, width)) {
+        for (uint256 at = _find(s, 0, last, n, head, width); at != NOT_FOUND;) {
+            if (at != copied) {
                 _copyInto(out, o, s, copied, at - copied);
                 o += at - copied;
+            }
+            if (r.length != 0) {
                 _copyInto(out, o, r, 0, r.length);
                 o += r.length;
-                at += n.length;
-                copied = at;
-            } else {
-                ++at;
             }
+            copied = at + n.length;
+            if (copied > last) break;
+            at = _find(s, copied, last, n, head, width);
         }
         _copyInto(out, o, s, copied, s.length - copied);
+        o += s.length - copied;
+        if (o != out.length) _truncate(out, o);
         return string(out);
     }
 
@@ -885,6 +895,63 @@ library LibString {
         return needle.length <= 32 || _keccak256Range(subject, at, needle.length) == keccak256(needle);
     }
 
+    /// @dev The first offset in `[from, last]` at which `needle` occurs in
+    /// `subject`, or `NOT_FOUND`; `last + needle.length` fits the subject and
+    /// `head` and `width` are as `_matchAt` takes them. Thirty-two offsets go at
+    /// once: the needle's first byte is compared with every byte of a word, and
+    /// only the offsets where it occurs are matched.
+    function _find(
+        bytes memory subject,
+        uint256 from,
+        uint256 last,
+        bytes memory needle,
+        bytes32 head,
+        uint256 width
+    ) private pure returns (uint256) {
+        // A match right at `from`, as in a run of matches, needs no scan.
+        if (_matchAt(subject, from, needle, head, width)) return from;
+        uint256 pattern = (uint256(head) >> 248) * LANES_01;
+        uint256 n = subject.length;
+        for (uint256 i = from; i <= last; i += 32) {
+            uint256 rest = n - i;
+            uint256 word = rest < 32 ? uint256(_readBytesN(subject, i, rest)) : uint256(_readBytes32(subject, i));
+            // A byte equal to the first byte is zero after the exclusive-or, and
+            // the top bit marks each zero byte exactly.
+            uint256 z = word ^ pattern;
+            uint256 hits = ~(((z & LANES_7F) + LANES_7F) | z | LANES_7F);
+            // Offsets past `last` do not count.
+            if (last - i < 31) hits &= ~(type(uint256).max >> (8 * (last - i + 1)));
+            while (hits != 0) {
+                uint256 lane = _leadingByte(hits);
+                if (_matchAt(subject, i + lane, needle, head, width)) return i + lane;
+                hits &= ~(uint256(1) << (255 - 8 * lane));
+            }
+        }
+        return NOT_FOUND;
+    }
+
+    /// @dev The index, from the top, of the first nonzero byte of `x`, which
+    /// must not be zero.
+    function _leadingByte(uint256 x) private pure returns (uint256 r) {
+        if (x >> 128 == 0) {
+            r = 16;
+            x <<= 128;
+        }
+        if (x >> 192 == 0) {
+            r += 8;
+            x <<= 64;
+        }
+        if (x >> 224 == 0) {
+            r += 4;
+            x <<= 32;
+        }
+        if (x >> 240 == 0) {
+            r += 2;
+            x <<= 16;
+        }
+        if (x >> 248 == 0) ++r;
+    }
+
     /// @dev The byte offsets of each non-overlapping occurrence of `needle`.
     function _indicesOf(string memory subject, string memory needle)
         private
@@ -899,26 +966,23 @@ library LibString {
             for (uint256 i; i <= s.length; ++i) every[i] = i;
             return every;
         }
+        uint256 last = s.length - n.length;
         uint256 width = n.length < 32 ? n.length : 32;
         bytes32 head = _readBytesN(n, 0, width);
         uint256 count;
-        for (uint256 i; i + n.length <= s.length;) {
-            if (_matchAt(s, i, n, head, width)) {
-                ++count;
-                i += n.length;
-            } else {
-                ++i;
-            }
+        for (uint256 at = _find(s, 0, last, n, head, width); at != NOT_FOUND;) {
+            ++count;
+            at += n.length;
+            if (at > last) break;
+            at = _find(s, at, last, n, head, width);
         }
         uint256[] memory found = new uint256[](count);
         count = 0;
-        for (uint256 i; i + n.length <= s.length;) {
-            if (_matchAt(s, i, n, head, width)) {
-                found[count++] = i;
-                i += n.length;
-            } else {
-                ++i;
-            }
+        for (uint256 at = found.length == 0 ? NOT_FOUND : _find(s, 0, last, n, head, width); at != NOT_FOUND;) {
+            found[count++] = at;
+            at += n.length;
+            if (at > last) break;
+            at = _find(s, at, last, n, head, width);
         }
         return found;
     }
@@ -936,12 +1000,9 @@ library LibString {
         if (n.length == 0) return from > s.length ? s.length : from;
         if (n.length > s.length) return NOT_FOUND;
         uint256 last = s.length - n.length;
+        if (from > last) return NOT_FOUND;
         uint256 width = n.length < 32 ? n.length : 32;
-        bytes32 head = _readBytesN(n, 0, width);
-        for (uint256 i = from; i <= last; ++i) {
-            if (_matchAt(s, i, n, head, width)) return i;
-        }
-        return NOT_FOUND;
+        return _find(s, from, last, n, _readBytesN(n, 0, width), width);
     }
 
     /// @dev The byte offset of the last occurrence of `needle` at or before
