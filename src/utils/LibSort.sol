@@ -691,7 +691,7 @@ library LibSort {
         _sort(keys, values, 0, n);
         uint256 kept;
         uint256 sum = values[0];
-        for (uint256 i = 1; i < n; ++i) {
+        for (uint256 i = 1; i < keys.length; ++i) {
             if (keys[i] == keys[kept]) {
                 sum += values[i];
             } else {
@@ -960,7 +960,7 @@ library LibSort {
         _sort(keys, values, 0, n);
         uint256 kept;
         uint256 sum = values[0];
-        for (uint256 i = 1; i < n; ++i) {
+        for (uint256 i = 1; i < keys.length; ++i) {
             if (keys[i] == keys[kept]) {
                 sum += values[i];
             } else {
@@ -1213,7 +1213,7 @@ library LibSort {
         _sort(keys, values, 0, n);
         uint256 kept;
         uint256 sum = values[0];
-        for (uint256 i = 1; i < n; ++i) {
+        for (uint256 i = 1; i < keys.length; ++i) {
             if (keys[i] == keys[kept]) {
                 sum += values[i];
             } else {
@@ -1480,7 +1480,7 @@ library LibSort {
         _sort(keys, values, 0, n);
         uint256 kept;
         uint256 sum = values[0];
-        for (uint256 i = 1; i < n; ++i) {
+        for (uint256 i = 1; i < keys.length; ++i) {
             if (keys[i] == keys[kept]) {
                 sum += values[i];
             } else {
