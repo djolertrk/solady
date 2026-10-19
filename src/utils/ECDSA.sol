@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {Bytes} from "solar:core/Bytes.sol";
-
 /// @notice Checked Solidity implementation of the pinned Solady ECDSA API.
 /// @dev Recovery goes through the `ecrecover` builtin, whose zero result is
 /// the precompile's empty answer: the `recover` variants revert with
@@ -17,6 +15,7 @@ import {Bytes} from "solar:core/Bytes.sol";
 /// reverts on a message longer than 999,999 bytes, where the assembly runs out
 /// of gas, and a recovery whose precompile call itself fails reverts, as the
 /// builtin does, where `tryRecover` returned zero.
+/// @custom:solar-safe memory arithmetic
 library ECDSA {
     /// @dev The order of the secp256k1 elliptic curve.
     uint256 internal constant N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141;
@@ -76,14 +75,14 @@ library ECDSA {
     {
         uint256 length = signature.length;
         if (length == 64) {
-            return tryRecover(hash, Bytes.readBytes32(signature, 0), Bytes.readBytes32(signature, 32));
+            return tryRecover(hash, _readBytes32(signature, 0), _readBytes32(signature, 32));
         }
         if (length == 65) {
             return ecrecover(
                 hash,
                 uint8(signature[64]),
-                Bytes.readBytes32(signature, 0),
-                Bytes.readBytes32(signature, 32)
+                _readBytes32(signature, 0),
+                _readBytes32(signature, 32)
             );
         }
     }
@@ -179,7 +178,7 @@ library ECDSA {
             // `bytes4(keccak256("InvalidSignatureLength"))`.
             return bytes32(uint256(keccak256(signature)) ^ 0xd62f1ab2);
         }
-        uint256 s = uint256(Bytes.readBytes32(signature, 32));
+        uint256 s = uint256(_readBytes32(signature, 32));
         uint8 v;
         if (length == 64) {
             v = uint8(27 + (s >> 255));
@@ -187,7 +186,7 @@ library ECDSA {
         } else {
             v = uint8(signature[64]);
         }
-        return _canonical(Bytes.readBytes32(signature, 0), v, s);
+        return _canonical(_readBytes32(signature, 0), v, s);
     }
 
     /// @dev Returns the canonical hash of `signature`.
@@ -245,6 +244,17 @@ library ECDSA {
             digits |= (48 + n % 10) << shift;
             n /= 10;
             if (n == 0) return digits;
+        }
+    }
+
+    /// @dev The 32 bytes of `b` at `offset`.
+    function _readBytes32(bytes memory b, uint256 offset)
+        private
+        pure
+        returns (bytes32 result)
+    {
+        for (uint256 k; k < 32; ++k) {
+            result |= bytes32(b[offset + k]) >> (8 * k);
         }
     }
 }

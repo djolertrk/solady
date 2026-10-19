@@ -1,22 +1,20 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {Bytes} from "solar:core/Bytes.sol";
-import {Calls} from "solar:core/Calls.sol";
 import {ECDSA} from "./ECDSA.sol";
 
 /// @notice Checked Solidity implementation of the pinned Solady SignatureCheckerLib API.
 /// @dev A signer without code is checked with the `ecrecover` builtin, for
 /// 65-byte and EIP-2098 64-byte signatures alike; a signer with code with
 /// ERC1271. The ERC1271 call sends the calldata the assembly builds, unpadded,
-/// through `Calls.staticCallBounded`, which copies at most the one word of the
-/// answer that is checked against the magic value.
+/// and reads only the answer's length and first word, so a compiler that
+/// bounds the copy of return data copies one word, as the assembly does.
 ///
 /// An ERC6492 signature ends with the 32-byte magic suffix. Its inner signature
 /// is the third field of the wrapped encoding; one whose range lies past the
 /// signature counts as rejected by ERC1271, where the assembly reads whatever
-/// memory follows. The verifiers are called through `Calls.callBounded`, which
-/// copies nothing of their answer.
+/// memory follows. Only the length of a verifier's answer is read.
+/// @custom:solar-safe memory arithmetic
 library SignatureCheckerLib {
     /// @dev `bytes4(keccak256("isValidSignature(bytes32,bytes)"))`.
     bytes4 private constant _ERC1271_MAGIC = 0x1626ba7e;
@@ -171,10 +169,9 @@ library SignatureCheckerLib {
         bool noCode = signer.code.length == 0;
         if (_isERC6492(signature)) {
             if (!noCode && _innerERC1271(signer, hash, signature)) return true;
-            (,, uint256 answered) = Calls.callBounded(
-                _VERIFIER, 0, gasleft(), abi.encodePacked(uint256(uint160(signer)), hash, signature), 0
-            );
-            isValid = answered != 0;
+            (, bytes memory answer) =
+                _VERIFIER.call(abi.encodePacked(uint256(uint160(signer)), hash, signature));
+            isValid = answer.length != 0;
         } else if (!noCode) {
             isValid = isValidERC1271SignatureNow(signer, hash, signature);
         }
@@ -197,14 +194,9 @@ library SignatureCheckerLib {
         if (_isERC6492(signature)) {
             if (!noCode && _innerERC1271(signer, hash, signature)) return true;
             // The reverting verifier always reverts, with the result as its answer.
-            (bool succeeded,, uint256 answered) = Calls.callBounded(
-                _REVERTING_VERIFIER,
-                0,
-                gasleft(),
-                abi.encodePacked(uint256(uint160(signer)), hash, signature),
-                0
-            );
-            isValid = answered > (succeeded ? 1 : 0);
+            (bool succeeded, bytes memory answer) =
+                _REVERTING_VERIFIER.call(abi.encodePacked(uint256(uint160(signer)), hash, signature));
+            isValid = answer.length > (succeeded ? 1 : 0);
         } else if (!noCode) {
             isValid = isValidERC1271SignatureNow(signer, hash, signature);
         }
@@ -246,15 +238,15 @@ library SignatureCheckerLib {
     /// @dev Whether `signer` answers the ERC1271 call `payload` with at least a
     /// word, the first of which is the magic value.
     function _erc1271(address signer, bytes memory payload) private view returns (bool) {
-        (bool success, bytes memory answer,) = Calls.staticCallBounded(signer, gasleft(), payload, 32);
-        return success && answer.length == 32
-            && Bytes.readBytes32(answer, 0) == bytes32(_ERC1271_MAGIC);
+        (bool success, bytes memory answer) = signer.staticcall(payload);
+        return success && answer.length >= 32
+            && _readBytes32(answer, 0) == bytes32(_ERC1271_MAGIC);
     }
 
     /// @dev Whether `signature` ends with the ERC6492 magic suffix.
     function _isERC6492(bytes memory signature) private pure returns (bool) {
         uint256 n = signature.length;
-        return n >= 32 && Bytes.readBytes32(signature, n - 32) == _ERC6492_DETECTION_SUFFIX;
+        return n >= 32 && _readBytes32(signature, n - 32) == _ERC6492_DETECTION_SUFFIX;
     }
 
     /// @dev Whether `signer` accepts, with ERC1271, the inner signature of the
@@ -266,12 +258,47 @@ library SignatureCheckerLib {
     {
         uint256 n = signature.length;
         if (n < 96) return false;
-        uint256 offset = uint256(Bytes.readBytes32(signature, 64));
+        uint256 offset = uint256(_readBytes32(signature, 64));
         if (offset > n - 32) return false;
-        uint256 length = uint256(Bytes.readBytes32(signature, offset));
+        uint256 length = uint256(_readBytes32(signature, offset));
         if (length > n - 32 - offset) return false;
         /// @custom:solar-view
-        bytes memory inner = Bytes.slice(signature, offset + 32, length);
+        bytes memory inner = _slice(signature, offset + 32, length);
         return _erc1271(signer, abi.encodePacked(_ERC1271_MAGIC, hash, uint256(0x40), length, inner));
+    }
+
+    /// @dev The 32 bytes of `b` at `offset`.
+    function _readBytes32(bytes memory b, uint256 offset)
+        private
+        pure
+        returns (bytes32 result)
+    {
+        for (uint256 k; k < 32; ++k) {
+            result |= bytes32(b[offset + k]) >> (8 * k);
+        }
+    }
+
+    /// @dev A copy of the `count` bytes of `b` at `offset`. Reverts with
+    /// `Panic(0x32)` unless they all lie inside `b`, before allocating.
+    /// Declared under the `solar-view` custom tag, the result reads the bytes
+    /// of `b` in place instead; the compiler then rejects every write to them
+    /// while the view is still read, so the program behaves as if the copy
+    /// were made.
+    function _slice(bytes memory b, uint256 offset, uint256 count)
+        private
+        pure
+        returns (bytes memory result)
+    {
+        if (offset > b.length || count > b.length - offset) offset = _outOfBounds();
+        result = new bytes(count);
+        for (uint256 k; k < count; ++k) {
+            result[k] = b[offset + k];
+        }
+    }
+
+    /// @dev Raises the `Panic(0x32)` an out-of-range index raises, which is the
+    /// portable spelling of a failed range check.
+    function _outOfBounds() private pure returns (uint256) {
+        return new uint256[](0)[0];
     }
 }

@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {Bytes} from "solar:core/Bytes.sol";
-import {Hash} from "solar:core/Hash.sol";
-
 /// @notice Checked Solidity hashing without assembly.
 /// @dev The upstream library exists because `abi.encode` allocates before
 /// hashing. Here every fixed-arity hash is the plain `keccak256(abi.encode(...))`
@@ -16,6 +13,7 @@ import {Hash} from "solar:core/Hash.sol";
 /// scope, not by calling it.
 /// The 13- and 14-word overloads are left out: solc's legacy pipeline cannot
 /// compile a wrapper that takes them, so they cannot be measured side by side.
+/// @custom:solar-safe memory arithmetic
 library EfficientHashLib {
     /// @dev `keccak256` of the word.
     function hash(bytes32 v0) internal pure returns (bytes32) {
@@ -192,7 +190,7 @@ library EfficientHashLib {
 
     /// @dev Whether `b` is exactly the 32 bytes of `a`.
     function eq(bytes32 a, bytes memory b) internal pure returns (bool) {
-        return b.length == 32 && Bytes.readBytes32(b, 0) == a;
+        return b.length == 32 && _readBytes32(b, 0) == a;
     }
 
     /// @dev Whether `a` is exactly the 32 bytes of `b`.
@@ -208,7 +206,7 @@ library EfficientHashLib {
         uint256 n = b.length;
         if (end > n) end = n;
         if (start > end) start = end;
-        return Hash.keccak256Range(b, start, end - start);
+        return _keccak256Range(b, start, end - start);
     }
 
     /// @dev `keccak256` of `b` from `start` to its end.
@@ -256,7 +254,7 @@ library EfficientHashLib {
         if (end > n) end = n;
         if (start > end) start = end;
         /// @custom:solar-view
-        bytes memory part = Bytes.slice(b, start, end - start);
+        bytes memory part = _slice(b, start, end - start);
         return sha256(part);
     }
 
@@ -292,4 +290,52 @@ library EfficientHashLib {
         return sha256(b);
     }
 
+    /// @dev The 32 bytes of `b` at `offset`.
+    function _readBytes32(bytes memory b, uint256 offset)
+        private
+        pure
+        returns (bytes32 result)
+    {
+        for (uint256 k; k < 32; ++k) {
+            result |= bytes32(b[offset + k]) >> (8 * k);
+        }
+    }
+
+    /// @dev A copy of the `count` bytes of `b` at `offset`. Reverts with
+    /// `Panic(0x32)` unless they all lie inside `b`, before allocating.
+    /// Declared under the `solar-view` custom tag, the result reads the bytes
+    /// of `b` in place instead; the compiler then rejects every write to them
+    /// while the view is still read, so the program behaves as if the copy
+    /// were made.
+    function _slice(bytes memory b, uint256 offset, uint256 count)
+        private
+        pure
+        returns (bytes memory result)
+    {
+        if (offset > b.length || count > b.length - offset) offset = _outOfBounds();
+        result = new bytes(count);
+        for (uint256 k; k < count; ++k) {
+            result[k] = b[offset + k];
+        }
+    }
+
+    /// @dev The keccak-256 hash of the `count` bytes of `b` at `offset`.
+    function _keccak256Range(bytes memory b, uint256 offset, uint256 count)
+        private
+        pure
+        returns (bytes32)
+    {
+        if (count > b.length || offset > b.length - count) count = _outOfBounds();
+        bytes memory range = new bytes(count);
+        for (uint256 k; k < count; ++k) {
+            range[k] = b[offset + k];
+        }
+        return keccak256(range);
+    }
+
+    /// @dev Raises the `Panic(0x32)` an out-of-range index raises, which is the
+    /// portable spelling of a failed range check.
+    function _outOfBounds() private pure returns (uint256) {
+        return new uint256[](0)[0];
+    }
 }
