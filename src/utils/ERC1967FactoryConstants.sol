@@ -24,6 +24,11 @@ pragma solidity ^0.8.4;
 /// - Optimization Enabled: Yes with 1000000 runs
 /// - Compiler Version: v0.8.19+commit.7dd6d404
 /// - Other Settings: default evmVersion, MIT license
+///
+/// The checked port adds only this paragraph and the tag below. The library holds constants
+/// only, with no assembly, and keeps them byte for byte: the canonical deployment's address,
+/// runtime code, initialization code and salt.
+/// @custom:solar-safe memory arithmetic
 library ERC1967FactoryConstants {
     /// @dev The canonical ERC1967Factory address for EVM chains.
     address internal constant ADDRESS = 0x0000000000006396FF2a80c067f99B3d2Ab4Df24;
