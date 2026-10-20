@@ -46,6 +46,7 @@ LIBRARIES = [
     "LibPRNG",
     "FixedPointMathLib",
     "EnumerableSetLib",
+    "DynamicBufferLib",
     "tokens/ERC20",
     "tokens/WETH",
     "tokens/ERC4626",
