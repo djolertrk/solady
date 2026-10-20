@@ -4,8 +4,9 @@ pragma solidity ^0.8.20;
 /// @notice Checked Solidity implementation of the pinned Solady LibBit API.
 /// @dev Raw boolean operations require clean boolean inputs, as upstream does.
 /// The bit scans find the byte holding the highest set bit with five
-/// comparisons and finish inside it with a table. The population count's last
-/// step multiplies with wrap-around, which only `_rawMul` may do.
+/// comparisons and finish inside it with a table. The population and zero-byte
+/// counts sum their lanes through a product that wraps, and `ffs` negates by
+/// multiplying with `2**256 - 1`: only `_rawMul` may wrap.
 /// @custom:solar-safe memory arithmetic
 library LibBit {
     /// @dev Selects a table slot from a byte value: shifted right by the byte
@@ -58,9 +59,9 @@ library LibBit {
     }
 
     function ffs(uint256 x) internal pure returns (uint256 r) {
-        if (x == 0) return 256;
-        // Isolate the lowest set bit; `x` is not zero, so `~x + 1` cannot wrap.
-        x &= ~x + 1;
+        // Isolate the lowest set bit: `x * (2**256 - 1)` is `-x` modulo `2**256`.
+        // A zero stays zero, which the lookups below map to 256.
+        x &= _rawMul(x, type(uint256).max);
         // The upper three bits of the index come from a De Bruijn-like lookup of
         // the product's top six bits (credit to adhusson,
         // https://blog.adhusson.com/cheap-find-first-set-evm/), the lower five
@@ -75,8 +76,8 @@ library LibBit {
             ) >> 252
         ) << 5;
         r |= uint8(
-            bytes32(0x001f0d1e100c1d070f090b19131c1706010e11080a1a141802121b1503160405)[
-                (0xd76453e0 / (x >> r)) & 0x1f
+            bytes32(0x00011c021d0e18031e16140f191104081f1b0d17151310071a0c12060b050a09)[
+                (_rawMul(x >> r, 0x077cb531) >> 27) & 0x1f
             ]
         );
     }
@@ -97,16 +98,14 @@ library LibBit {
             + lowest;
     }
 
-    // Every input byte is zero or one, so the sum is at most 32 and fits the
-    // extracted byte. Pairing the halves bounds the product below 2**256.
-    function _sumBytes(uint256 x) private pure returns (uint256) {
-        uint256 paired = (x & type(uint128).max) + (x >> 128);
-        return uint8((paired * (uint256(type(uint128).max) / 255)) >> 120);
-    }
-
+    /// @custom:solar-inline
     function countZeroBytes(uint256 x) internal pure returns (uint256 c) {
+        // A zero byte keeps its top bit clear through `(x & m) + m` and `| x`,
+        // so the complement marks it with `0x80`. Shifted down to one per zero
+        // byte, the marks sum into the product's top byte, which holds at most
+        // 32; the product wraps on purpose.
         uint256 m = type(uint256).max / 255 * 127;
-        return _sumBytes(~(((x & m) + m) | x | m) >> 7);
+        return _rawMul(~(((x & m) + m) | x | m) >> 7, type(uint256).max / 255) >> 248;
     }
 
     // Both loops count a word at a time. The tail's word is read with only its
