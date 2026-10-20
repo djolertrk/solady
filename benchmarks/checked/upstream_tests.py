@@ -61,6 +61,15 @@ LIBRARIES = [
     "auth/Ownable",
     "auth/OwnableRoles",
     "accounts/Receiver",
+    "ReentrancyGuard",
+    "Initializable",
+    "CREATE3",
+    "UpgradeableBeacon",
+    "ERC1967FactoryConstants",
+    "ERC1967Factory",
+    "EnumerableMapLib",
+    "LibStorage",
+    "RedBlackTreeLib",
 ]
 
 
