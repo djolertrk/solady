@@ -48,6 +48,7 @@ LIBRARIES = [
     "EnumerableSetLib",
     "DynamicBufferLib",
     "DynamicArrayLib",
+    "MinHeapLib",
     "tokens/ERC20",
     "tokens/WETH",
     "tokens/ERC4626",
