@@ -1,8 +1,17 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.4;
+pragma solidity ^0.8.20;
 
 /// @notice Library for memory arrays with automatic capacity resizing.
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/utils/DynamicArrayLib.sol)
+/// @dev The checked port reads and writes elements with checked indexing, so an
+/// access outside an array reverts with `Panic(0x32)` where upstream touches the
+/// neighbouring memory, and `malloc` returns zeroed elements. A small trusted
+/// allocator keeps upstream's prime-checksummed capacity word before a dynamic
+/// array's data and its growth policies, expanding in place when the array ends at
+/// the free memory pointer and moving it otherwise; trusted helpers set a length the
+/// capacity covers, free memory, cast between array types and return an array
+/// directly.
+/// @custom:solar-safe memory arithmetic
 library DynamicArrayLib {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                          STRUCTS                           */
@@ -38,117 +47,95 @@ library DynamicArrayLib {
     // e.g. `array.set(0, 1).set(1, 2)`.
 
     /// @dev Returns a uint256 array with `n` elements. The elements are not zeroized.
+    /// @custom:solar-inline
     function malloc(uint256 n) internal pure returns (uint256[] memory result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := or(sub(0, shr(32, n)), mload(0x40))
-            mstore(result, n)
-            mstore(0x40, add(add(result, 0x20), shl(5, n)))
-        }
+        result = new uint256[](n);
     }
 
     /// @dev Zeroizes all the elements of `a`.
     function zeroize(uint256[] memory a) internal pure returns (uint256[] memory result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := a
-            calldatacopy(add(result, 0x20), calldatasize(), shl(5, mload(result)))
+        result = a;
+        for (uint256 i; i < result.length; ++i) {
+            result[i] = 0;
         }
     }
 
     /// @dev Returns the element at `a[i]`, without bounds checking.
+    /// @custom:solar-inline
     function get(uint256[] memory a, uint256 i) internal pure returns (uint256 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := mload(add(add(a, 0x20), shl(5, i)))
-        }
+        result = a[i];
     }
 
     /// @dev Returns the element at `a[i]`, without bounds checking.
+    /// @custom:solar-inline
     function getUint256(uint256[] memory a, uint256 i) internal pure returns (uint256 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := mload(add(add(a, 0x20), shl(5, i)))
-        }
+        result = a[i];
     }
 
     /// @dev Returns the element at `a[i]`, without bounds checking.
+    /// @custom:solar-inline
     function getAddress(uint256[] memory a, uint256 i) internal pure returns (address result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := mload(add(add(a, 0x20), shl(5, i)))
-        }
+        result = address(uint160(a[i]));
     }
 
     /// @dev Returns the element at `a[i]`, without bounds checking.
+    /// @custom:solar-inline
     function getBool(uint256[] memory a, uint256 i) internal pure returns (bool result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := mload(add(add(a, 0x20), shl(5, i)))
-        }
+        result = a[i] != 0;
     }
 
     /// @dev Returns the element at `a[i]`, without bounds checking.
+    /// @custom:solar-inline
     function getBytes32(uint256[] memory a, uint256 i) internal pure returns (bytes32 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := mload(add(add(a, 0x20), shl(5, i)))
-        }
+        result = bytes32(a[i]);
     }
 
     /// @dev Sets `a.data[i]` to `data`, without bounds checking.
+    /// @custom:solar-inline
     function set(uint256[] memory a, uint256 i, uint256 data)
         internal
         pure
         returns (uint256[] memory result)
     {
         result = a;
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(add(add(result, 0x20), shl(5, i)), data)
-        }
+        result[i] = data;
     }
 
     /// @dev Sets `a.data[i]` to `data`, without bounds checking.
+    /// @custom:solar-inline
     function set(uint256[] memory a, uint256 i, address data)
         internal
         pure
         returns (uint256[] memory result)
     {
         result = a;
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(add(add(result, 0x20), shl(5, i)), shr(96, shl(96, data)))
-        }
+        result[i] = uint160(data);
     }
 
     /// @dev Sets `a.data[i]` to `data`, without bounds checking.
+    /// @custom:solar-inline
     function set(uint256[] memory a, uint256 i, bool data)
         internal
         pure
         returns (uint256[] memory result)
     {
         result = a;
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(add(add(result, 0x20), shl(5, i)), iszero(iszero(data)))
-        }
+        result[i] = _toUint(data);
     }
 
     /// @dev Sets `a.data[i]` to `data`, without bounds checking.
+    /// @custom:solar-inline
     function set(uint256[] memory a, uint256 i, bytes32 data)
         internal
         pure
         returns (uint256[] memory result)
     {
         result = a;
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(add(add(result, 0x20), shl(5, i)), data)
-        }
+        result[i] = uint256(data);
     }
 
     /// @dev Casts `a` to `address[]`.
+    /// @custom:solar-trusted
     function asAddressArray(uint256[] memory a) internal pure returns (address[] memory result) {
         /// @solidity memory-safe-assembly
         assembly {
@@ -157,6 +144,7 @@ library DynamicArrayLib {
     }
 
     /// @dev Casts `a` to `bool[]`.
+    /// @custom:solar-trusted
     function asBoolArray(uint256[] memory a) internal pure returns (bool[] memory result) {
         /// @solidity memory-safe-assembly
         assembly {
@@ -165,6 +153,7 @@ library DynamicArrayLib {
     }
 
     /// @dev Casts `a` to `bytes32[]`.
+    /// @custom:solar-trusted
     function asBytes32Array(uint256[] memory a) internal pure returns (bytes32[] memory result) {
         /// @solidity memory-safe-assembly
         assembly {
@@ -173,6 +162,7 @@ library DynamicArrayLib {
     }
 
     /// @dev Casts `a` to `uint256[]`.
+    /// @custom:solar-trusted
     function toUint256Array(address[] memory a) internal pure returns (uint256[] memory result) {
         /// @solidity memory-safe-assembly
         assembly {
@@ -181,6 +171,7 @@ library DynamicArrayLib {
     }
 
     /// @dev Casts `a` to `uint256[]`.
+    /// @custom:solar-trusted
     function toUint256Array(bool[] memory a) internal pure returns (uint256[] memory result) {
         /// @solidity memory-safe-assembly
         assembly {
@@ -189,6 +180,7 @@ library DynamicArrayLib {
     }
 
     /// @dev Casts `a` to `uint256[]`.
+    /// @custom:solar-trusted
     function toUint256Array(bytes32[] memory a) internal pure returns (uint256[] memory result) {
         /// @solidity memory-safe-assembly
         assembly {
@@ -198,19 +190,18 @@ library DynamicArrayLib {
 
     /// @dev Reduces the size of `a` to `n`.
     /// If `n` is greater than the size of `a`, this will be a no-op.
+    /// @custom:solar-inline
     function truncate(uint256[] memory a, uint256 n)
         internal
         pure
         returns (uint256[] memory result)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := a
-            mstore(mul(lt(n, mload(result)), result), n)
-        }
+        result = a;
+        if (n < result.length) _setLength(result, n);
     }
 
     /// @dev Clears the array and attempts to free the memory if possible.
+    /// @custom:solar-trusted
     function free(uint256[] memory a) internal pure returns (uint256[] memory result) {
         /// @solidity memory-safe-assembly
         assembly {
@@ -223,10 +214,7 @@ library DynamicArrayLib {
 
     /// @dev Equivalent to `keccak256(abi.encodePacked(a))`.
     function hash(uint256[] memory a) internal pure returns (bytes32 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := keccak256(add(a, 0x20), shl(5, mload(a)))
-        }
+        result = keccak256(abi.encodePacked(a));
     }
 
     /// @dev Returns a copy of `a` sliced from `start` to `end` (exclusive).
@@ -235,24 +223,13 @@ library DynamicArrayLib {
         pure
         returns (uint256[] memory result)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let arrayLen := mload(a)
-            if iszero(gt(arrayLen, end)) { end := arrayLen }
-            if iszero(gt(arrayLen, start)) { start := arrayLen }
-            if lt(start, end) {
-                result := mload(0x40)
-                let resultLen := sub(end, start)
-                mstore(result, resultLen)
-                a := add(a, shl(5, start))
-                // Copy the `a` one word at a time, backwards.
-                let o := shl(5, resultLen)
-                mstore(0x40, add(add(result, o), 0x20)) // Allocate memory.
-                for {} 1 {} {
-                    mstore(add(result, o), mload(add(a, o)))
-                    o := sub(o, 0x20)
-                    if iszero(o) { break }
-                }
+        uint256 arrayLen = a.length;
+        if (arrayLen <= end) end = arrayLen;
+        if (arrayLen <= start) start = arrayLen;
+        if (start < end) {
+            result = new uint256[](end - start);
+            for (uint256 i; i < result.length; ++i) {
+                result[i] = a[start + i];
             }
         }
     }
@@ -268,17 +245,9 @@ library DynamicArrayLib {
 
     /// @dev Returns a copy of the array.
     function copy(uint256[] memory a) internal pure returns (uint256[] memory result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := mload(0x40)
-            let end := add(add(result, 0x20), shl(5, mload(a)))
-            let o := result
-            for { let d := sub(a, result) } 1 {} {
-                mstore(o, mload(add(o, d)))
-                o := add(0x20, o)
-                if eq(o, end) { break }
-            }
-            mstore(0x40, o)
+        result = new uint256[](a.length);
+        for (uint256 i; i < result.length; ++i) {
+            result[i] = a[i];
         }
     }
 
@@ -294,21 +263,10 @@ library DynamicArrayLib {
         pure
         returns (uint256 result)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := not(0)
-            if lt(from, mload(a)) {
-                let o := add(a, shl(5, from))
-                let end := add(shl(5, add(1, mload(a))), a)
-                let c := mload(end) // Cache the word after the array.
-                for { mstore(end, needle) } 1 {} {
-                    o := add(o, 0x20)
-                    if eq(mload(o), needle) { break }
-                }
-                mstore(end, c) // Restore the word after the array.
-                if iszero(eq(o, end)) { result := shr(5, sub(o, add(0x20, a))) }
-            }
+        for (uint256 i = from; i < a.length; ++i) {
+            if (a[i] == needle) return i;
         }
+        return NOT_FOUND;
     }
 
     /// @dev Returns the first index of `needle`.
@@ -324,21 +282,14 @@ library DynamicArrayLib {
         pure
         returns (uint256 result)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := not(0)
-            let n := mload(a)
-            if n {
-                if iszero(lt(from, n)) { from := sub(n, 1) }
-                let o := add(shl(5, add(2, from)), a)
-                for { mstore(a, needle) } 1 {} {
-                    o := sub(o, 0x20)
-                    if eq(mload(o), needle) { break }
-                }
-                mstore(a, n) // Restore the length.
-                if iszero(eq(o, a)) { result := shr(5, sub(o, add(0x20, a))) }
-            }
+        uint256 n = a.length;
+        if (n == 0) return NOT_FOUND;
+        uint256 i = from < n ? from : n - 1;
+        while (a[i] != needle) {
+            if (i == 0) return NOT_FOUND;
+            --i;
         }
+        return i;
     }
 
     /// @dev Returns the first index of `needle`.
@@ -352,6 +303,7 @@ library DynamicArrayLib {
     }
 
     /// @dev Directly returns `a` without copying.
+    /// @custom:solar-trusted
     function directReturn(uint256[] memory a) internal pure {
         /// @solidity memory-safe-assembly
         assembly {
@@ -380,57 +332,31 @@ library DynamicArrayLib {
 
     /// @dev Wraps `a` in a dynamic array struct.
     function wrap(address[] memory a) internal pure returns (DynamicArray memory result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(result, a)
-        }
+        result.data = toUint256Array(a);
     }
 
     /// @dev Wraps `a` in a dynamic array struct.
     function wrap(bool[] memory a) internal pure returns (DynamicArray memory result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(result, a)
-        }
+        result.data = toUint256Array(a);
     }
 
     /// @dev Wraps `a` in a dynamic array struct.
     function wrap(bytes32[] memory a) internal pure returns (DynamicArray memory result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(result, a)
-        }
+        result.data = toUint256Array(a);
     }
 
     /// @dev Clears the array without deallocating the memory.
     function clear(DynamicArray memory a) internal pure returns (DynamicArray memory result) {
         _deallocate(result);
         result = a;
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(mload(result), 0)
-        }
+        _setLength(result.data, 0);
     }
 
     /// @dev Clears the array and attempts to free the memory if possible.
     function free(DynamicArray memory a) internal pure returns (DynamicArray memory result) {
         _deallocate(result);
         result = a;
-        /// @solidity memory-safe-assembly
-        assembly {
-            let arrData := mload(result)
-            if iszero(eq(arrData, 0x60)) {
-                let prime := 8188386068317523
-                let cap := mload(sub(arrData, 0x20))
-                // Extract `cap`, initializing it to zero if it is not a multiple of `prime`.
-                cap := mul(div(cap, prime), iszero(mod(cap, prime)))
-                // If `cap` is non-zero and the memory is contiguous, we can free it.
-                if lt(iszero(cap), eq(mload(0x40), add(arrData, add(0x20, cap)))) {
-                    mstore(0x40, sub(arrData, 0x20))
-                }
-                mstore(result, 0x60)
-            }
-        }
+        _free(result);
     }
 
     /// @dev Resizes the array to contain `n` elements. New elements will be zeroized.
@@ -442,18 +368,12 @@ library DynamicArrayLib {
         _deallocate(result);
         result = a;
         reserve(result, n);
-        /// @solidity memory-safe-assembly
-        assembly {
-            let arrData := mload(result)
-            let arrLen := mload(arrData)
-            if iszero(lt(n, arrLen)) {
-                calldatacopy(
-                    add(arrData, shl(5, add(1, arrLen))),
-                    calldatasize(),
-                    shl(5, sub(n, arrLen))
-                )
-            }
-            mstore(arrData, n)
+        uint256[] memory arrData = result.data;
+        uint256 arrLen = arrData.length;
+        _setLength(arrData, n);
+        // New elements are zeroized.
+        for (uint256 i = arrLen; i < n; ++i) {
+            arrData[i] = 0;
         }
     }
 
@@ -469,10 +389,7 @@ library DynamicArrayLib {
         result = a;
         if (n >= a.data.length) {
             reserve(result, n);
-            /// @solidity memory-safe-assembly
-            assembly {
-                mstore(mload(result), n)
-            }
+            _setLength(result.data, n);
         }
     }
 
@@ -485,10 +402,7 @@ library DynamicArrayLib {
     {
         _deallocate(result);
         result = a;
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(mul(lt(n, mload(mload(result))), mload(result)), n)
-        }
+        if (n < result.data.length) _setLength(result.data, n);
     }
 
     /// @dev Reserves at least `minimum` amount of contiguous memory.
@@ -499,53 +413,7 @@ library DynamicArrayLib {
     {
         _deallocate(result);
         result = a;
-        /// @solidity memory-safe-assembly
-        assembly {
-            if iszero(lt(minimum, 0xffffffff)) { invalid() } // For extra safety.
-            for { let arrData := mload(a) } 1 {} {
-                // Some random prime number to multiply `cap`, so that
-                // we know that the `cap` is for a dynamic array.
-                // Selected to be larger than any memory pointer realistically.
-                let prime := 8188386068317523
-                // Special case for `arrData` pointing to zero pointer.
-                if eq(arrData, 0x60) {
-                    let newCap := shl(5, add(1, minimum))
-                    let capSlot := mload(0x40)
-                    mstore(capSlot, mul(prime, newCap)) // Store the capacity.
-                    let newArrData := add(0x20, capSlot)
-                    mstore(newArrData, 0) // Store the length.
-                    mstore(0x40, add(newArrData, add(0x20, newCap))) // Allocate memory.
-                    mstore(a, newArrData)
-                    break
-                }
-                let w := not(0x1f)
-                let cap := mload(add(arrData, w)) // `mload(sub(arrData, w))`.
-                // Extract `cap`, initializing it to zero if it is not a multiple of `prime`.
-                cap := mul(div(cap, prime), iszero(mod(cap, prime)))
-                let newCap := shl(5, minimum)
-                // If we don't need to grow the memory.
-                if iszero(and(gt(minimum, mload(arrData)), gt(newCap, cap))) { break }
-                // If the memory is contiguous, we can simply expand it.
-                if eq(mload(0x40), add(arrData, add(0x20, cap))) {
-                    mstore(add(arrData, w), mul(prime, newCap)) // Store the capacity.
-                    mstore(0x40, add(arrData, add(0x20, newCap))) // Expand the memory allocation.
-                    break
-                }
-                let capSlot := mload(0x40)
-                let newArrData := add(capSlot, 0x20)
-                mstore(0x40, add(newArrData, add(0x20, newCap))) // Reallocate the memory.
-                mstore(a, newArrData) // Store the `newArrData`.
-                // Copy `arrData` one word at a time, backwards.
-                for { let o := add(0x20, shl(5, mload(arrData))) } 1 {} {
-                    mstore(add(newArrData, o), mload(add(arrData, o)))
-                    o := add(o, w) // `sub(o, 0x20)`.
-                    if iszero(o) { break }
-                }
-                mstore(capSlot, mul(prime, newCap)) // Store the capacity.
-                mstore(newArrData, mload(arrData)) // Store the length.
-                break
-            }
-        }
+        _reserve(result, minimum);
     }
 
     /// @dev Appends `data` to `a`.
@@ -556,48 +424,11 @@ library DynamicArrayLib {
     {
         _deallocate(result);
         result = a;
-        /// @solidity memory-safe-assembly
-        assembly {
-            let arrData := mload(a)
-            let newArrLen := add(mload(arrData), 1)
-            let newArrBytesLen := shl(5, newArrLen)
-            // Some random prime number to multiply `cap`, so that
-            // we know that the `cap` is for a dynamic array.
-            // Selected to be larger than any memory pointer realistically.
-            let prime := 8188386068317523
-            let cap := mload(sub(arrData, 0x20))
-            // Extract `cap`, initializing it to zero if it is not a multiple of `prime`.
-            cap := mul(div(cap, prime), iszero(mod(cap, prime)))
-
-            // Expand / Reallocate memory if required.
-            // Note that we need to allocate an extra word for the length.
-            for {} iszero(lt(newArrBytesLen, cap)) {} {
-                // Approximately more than double the capacity to ensure more than enough space.
-                let newCap := add(cap, or(cap, newArrBytesLen))
-                // If the memory is contiguous, we can simply expand it.
-                if iszero(or(xor(mload(0x40), add(arrData, add(0x20, cap))), iszero(cap))) {
-                    mstore(sub(arrData, 0x20), mul(prime, newCap)) // Store the capacity.
-                    mstore(0x40, add(arrData, add(0x20, newCap))) // Expand the memory allocation.
-                    break
-                }
-                // Set the `newArrData` to point to the word after `cap`.
-                let newArrData := add(mload(0x40), 0x20)
-                mstore(0x40, add(newArrData, add(0x20, newCap))) // Reallocate the memory.
-                mstore(a, newArrData) // Store the `newArrData`.
-                let w := not(0x1f)
-                // Copy `arrData` one word at a time, backwards.
-                for { let o := newArrBytesLen } 1 {} {
-                    mstore(add(newArrData, o), mload(add(arrData, o)))
-                    o := add(o, w) // `sub(o, 0x20)`.
-                    if iszero(o) { break }
-                }
-                mstore(add(newArrData, w), mul(prime, newCap)) // Store the memory.
-                arrData := newArrData // Assign `newArrData` to `arrData`.
-                break
-            }
-            mstore(add(arrData, newArrBytesLen), data) // Append `data`.
-            mstore(arrData, newArrLen) // Store the length.
-        }
+        uint256 n = a.data.length;
+        _grow(result, n + 1);
+        uint256[] memory arrData = result.data;
+        _setLength(arrData, n + 1);
+        arrData[n] = data;
     }
 
     /// @dev Appends `data` to `a`.
@@ -656,104 +487,95 @@ library DynamicArrayLib {
     /// @dev Removes and returns the last element of `a`.
     /// Returns 0 and does not pop anything if the array is empty.
     function pop(DynamicArray memory a) internal pure returns (uint256 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let o := mload(a)
-            let n := mload(o)
-            result := mload(add(o, shl(5, n)))
-            mstore(o, sub(n, iszero(iszero(n))))
+        uint256[] memory arrData = a.data;
+        uint256 n = arrData.length;
+        if (n != 0) {
+            uint256 v = arrData[n - 1];
+            result = v;
+            _setLength(arrData, n - 1);
         }
     }
 
     /// @dev Removes and returns the last element of `a`.
     /// Returns 0 and does not pop anything if the array is empty.
     function popUint256(DynamicArray memory a) internal pure returns (uint256 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let o := mload(a)
-            let n := mload(o)
-            result := mload(add(o, shl(5, n)))
-            mstore(o, sub(n, iszero(iszero(n))))
+        uint256[] memory arrData = a.data;
+        uint256 n = arrData.length;
+        if (n != 0) {
+            uint256 v = arrData[n - 1];
+            result = v;
+            _setLength(arrData, n - 1);
         }
     }
 
     /// @dev Removes and returns the last element of `a`.
     /// Returns 0 and does not pop anything if the array is empty.
     function popAddress(DynamicArray memory a) internal pure returns (address result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let o := mload(a)
-            let n := mload(o)
-            result := mload(add(o, shl(5, n)))
-            mstore(o, sub(n, iszero(iszero(n))))
+        uint256[] memory arrData = a.data;
+        uint256 n = arrData.length;
+        if (n != 0) {
+            uint256 v = arrData[n - 1];
+            result = address(uint160(v));
+            _setLength(arrData, n - 1);
         }
     }
 
     /// @dev Removes and returns the last element of `a`.
     /// Returns 0 and does not pop anything if the array is empty.
     function popBool(DynamicArray memory a) internal pure returns (bool result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let o := mload(a)
-            let n := mload(o)
-            result := mload(add(o, shl(5, n)))
-            mstore(o, sub(n, iszero(iszero(n))))
+        uint256[] memory arrData = a.data;
+        uint256 n = arrData.length;
+        if (n != 0) {
+            uint256 v = arrData[n - 1];
+            result = v != 0;
+            _setLength(arrData, n - 1);
         }
     }
 
     /// @dev Removes and returns the last element of `a`.
     /// Returns 0 and does not pop anything if the array is empty.
     function popBytes32(DynamicArray memory a) internal pure returns (bytes32 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let o := mload(a)
-            let n := mload(o)
-            result := mload(add(o, shl(5, n)))
-            mstore(o, sub(n, iszero(iszero(n))))
+        uint256[] memory arrData = a.data;
+        uint256 n = arrData.length;
+        if (n != 0) {
+            uint256 v = arrData[n - 1];
+            result = bytes32(v);
+            _setLength(arrData, n - 1);
         }
     }
 
     /// @dev Returns the element at `a.data[i]`, without bounds checking.
+    /// @custom:solar-inline
     function get(DynamicArray memory a, uint256 i) internal pure returns (uint256 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := mload(add(add(mload(a), 0x20), shl(5, i)))
-        }
+        result = a.data[i];
     }
 
     /// @dev Returns the element at `a.data[i]`, without bounds checking.
+    /// @custom:solar-inline
     function getUint256(DynamicArray memory a, uint256 i) internal pure returns (uint256 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := mload(add(add(mload(a), 0x20), shl(5, i)))
-        }
+        result = a.data[i];
     }
 
     /// @dev Returns the element at `a.data[i]`, without bounds checking.
+    /// @custom:solar-inline
     function getAddress(DynamicArray memory a, uint256 i) internal pure returns (address result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := mload(add(add(mload(a), 0x20), shl(5, i)))
-        }
+        result = address(uint160(a.data[i]));
     }
 
     /// @dev Returns the element at `a.data[i]`, without bounds checking.
+    /// @custom:solar-inline
     function getBool(DynamicArray memory a, uint256 i) internal pure returns (bool result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := mload(add(add(mload(a), 0x20), shl(5, i)))
-        }
+        result = a.data[i] != 0;
     }
 
     /// @dev Returns the element at `a.data[i]`, without bounds checking.
+    /// @custom:solar-inline
     function getBytes32(DynamicArray memory a, uint256 i) internal pure returns (bytes32 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := mload(add(add(mload(a), 0x20), shl(5, i)))
-        }
+        result = bytes32(a.data[i]);
     }
 
     /// @dev Sets `a.data[i]` to `data`, without bounds checking.
+    /// @custom:solar-inline
     function set(DynamicArray memory a, uint256 i, uint256 data)
         internal
         pure
@@ -761,13 +583,11 @@ library DynamicArrayLib {
     {
         _deallocate(result);
         result = a;
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(add(add(mload(result), 0x20), shl(5, i)), data)
-        }
+        result.data[i] = data;
     }
 
     /// @dev Sets `a.data[i]` to `data`, without bounds checking.
+    /// @custom:solar-inline
     function set(DynamicArray memory a, uint256 i, address data)
         internal
         pure
@@ -775,13 +595,11 @@ library DynamicArrayLib {
     {
         _deallocate(result);
         result = a;
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(add(add(mload(result), 0x20), shl(5, i)), shr(96, shl(96, data)))
-        }
+        result.data[i] = uint160(data);
     }
 
     /// @dev Sets `a.data[i]` to `data`, without bounds checking.
+    /// @custom:solar-inline
     function set(DynamicArray memory a, uint256 i, bool data)
         internal
         pure
@@ -789,13 +607,11 @@ library DynamicArrayLib {
     {
         _deallocate(result);
         result = a;
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(add(add(mload(result), 0x20), shl(5, i)), iszero(iszero(data)))
-        }
+        result.data[i] = _toUint(data);
     }
 
     /// @dev Sets `a.data[i]` to `data`, without bounds checking.
+    /// @custom:solar-inline
     function set(DynamicArray memory a, uint256 i, bytes32 data)
         internal
         pure
@@ -803,13 +619,11 @@ library DynamicArrayLib {
     {
         _deallocate(result);
         result = a;
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(add(add(mload(result), 0x20), shl(5, i)), data)
-        }
+        result.data[i] = uint256(data);
     }
 
     /// @dev Returns the underlying array as a `uint256[]`.
+    /// @custom:solar-trusted
     function asUint256Array(DynamicArray memory a) internal pure returns (uint256[] memory result) {
         /// @solidity memory-safe-assembly
         assembly {
@@ -818,6 +632,7 @@ library DynamicArrayLib {
     }
 
     /// @dev Returns the underlying array as a `address[]`.
+    /// @custom:solar-trusted
     function asAddressArray(DynamicArray memory a) internal pure returns (address[] memory result) {
         /// @solidity memory-safe-assembly
         assembly {
@@ -826,6 +641,7 @@ library DynamicArrayLib {
     }
 
     /// @dev Returns the underlying array as a `bool[]`.
+    /// @custom:solar-trusted
     function asBoolArray(DynamicArray memory a) internal pure returns (bool[] memory result) {
         /// @solidity memory-safe-assembly
         assembly {
@@ -834,6 +650,7 @@ library DynamicArrayLib {
     }
 
     /// @dev Returns the underlying array as a `bytes32[]`.
+    /// @custom:solar-trusted
     function asBytes32Array(DynamicArray memory a) internal pure returns (bytes32[] memory result) {
         /// @solidity memory-safe-assembly
         assembly {
@@ -977,13 +794,11 @@ library DynamicArrayLib {
 
     /// @dev Equivalent to `keccak256(abi.encodePacked(a.data))`.
     function hash(DynamicArray memory a) internal pure returns (bytes32 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := keccak256(add(mload(a), 0x20), shl(5, mload(mload(a))))
-        }
+        result = keccak256(abi.encodePacked(a.data));
     }
 
     /// @dev Directly returns `a` without copying.
+    /// @custom:solar-trusted
     function directReturn(DynamicArray memory a) internal pure {
         /// @solidity memory-safe-assembly
         assembly {
@@ -999,6 +814,7 @@ library DynamicArrayLib {
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     /// @dev Helper for deallocating an automatically allocated array pointer.
+    /// @custom:solar-trusted
     function _deallocate(DynamicArray memory result) private pure {
         /// @solidity memory-safe-assembly
         assembly {
@@ -1008,9 +824,134 @@ library DynamicArrayLib {
 
     /// @dev Casts the bool into a uint256.
     function _toUint(bool b) private pure returns (uint256 result) {
+        result = b ? 1 : 0;
+    }
+
+    /// @dev Reserves at least `minimum` elements of contiguous memory for `a`, as
+    /// upstream's `reserve` does: the capacity is the word before the data, multiplied
+    /// by a prime so that no other word passes for one.
+    /// @custom:solar-trusted
+    function _reserve(DynamicArray memory a, uint256 minimum) private pure {
         /// @solidity memory-safe-assembly
         assembly {
-            result := iszero(iszero(b))
+            if iszero(lt(minimum, 0xffffffff)) { invalid() } // For extra safety.
+            for { let arrData := mload(a) } 1 {} {
+                // Some random prime number to multiply `cap`, so that
+                // we know that the `cap` is for a dynamic array.
+                // Selected to be larger than any memory pointer realistically.
+                let prime := 8188386068317523
+                // Special case for `arrData` pointing to zero pointer.
+                if eq(arrData, 0x60) {
+                    let newCap := shl(5, add(1, minimum))
+                    let capSlot := mload(0x40)
+                    mstore(capSlot, mul(prime, newCap)) // Store the capacity.
+                    let newArrData := add(0x20, capSlot)
+                    mstore(newArrData, 0) // Store the length.
+                    mstore(0x40, add(newArrData, add(0x20, newCap))) // Allocate memory.
+                    mstore(a, newArrData)
+                    break
+                }
+                let w := not(0x1f)
+                let cap := mload(add(arrData, w)) // `mload(sub(arrData, w))`.
+                // Extract `cap`, initializing it to zero if it is not a multiple of `prime`.
+                cap := mul(div(cap, prime), iszero(mod(cap, prime)))
+                let newCap := shl(5, minimum)
+                // If we don't need to grow the memory.
+                if iszero(and(gt(minimum, mload(arrData)), gt(newCap, cap))) { break }
+                // If the memory is contiguous, we can simply expand it.
+                if eq(mload(0x40), add(arrData, add(0x20, cap))) {
+                    mstore(add(arrData, w), mul(prime, newCap)) // Store the capacity.
+                    mstore(0x40, add(arrData, add(0x20, newCap))) // Expand the memory allocation.
+                    break
+                }
+                let capSlot := mload(0x40)
+                let newArrData := add(capSlot, 0x20)
+                mstore(0x40, add(newArrData, add(0x20, newCap))) // Reallocate the memory.
+                mstore(a, newArrData) // Store the `newArrData`.
+                // Copy `arrData` one word at a time, backwards.
+                for { let o := add(0x20, shl(5, mload(arrData))) } 1 {} {
+                    mstore(add(newArrData, o), mload(add(arrData, o)))
+                    o := add(o, w) // `sub(o, 0x20)`.
+                    if iszero(o) { break }
+                }
+                mstore(capSlot, mul(prime, newCap)) // Store the capacity.
+                mstore(newArrData, mload(arrData)) // Store the length.
+                break
+            }
+        }
+    }
+
+    /// @dev Makes room in `a` for `newArrLen` elements, as upstream's append does: an
+    /// array that ends at the free memory pointer expands in place, any other moves,
+    /// with its contents and length, to newly allocated memory.
+    /// @custom:solar-trusted
+    function _grow(DynamicArray memory a, uint256 newArrLen) private pure {
+        /// @solidity memory-safe-assembly
+        assembly {
+            let arrData := mload(a)
+            let newArrBytesLen := shl(5, newArrLen)
+            // Some random prime number to multiply `cap`, so that
+            // we know that the `cap` is for a dynamic array.
+            // Selected to be larger than any memory pointer realistically.
+            let prime := 8188386068317523
+            let cap := mload(sub(arrData, 0x20))
+            // Extract `cap`, initializing it to zero if it is not a multiple of `prime`.
+            cap := mul(div(cap, prime), iszero(mod(cap, prime)))
+
+            // Expand / Reallocate memory if required.
+            // Note that we need to allocate an extra word for the length.
+            for {} iszero(lt(newArrBytesLen, cap)) {} {
+                // Approximately more than double the capacity to ensure more than enough space.
+                let newCap := add(cap, or(cap, newArrBytesLen))
+                // If the memory is contiguous, we can simply expand it.
+                if iszero(or(xor(mload(0x40), add(arrData, add(0x20, cap))), iszero(cap))) {
+                    mstore(sub(arrData, 0x20), mul(prime, newCap)) // Store the capacity.
+                    mstore(0x40, add(arrData, add(0x20, newCap))) // Expand the memory allocation.
+                    break
+                }
+                // Set the `newArrData` to point to the word after `cap`.
+                let newArrData := add(mload(0x40), 0x20)
+                mstore(0x40, add(newArrData, add(0x20, newCap))) // Reallocate the memory.
+                mstore(a, newArrData) // Store the `newArrData`.
+                let w := not(0x1f)
+                // Copy `arrData` one word at a time, backwards, its length included.
+                for { let o := newArrBytesLen } 1 {} {
+                    mstore(add(newArrData, o), mload(add(arrData, o)))
+                    if iszero(o) { break }
+                    o := add(o, w) // `sub(o, 0x20)`.
+                }
+                mstore(add(newArrData, w), mul(prime, newCap)) // Store the memory.
+                break
+            }
+        }
+    }
+
+    /// @dev Frees `a`'s memory if it ends at the free memory pointer, and empties it.
+    /// @custom:solar-trusted
+    function _free(DynamicArray memory a) private pure {
+        /// @solidity memory-safe-assembly
+        assembly {
+            let arrData := mload(a)
+            if iszero(eq(arrData, 0x60)) {
+                let prime := 8188386068317523
+                let cap := mload(sub(arrData, 0x20))
+                // Extract `cap`, initializing it to zero if it is not a multiple of `prime`.
+                cap := mul(div(cap, prime), iszero(mod(cap, prime)))
+                // If `cap` is non-zero and the memory is contiguous, we can free it.
+                if lt(iszero(cap), eq(mload(0x40), add(arrData, add(0x20, cap)))) {
+                    mstore(0x40, sub(arrData, 0x20))
+                }
+                mstore(a, 0x60)
+            }
+        }
+    }
+
+    /// @dev Sets the length of `a`, which its capacity covers, to `n`.
+    /// @custom:solar-trusted
+    function _setLength(uint256[] memory a, uint256 n) private pure {
+        /// @solidity memory-safe-assembly
+        assembly {
+            mstore(a, n)
         }
     }
 }

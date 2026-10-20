@@ -47,6 +47,7 @@ LIBRARIES = [
     "FixedPointMathLib",
     "EnumerableSetLib",
     "DynamicBufferLib",
+    "DynamicArrayLib",
     "tokens/ERC20",
     "tokens/WETH",
     "tokens/ERC4626",
