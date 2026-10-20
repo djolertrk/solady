@@ -18,6 +18,13 @@ pragma solidity ^0.8.4;
 /// May be useful for generating ERC-6492 compliant signatures.
 /// Inspired by Ambire's DeploylessUniversalSigValidator
 /// (https://github.com/AmbireTech/signature-validator/blob/main/contracts/DeploylessUniversalSigValidator.sol)
+///
+/// The checked port makes the factory call and the queries as plain calls with the value and
+/// gas the assembly passes, and `abi.encode`s the results, which is the encoding the assembly
+/// builds. A constructor can only return its contract's runtime code in Solidity, so the
+/// trusted `_deploylessPredeployQueryerReturnRaw` returns the encoding as the deployed code,
+/// and the trusted `_deploylessPredeployQueryerRevertRaw` bubbles up a failed call's revert.
+/// @custom:solar-safe memory arithmetic
 contract DeploylessPredeployQueryer {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                       CUSTOM ERRORS                        */
@@ -42,50 +49,46 @@ contract DeploylessPredeployQueryer {
         address factory,
         bytes memory factoryCalldata
     ) payable {
+        // If the target does not exist, deploy it.
+        if (target.code.length == 0) {
+            (bool success, bytes memory result) =
+                factory.call{value: address(this).balance}(factoryCalldata);
+            if (!success) _deploylessPredeployQueryerRevertRaw(result);
+            if (result.length < 0x20 || abi.decode(result, (uint256)) != uint160(target)) {
+                revert ReturnedAddressMismatch();
+            }
+        }
+        // Each query's result takes its place in `targetQueryCalldata`.
+        for (uint256 i; i < targetQueryCalldata.length; ++i) {
+            (bool success, bytes memory result) =
+                target.call{value: address(this).balance}(targetQueryCalldata[i]);
+            if (!success) _deploylessPredeployQueryerRevertRaw(result);
+            targetQueryCalldata[i] = result;
+        }
+        _deploylessPredeployQueryerReturnRaw(abi.encode(targetQueryCalldata));
+    }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      PRIVATE HELPERS                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev Reverts the current call with exactly `data`. Solidity can only revert with an
+    /// error or a reason string.
+    /// @custom:solar-trusted
+    function _deploylessPredeployQueryerRevertRaw(bytes memory data) private pure {
         /// @solidity memory-safe-assembly
         assembly {
-            let m := mload(0x40)
-            // If the target does not exist, deploy it.
-            if iszero(extcodesize(target)) {
-                if iszero(
-                    call(
-                        gas(),
-                        factory,
-                        selfbalance(),
-                        add(factoryCalldata, 0x20),
-                        mload(factoryCalldata),
-                        m,
-                        0x20
-                    )
-                ) {
-                    returndatacopy(m, 0x00, returndatasize())
-                    revert(m, returndatasize())
-                }
-                if iszero(and(gt(returndatasize(), 0x1f), eq(mload(m), target))) {
-                    mstore(0x00, 0xd1f6b812) // `ReturnedAddressMismatch()`.
-                    revert(0x1c, 0x04)
-                }
-            }
-            let l := mload(targetQueryCalldata)
-            let n := shl(5, l)
-            let r := add(m, 0x40)
-            let o := add(r, n)
-            for { let i := 0 } iszero(eq(i, n)) { i := add(0x20, i) } {
-                let j := mload(add(add(targetQueryCalldata, 0x20), i))
-                if iszero(
-                    call(gas(), target, selfbalance(), add(j, 0x20), mload(j), codesize(), 0x00)
-                ) {
-                    returndatacopy(m, 0x00, returndatasize())
-                    revert(m, returndatasize())
-                }
-                mstore(add(r, i), sub(o, r))
-                mstore(o, returndatasize())
-                returndatacopy(add(o, 0x20), 0x00, returndatasize())
-                o := and(add(add(o, returndatasize()), 0x3f), not(0x1f))
-            }
-            mstore(m, 0x20)
-            mstore(add(m, 0x20), l)
-            return(m, sub(o, m))
+            revert(add(data, 0x20), mload(data))
+        }
+    }
+
+    /// @dev Ends the creation with exactly `data` as the deployed code. Solidity deploys the
+    /// contract's own runtime code.
+    /// @custom:solar-trusted
+    function _deploylessPredeployQueryerReturnRaw(bytes memory data) private pure {
+        /// @solidity memory-safe-assembly
+        assembly {
+            return(add(data, 0x20), mload(data))
         }
     }
 }
