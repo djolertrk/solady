@@ -45,11 +45,6 @@ CHECKED_LIBRARIES = (
     "ECDSA",
     "SignatureCheckerLib",
 )
-CORE_PREFIX = "solar:core/"
-# The compiler-owned modules the port may import. Under solar the compiler
-# supplies them itself and sets a supplied copy aside; the copy is what lets
-# the solc legs resolve the same import.
-DEFAULT_CORE_MODULES = REPO.parent / "solar/crates/std/solidity"
 MAX = (1 << 256) - 1
 # EIP-170's limit on deployed runtime code, in bytes.
 CODE_SIZE_LIMIT = 0x6000
@@ -133,7 +128,6 @@ def safety_violations(output):
     return [
         (path, node["nodeType"])
         for path, source in output["sources"].items()
-        if not path.startswith(CORE_PREFIX)
         for node in unsafe_nodes(source["ast"])
     ]
 
@@ -149,13 +143,6 @@ def trusted_declarations(output):
                         name = node["name"] + ("" if item is node else "." + item.get("name", ""))
                         found.append(f"{path}:{name}")
     return sorted(set(found))
-
-
-def core_sources(core_dir):
-    return {
-        CORE_PREFIX + path.relative_to(core_dir).as_posix(): {"content": path.read_text()}
-        for path in sorted(Path(core_dir).rglob("*.sol"))
-    }
 
 
 def type_name(parameter):
@@ -333,7 +320,6 @@ def prepare(
     out,
     api_filters=(),
     isolate=False,
-    core_dir=DEFAULT_CORE_MODULES,
     upstream_overrides=(),
 ):
     archive = json.loads(gzip.decompress(ARCHIVE.read_bytes()))
@@ -353,8 +339,7 @@ def prepare(
         {
             p.relative_to(ROOT).as_posix(): {"content": p.read_text()}
             for p in sorted((ROOT / "src").rglob("*.sol"))
-        }
-        | core_sources(core_dir),
+        },
         [f"src/utils/{name}.sol" for name in CHECKED_LIBRARIES],
     )
     safe = dict(sorted(safe.items()))
@@ -488,9 +473,6 @@ def prepare(
         "archive_sha256": digest(ARCHIVE.read_bytes()),
         "policy": "no InlineAssembly or UncheckedBlock in any safe source or dependency outside declarations tagged @custom:solar-trusted",
         "trusted_declarations": trusted_declarations(safe_ast),
-        "core_modules": {
-            p: digest(v["content"].encode()) for p, v in safe.items() if p.startswith(CORE_PREFIX)
-        },
         "port_only_sources": port_only,
         "upstream_overrides": overridden,
         "source_sha256": {p: digest(v["content"].encode()) for p, v in safe.items()},
@@ -1885,7 +1867,6 @@ def run(args):
         out,
         args.api,
         args.isolate_api,
-        core_dir=args.core_modules,
         upstream_overrides=args.upstream_override or (),
     )
     variants = [
@@ -2302,12 +2283,6 @@ if __name__ == "__main__":
         "--isolate-api",
         action="store_true",
         help="compile a harness containing only the APIs selected by --api",
-    )
-    parser.add_argument(
-        "--core-modules",
-        type=Path,
-        default=DEFAULT_CORE_MODULES,
-        help="directory holding the compiler-owned solar:core module sources",
     )
     parser.add_argument(
         "--upstream-override",

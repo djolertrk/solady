@@ -660,8 +660,7 @@ def run(args):
         {
             p.relative_to(benchmark.ROOT).as_posix(): {"content": p.read_text()}
             for p in sorted((benchmark.ROOT / "src").rglob("*.sol"))
-        }
-        | benchmark.core_sources(args.core_modules),
+        },
         ROOTS,
     )
     ast_settings = {"outputSelection": {"*": {"": ["ast"]}}}
@@ -934,12 +933,6 @@ def main():
     parser.add_argument("--runs", type=int, default=200)
     parser.add_argument("--evm-version", default="cancun")
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument(
-        "--core-modules",
-        type=Path,
-        default=benchmark.DEFAULT_CORE_MODULES,
-        help="directory holding the compiler-owned solar:core module sources",
-    )
     raise SystemExit(run(parser.parse_args()))
 
 

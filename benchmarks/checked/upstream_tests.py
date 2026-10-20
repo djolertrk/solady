@@ -6,9 +6,8 @@
 """Run the pinned upstream tests for the ported libraries whose suites compile.
 
 Original test helpers remain test oracles, including their assembly. Only the
-selected production sources are replaced in the safe legs, which also receive
-the compiler's core modules; `--ported` also replaces every other ported source
-the suites import. A library is named by its path below `src/`, or by
+selected production sources are replaced in the safe legs; `--ported` also
+replaces every other ported source the suites import. A library is named by its path below `src/`, or by
 its bare name for `src/utils/`; its suite is `test/<name>.t.sol` unless
 `SUITES` names another. This is an additional correctness check, not the gas
 benchmark or safety audit.
@@ -27,11 +26,9 @@ from pathlib import Path
 
 from benchmark import (
     ARCHIVE,
-    DEFAULT_CORE_MODULES,
     REPO,
     ROOT,
     closure,
-    core_sources,
     digest,
 )
 
@@ -241,12 +238,6 @@ def run(args):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text)
             hashes[name] = digest(text.encode())
-        if safe:
-            for name, source in core_sources(args.core_modules).items():
-                path = folder / name
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(source["content"])
-                hashes[name] = digest(source["content"].encode())
         if args.fair:
             for name, patches in FAIR_PATCHES.items():
                 path = folder / name
@@ -349,7 +340,6 @@ if __name__ == "__main__":
         action="append",
         help="library to test, repeatable (default: every library whose suite passes)",
     )
-    parser.add_argument("--core-modules", type=Path, default=DEFAULT_CORE_MODULES)
     parser.add_argument("--fuzz-runs", type=int, default=256)
     parser.add_argument(
         "--legacy", action="store_true", help="build solc's legs without via-IR"
