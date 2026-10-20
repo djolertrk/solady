@@ -27,7 +27,9 @@ using LibBytes for BytesStorage global;
 /// slot derived from a struct's. Stores write zeros past the end of the value, where upstream
 /// copies whatever memory or calldata follows it. `uint8At` returns zero from the length on,
 /// as upstream does since its stale-byte fix; the pinned release could return a byte left
-/// there by a longer value.
+/// there by a longer value. A fresh result that does not fill its last word is either built in
+/// whole words and cut to its length by `_truncate`, or gets a zero word after its end from
+/// `_zeroPad`, as legacy solc's `new bytes(n)` clears only `n` bytes.
 /// @custom:solar-safe memory arithmetic
 library LibBytes {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -56,33 +58,35 @@ library LibBytes {
     /// @dev Sets the value of the bytes storage `$` to `s`.
     function set(BytesStorage storage $, bytes memory s) internal {
         uint256 n = s.length;
+        // Below 255 bytes, the length in the low byte and the first 31 bytes
+        // above it, zero past the end, and the rest from byte 31 on in the
+        // derived words. Otherwise `0xff` and the length above it, and the
+        // whole value in the derived words.
         if (n < 32) {
-            // The length in the low byte and the value above it.
-            $._spacer = bytes32((uint256(bytes32(s)) >> 8 << 8) | n);
-        } else if (n < 0xff) {
-            // The length in the low byte, the first 31 bytes above it, from
-            // a first word that is whole, and the rest from byte 31 on in the
-            // derived words.
-            $._spacer = bytes32((uint256(_readBytes32(s, 0)) >> 8 << 8) | n);
-            _storeBytes($, s, 31, n - 31);
+            $._spacer = bytes32((uint256(bytes32(s)) & ~uint256(0xff)) | n);
+            return;
+        }
+        uint256 i = 31;
+        if (n < 0xff) {
+            $._spacer = bytes32((uint256(_readBytes32(s, 0)) & ~uint256(0xff)) | n);
         } else {
             $._spacer = bytes32((n << 8) | 0xff);
-            _storeBytes($, s, 0, n);
+            i = 0;
         }
+        _sstoreFrom($, s, i);
     }
 
     /// @dev Sets the value of the bytes storage `$` to `s`.
     function setCalldata(BytesStorage storage $, bytes calldata s) internal {
         uint256 n = s.length;
-        if (n < 32) {
-            $._spacer = bytes32((uint256(bytes32(s)) >> 8 << 8) | n);
-        } else if (n < 0xff) {
-            $._spacer = bytes32((uint256(_calldataReadBytes32(s, 0)) >> 8 << 8) | n);
-            _storeCalldataBytes($, s, 31, n - 31);
-        } else {
-            $._spacer = bytes32((n << 8) | 0xff);
-            _storeCalldataBytes($, s, 0, n);
+        uint256 i = 31;
+        uint256 packed = (uint256(bytes32(s)) & ~uint256(0xff)) | n;
+        if (n > 0xfe) {
+            packed = (n << 8) | 0xff;
+            i = 0;
         }
+        $._spacer = bytes32(packed);
+        if (n > i) _sstoreCalldataFrom($, s, i);
     }
 
     /// @dev Sets the value of the bytes storage `$` to the empty bytes.
@@ -106,29 +110,24 @@ library LibBytes {
     function get(BytesStorage storage $) internal view returns (bytes memory result) {
         uint256 packed = uint256($._spacer);
         uint256 n = packed & 0xff;
-        if (n == 0xff) {
-            n = packed >> 8;
-            result = new bytes(n);
-            _loadBytes($, result, 0, n);
+        if (n < 32) {
+            // The bytes above the length byte, up to the length, and zeros.
+            result = abi.encodePacked(bytes32(packed & ~(type(uint256).max >> (n << 3))));
+            _truncate(result, n);
             return result;
         }
-        // Up to 31 bytes above the length, then the rest from the derived
-        // words, all of them whole: a spare word past the end takes the
-        // whole root word and the last derived word's bytes past the value.
-        result = new bytes(n + 32);
-        _writeBytes32(result, 0, bytes32(packed));
-        if (n > 31) {
-            // Up to two derived words directly, more through the loop.
-            if (n < 96) {
-                _writeBytes32(result, 31, _load($, 0));
-                if (n > 63) _writeBytes32(result, 63, _load($, 1));
-            } else {
-                _loadBytes($, result, 31, n & ~uint256(31));
-            }
+        // The bytes from `i` on come from the derived words.
+        uint256 i = 31;
+        if (n == 0xff) {
+            n = packed >> 8;
+            i = 0;
         }
-        // Zero past the end, as the original does, then cut to the length.
-        _writeBytes32(result, n, bytes32(0));
-        _truncate(result, n);
+        // Before the allocation, so that `result` is the last one.
+        uint256 slot = _dataSlot(_slot($));
+        result = new bytes(n);
+        // The first 31 bytes, and a length byte that the derived words overwrite.
+        if (i != 0) _writeBytes32(result, 0, bytes32(packed));
+        if (n > i) _sloadInto(slot, result, i);
     }
 
     /// @dev Returns the uint8 at index `i`. If out-of-bounds, returns 0.
@@ -139,10 +138,10 @@ library LibBytes {
             if (i >= n) return 0;
             if (i < 31) return uint8(bytes32(packed)[i]);
             uint256 j = i - 31;
-            return uint8(_load($, j >> 5)[j & 31]);
+            return uint8(_sload(_add(_dataSlot(_slot($)), j >> 5))[j & 31]);
         }
         if (i >= packed >> 8) return 0;
-        return uint8(_load($, i >> 5)[i & 31]);
+        return uint8(_sload(_add(_dataSlot(_slot($)), i >> 5))[i & 31]);
     }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -181,14 +180,18 @@ library LibBytes {
         // The needle in every byte: a word of the subject XOR it has a zero
         // byte exactly where the needle occurs.
         uint256 h = uint256(uint8(needle)) * LANES_01;
-        for (uint256 i = from; i < n; i += 32) {
-            uint256 hits = _zeroBytes(_wordAt(subject, i) ^ h);
-            // `_wordAt` pads with zeros past the end, which a zero needle
-            // would match.
-            if (n - i < 32) hits &= ~(type(uint256).max >> (8 * (n - i)));
+        // Whole words, then the bytes past the last one, whose zero padding a
+        // zero needle would match.
+        uint256 i = from;
+        uint256 hits;
+        for (; n >= 32 && i <= n - 32; i += 32) {
+            hits = _zeroBytes(uint256(_readBytes32(subject, i)) ^ h);
             if (hits != 0) return i + _leadingByte(hits);
         }
-        return NOT_FOUND;
+        if (i >= n) return NOT_FOUND;
+        hits = _zeroBytes(uint256(_readBytesN(subject, i, n - i)) ^ h)
+            & ~(type(uint256).max >> ((n - i) << 3));
+        return hits == 0 ? NOT_FOUND : i + _leadingByte(hits);
     }
 
     /// @dev Returns the byte index of the first location of `needle` in `subject`,
@@ -280,6 +283,7 @@ library LibBytes {
         if (start >= end) return "";
         result = new bytes(end - start);
         _copyFresh(result, 0, subject, start, end - start);
+        _zeroPad(result);
     }
 
     /// @dev Returns a copy of `subject` sliced from `start` to the end of the bytes.
@@ -294,6 +298,7 @@ library LibBytes {
         if (start >= n) return "";
         result = new bytes(n - start);
         _copyFresh(result, 0, subject, start, n - start);
+        _zeroPad(result);
     }
 
     /// @dev Returns a copy of `subject` sliced from `start` to `end` (exclusive).
@@ -360,8 +365,13 @@ library LibBytes {
 
     /// @dev Returns a concatenated bytes of `a` and `b`.
     /// Cheaper than `bytes.concat()` and does not de-align the free memory pointer.
+    /// @custom:solar-inline
     function concat(bytes memory a, bytes memory b) internal pure returns (bytes memory result) {
-        return bytes.concat(a, b);
+        // A word of zeros after the bytes pads their last word, inside the allocation, under
+        // every compiler (legacy solc's `bytes.concat` neither clears nor allocates it), and is
+        // cut off again.
+        result = abi.encodePacked(a, b, bytes32(0));
+        _truncate(result, result.length - 32);
     }
 
     /// @dev Returns whether `a` equals `b`.
@@ -515,92 +525,74 @@ library LibBytes {
     /*                      PRIVATE HELPERS                       */
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
-    /// @dev The word `index` slots into the region `$` roots, `keccak256` of
-    /// its slot onwards. The index must be below `2**64`, so a region never
-    /// reaches another variable's slots.
+    /// @dev Stores the bytes of `b` from `offset` on, at least one, in the words `$` derives,
+    /// 32 to a word, the last word zero past them. Solidity cannot name a slot it did not
+    /// allocate.
     /// @custom:solar-trusted
-    function _load(BytesStorage storage $, uint256 index) private view returns (bytes32 value) {
-        if (index >> 64 != 0) index = new uint256[](0)[0];
+    /// @custom:solar-inline
+    function _sstoreFrom(BytesStorage storage $, bytes memory b, uint256 offset) private {
+        if (offset >= b.length) _outOfBounds();
+        uint256 slot = _dataSlot(_slot($));
         /// @solidity memory-safe-assembly
         assembly {
-            mstore(0x00, $.slot)
-            value := sload(add(keccak256(0x00, 0x20), index))
-        }
-    }
-
-    /// @dev Stores `count` bytes of `b` from `offset` into the region `$`
-    /// roots, 32 bytes to a word from word 0, zeroing the last word past them.
-    /// @custom:solar-trusted
-    function _storeBytes(BytesStorage storage $, bytes memory b, uint256 offset, uint256 count)
-        private
-    {
-        if (count >> 69 != 0 || offset > b.length || count > b.length - offset) {
-            count = new uint256[](0)[0];
-        }
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x00, $.slot)
-            let base := keccak256(0x00, 0x20)
             let src := add(add(b, 0x20), offset)
-            for { let k := 0 } lt(shl(5, k), count) { k := add(k, 1) } {
-                let w := mload(add(src, shl(5, k)))
-                let rest := sub(count, shl(5, k))
-                if lt(rest, 0x20) { w := and(w, not(shr(shl(3, rest), not(0)))) }
-                sstore(add(base, k), w)
-            }
-        }
-    }
-
-    /// @dev `_storeBytes` from calldata.
-    /// @custom:solar-trusted
-    function _storeCalldataBytes(
-        BytesStorage storage $,
-        bytes calldata b,
-        uint256 offset,
-        uint256 count
-    ) private {
-        if (count >> 69 != 0 || offset > b.length || count > b.length - offset) {
-            count = new uint256[](0)[0];
-        }
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x00, $.slot)
-            let base := keccak256(0x00, 0x20)
-            let src := add(b.offset, offset)
-            for { let k := 0 } lt(shl(5, k), count) { k := add(k, 1) } {
-                let w := calldataload(add(src, shl(5, k)))
-                let rest := sub(count, shl(5, k))
-                if lt(rest, 0x20) { w := and(w, not(shr(shl(3, rest), not(0)))) }
-                sstore(add(base, k), w)
-            }
-        }
-    }
-
-    /// @dev Writes `count` bytes of the region `$` roots, from the start of
-    /// word 0, into `b` at `offset`. The other bytes of `b` stay unchanged.
-    /// @custom:solar-trusted
-    function _loadBytes(BytesStorage storage $, bytes memory b, uint256 offset, uint256 count)
-        private
-        view
-    {
-        if (count >> 69 != 0 || offset > b.length || count > b.length - offset) {
-            count = new uint256[](0)[0];
-        }
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x00, $.slot)
-            let base := keccak256(0x00, 0x20)
-            let dst := add(add(b, 0x20), offset)
-            for { let k := 0 } lt(shl(5, k), count) { k := add(k, 1) } {
-                let w := sload(add(base, k))
-                let at := add(dst, shl(5, k))
-                let rest := sub(count, shl(5, k))
-                if lt(rest, 0x20) {
-                    let keep := shr(shl(3, rest), not(0))
-                    w := or(and(w, not(keep)), and(mload(at), keep))
+            let end := add(add(b, 0x20), mload(b))
+            // The last word starts where at most 32 bytes remain.
+            let last := add(src, and(sub(sub(end, src), 1), not(31)))
+            if lt(src, last) {
+                for {} 1 {} {
+                    sstore(slot, mload(src))
+                    slot := add(slot, 1)
+                    src := add(src, 0x20)
+                    if iszero(lt(src, last)) { break }
                 }
-                mstore(at, w)
             }
+            sstore(slot, and(mload(src), not(shr(shl(3, sub(end, src)), not(0)))))
+        }
+    }
+
+    /// @dev `_sstoreFrom` from calldata.
+    /// @custom:solar-trusted
+    /// @custom:solar-inline
+    function _sstoreCalldataFrom(BytesStorage storage $, bytes calldata b, uint256 offset) private {
+        if (offset >= b.length) _outOfBounds();
+        uint256 slot = _dataSlot(_slot($));
+        /// @solidity memory-safe-assembly
+        assembly {
+            let src := add(b.offset, offset)
+            let end := add(b.offset, b.length)
+            let last := add(src, and(sub(sub(end, src), 1), not(31)))
+            if lt(src, last) {
+                for {} 1 {} {
+                    sstore(slot, calldataload(src))
+                    slot := add(slot, 1)
+                    src := add(src, 0x20)
+                    if iszero(lt(src, last)) { break }
+                }
+            }
+            sstore(slot, and(calldataload(src), not(shr(shl(3, sub(end, src)), not(0)))))
+        }
+    }
+
+    /// @dev Writes the slots from `slot` on, 32 bytes to a word, into `b` from `offset`, which
+    /// must be below its length, to its end, then a zero word at the end, which clears the
+    /// rest of the last word written and can reach up to 32 bytes past `b`'s allocation:
+    /// `b` must be the last allocation, as for `_truncate`'s word past the end in LibString.
+    /// @custom:solar-trusted
+    /// @custom:solar-inline
+    function _sloadInto(uint256 slot, bytes memory b, uint256 offset) private view {
+        if (offset >= b.length) _outOfBounds();
+        /// @solidity memory-safe-assembly
+        assembly {
+            let dst := add(add(b, 0x20), offset)
+            let end := add(add(b, 0x20), mload(b))
+            for {} 1 {} {
+                mstore(dst, sload(slot))
+                slot := add(slot, 1)
+                dst := add(dst, 0x20)
+                if iszero(lt(dst, end)) { break }
+            }
+            mstore(end, 0)
         }
     }
 
@@ -612,6 +604,18 @@ library LibBytes {
         /// @solidity memory-safe-assembly
         assembly {
             mstore(b, n)
+        }
+    }
+
+    /// @dev Zeroizes the word after `b`'s last byte, the rest of `b`'s last word with it, which
+    /// legacy solc's `new bytes(n)` leaves dirty. `b` must be the last allocation, so that the
+    /// rest of that word is free memory.
+    /// @custom:solar-trusted
+    /// @custom:solar-inline
+    function _zeroPad(bytes memory b) private pure {
+        /// @solidity memory-safe-assembly
+        assembly {
+            mstore(add(add(b, 0x20), mload(b)), 0)
         }
     }
 
@@ -627,6 +631,17 @@ library LibBytes {
     /// @custom:solar-inline
     function _writeBytes32(bytes memory b, uint256 offset, bytes32 value) private pure {
         for (uint256 k; k < 32; ++k) {
+            b[offset + k] = value[k];
+        }
+    }
+
+    /// @dev Writes the leading `count` bytes of `value`, at most a word, to `b` at `offset`.
+    /// @custom:solar-inline
+    function _writeBytesN(bytes memory b, uint256 offset, bytes32 value, uint256 count)
+        private
+        pure
+    {
+        for (uint256 k; k < count; ++k) {
             b[offset + k] = value[k];
         }
     }
@@ -679,9 +694,47 @@ library LibBytes {
             }
             size += most * growth;
         }
+        if (subject.length < 33 && replacement.length < 33) {
+            return _replaceShort(subject, needle, replacement, size);
+        }
         bytes memory out = new bytes(size + 32);
         _truncate(out, _replaceInto(out, subject, needle, replacement, rhead));
         return out;
+    }
+
+    /// @dev `_replace` for a subject and a replacement of at most a word each,
+    /// and a needle of one byte or more that fits the subject: the subject is
+    /// one word, compared with the needle at each offset in turn, and every
+    /// piece of the result, built in a buffer with room for `size` bytes and a
+    /// word of slack, is written as one word, zero past the piece.
+    function _replaceShort(
+        bytes memory subject,
+        bytes memory needle,
+        bytes memory replacement,
+        uint256 size
+    ) private pure returns (bytes memory out) {
+        out = new bytes(size + 32);
+        uint256 s = uint256(bytes32(subject));
+        uint256 head = uint256(bytes32(needle));
+        uint256 m = needle.length;
+        uint256 mask = ~(type(uint256).max >> (m << 3));
+        uint256 last = subject.length - m;
+        uint256 o;
+        uint256 copied;
+        for (uint256 at; at <= last;) {
+            if ((s << (at << 3)) & mask != head) {
+                ++at;
+                continue;
+            }
+            _writeBytes32(out, o, bytes32(s << (copied << 3)));
+            o += at - copied;
+            _writeBytes32(out, o, bytes32(replacement));
+            o += replacement.length;
+            copied = at + m;
+            at = copied;
+        }
+        _writeBytes32(out, o, bytes32(s << (copied << 3)));
+        _truncate(out, o + subject.length - copied);
     }
 
     /// @dev Writes `_replace`'s result into `out`, which has room for it and a
@@ -706,7 +759,7 @@ library LibBytes {
                 copied = at + needle.length;
                 at = copied;
             } while (copied <= last && _matchAt(subject, copied, needle, head));
-            at = copied > last ? NOT_FOUND : _scan(subject, copied + 1, last, needle, head);
+            at = copied >= last ? NOT_FOUND : _scan(subject, copied + 1, last, needle, head);
         }
         o = _copyPiece(out, o, subject, copied, subject.length - copied);
     }
@@ -808,18 +861,29 @@ library LibBytes {
                 found[count++] = at;
                 at += n.length;
             } while (at <= last && _matchAt(s, at, n, head));
-            at = at > last ? NOT_FOUND : _scan(s, at + 1, last, n, head);
+            at = at >= last ? NOT_FOUND : _scan(s, at + 1, last, n, head);
         }
         if (count != most) _truncateWords(found, count);
     }
 
     /// @dev `subject` repeated `times` times, or empty bytes when either
-    /// is zero: one copy of the subject, then the filled prefix doubled in
-    /// place, each copy reading only bytes already written.
+    /// is zero. Up to a word, the copies are shifted side by side into one
+    /// fresh word; longer, one copy of the subject is followed by the filled
+    /// prefix doubled in place, each copy reading only bytes already written.
     function _repeat(bytes memory subject, uint256 times) private pure returns (bytes memory) {
         bytes memory s = bytes(subject);
         if (times == 0 || s.length == 0) return "";
         uint256 total = s.length * times;
+        if (total < 33) {
+            uint256 copy = uint256(bytes32(s));
+            uint256 word;
+            for (uint256 o; o < total; o += s.length) {
+                word |= copy >> (o << 3);
+            }
+            bytes memory short = abi.encodePacked(bytes32(word));
+            _truncate(short, total);
+            return short;
+        }
         bytes memory out = new bytes(total);
         _copyFresh(out, 0, s, 0, s.length);
         uint256 filled = s.length;
@@ -829,6 +893,7 @@ library LibBytes {
             _copyInto(out, filled, out, 0, step);
             filled += step;
         }
+        _zeroPad(out);
         return out;
     }
 
@@ -843,8 +908,9 @@ library LibBytes {
         if (d.length == 0) {
             result = new bytes[](s.length);
             for (uint256 i; i < s.length; ++i) {
-                bytes memory part = new bytes(1);
-                part[0] = s[i];
+                // One fresh word, cut to the byte.
+                bytes memory part = abi.encodePacked(bytes32(s[i]));
+                _truncate(part, 1);
                 result[i] = part;
             }
             return result;
@@ -886,7 +952,7 @@ library LibBytes {
                 ++count;
                 at += needle.length;
             } while (at <= last && _matchAt(subject, at, needle, head));
-            at = at > last ? NOT_FOUND : _scan(subject, at + 1, last, needle, head);
+            at = at >= last ? NOT_FOUND : _scan(subject, at + 1, last, needle, head);
         }
     }
 
@@ -947,8 +1013,8 @@ library LibBytes {
         pure
         returns (bool)
     {
-        uint256 width = needle.length < 32 ? needle.length : 32;
-        if (_readBytesN(subject, at, width) != head) return false;
+        // The leading bytes of the needle's length, at most a word of them.
+        if (_readBytesN(subject, at, needle.length) != head) return false;
         return needle.length <= 32 || _tailMatchesAt(subject, at, needle);
     }
 
@@ -969,7 +1035,7 @@ library LibBytes {
     /// @dev The first bytes of `needle`, up to a word, left-aligned.
     /// @custom:solar-inline
     function _head(bytes memory needle) private pure returns (bytes32) {
-        return _readBytesN(needle, 0, needle.length < 32 ? needle.length : 32);
+        return _readBytesN(needle, 0, needle.length);
     }
 
     /// @dev The bytes of `b` from `i`, up to a word, left-aligned: the word at
@@ -988,26 +1054,17 @@ library LibBytes {
         return ~(((z & LANES_7F) + LANES_7F) | z | LANES_7F);
     }
 
-    /// @dev The index, from the top, of the first nonzero byte of `x`, which
-    /// must not be zero.
+    /// @dev The index, from the top, of the first byte of `x` with its top bit
+    /// set. `x` has only top bits set, and at least one: spread down to every
+    /// later byte, the marks leave unmarked exactly the bytes before the first,
+    /// which a multiplication by a one in every byte counts into the top byte.
     function _leadingByte(uint256 x) private pure returns (uint256 r) {
-        if (x >> 128 == 0) {
-            r = 16;
-            x <<= 128;
-        }
-        if (x >> 192 == 0) {
-            r += 8;
-            x <<= 64;
-        }
-        if (x >> 224 == 0) {
-            r += 4;
-            x <<= 32;
-        }
-        if (x >> 240 == 0) {
-            r += 2;
-            x <<= 16;
-        }
-        if (x >> 248 == 0) ++r;
+        x |= x >> 8;
+        x |= x >> 16;
+        x |= x >> 32;
+        x |= x >> 64;
+        x |= x >> 128;
+        return _rawMul((~x & _HIGH_BITS) >> 7, LANES_01) >> 248;
     }
 
     /// @dev The keccak-256 hash of the `count` bytes of `b` at `offset`.
@@ -1033,6 +1090,7 @@ library LibBytes {
     {
         part = new bytes(end - start);
         _copyFresh(part, 0, s, start, end - start);
+        _zeroPad(part);
     }
 
     /// @dev Copies `count` bytes from `src` at `srcOffset` to `dst` at
@@ -1150,6 +1208,48 @@ library LibBytes {
         /// @solidity memory-safe-assembly
         assembly {
             return(add(data, 0x20), mload(data))
+        }
+    }
+
+    /// @dev The storage slot of `$`.
+    /// @custom:solar-trusted
+    /// @custom:solar-inline
+    function _slot(BytesStorage storage $) private pure returns (uint256 slot) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            slot := $.slot
+        }
+    }
+
+    /// @dev The first of the words the value at `slot` continues in.
+    function _dataSlot(uint256 slot) private pure returns (uint256) {
+        return uint256(keccak256(abi.encode(slot)));
+    }
+
+    /// @dev The word in storage slot `slot`. Solidity cannot name a slot it did not allocate.
+    /// @custom:solar-trusted
+    /// @custom:solar-inline
+    function _sload(uint256 slot) private view returns (bytes32 value) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            value := sload(slot)
+        }
+    }
+
+    /// @dev `a + b` modulo `2**256`.
+    /// @custom:solar-trusted
+    /// @custom:solar-inline
+    function _add(uint256 a, uint256 b) private pure returns (uint256 c) {
+        unchecked {
+            c = a + b;
+        }
+    }
+
+    /// @dev `x * y` modulo `2**256`.
+    /// @custom:solar-trusted
+    function _rawMul(uint256 x, uint256 y) private pure returns (uint256 z) {
+        unchecked {
+            z = x * y;
         }
     }
 }

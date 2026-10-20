@@ -32,7 +32,13 @@ import {LibBytes} from "../LibBytes.sol";
 /// storage operations go through `bytesStorage`, which views a `StringStorage` as a
 /// `BytesStorage` at the same slot with upstream's packed layout. `bytesStorage` and
 /// `directReturn` stay trusted assembly: Solidity cannot retype a storage reference, and a
-/// `return` statement leaves only the function it is in.
+/// `return` statement leaves only the function it is in. Strings built from whole words, the
+/// decimal and short hexadecimal ones, the escapes, the checksummed addresses and the unpacked
+/// strings, take their length from `_truncate` or `_setLength`, which shorten a fresh buffer in
+/// place; the other fresh strings get a zero word after their end from `_zeroPad`, as legacy
+/// solc's `new bytes(n)` clears only `n` bytes. `_rawMul` is wrap-around arithmetic for the
+/// digit conversions and byte counts done a word at a time, whose lanes never carry into each
+/// other.
 /// @custom:solar-safe memory arithmetic
 library LibString {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -114,6 +120,9 @@ library LibString {
     uint256 private constant SPREAD_ASCII_0 =
         0x3030303030303030303030303030303030303030303030303030303030303030;
 
+    uint256 private constant SPREAD_2A =
+        0x2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a;
+
     uint256 private constant SPREAD_1F =
         0x1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f;
 
@@ -135,6 +144,28 @@ library LibString {
 
     /// @dev Uppercase hexadecimal digits.
     bytes16 private constant _UPPER_DIGITS = "0123456789ABCDEF";
+
+    /// @dev `_UPPER_DIGITS` as a word, which indexes without a shift.
+    bytes32 private constant _UPPER_HEX = "0123456789ABCDEF";
+
+    /// @dev `&quot;&amp;&#39;&lt;&gt;`, the entities `escapeHTML` writes.
+    bytes32 private constant _HTML_ENTITIES =
+        0x2671756f743b26616d703b262333393b266c743b2667743b0000000000000000;
+
+    /// @dev For each byte `escapeHTML` replaces, at the index of its low five
+    /// bits, the length of its entity times 32 plus the entity's offset in
+    /// `_HTML_ENTITIES`.
+    bytes32 private constant _HTML_ENTITY_SPANS =
+        0x0000c0000000a6ab000000000000000000000000000000000000000090009400;
+
+    /// @dev One bit for each byte JSON escapes in two characters: `"`, `\`, and
+    /// the controls `\b`, `\t`, `\n`, `\f` and `\r` spell.
+    uint256 private constant _JSON_SHORT_ESCAPED = 0x100000000000000400003700;
+
+    /// @dev The second character of the two-character JSON escape of each byte
+    /// in `_JSON_SHORT_ESCAPED`, at the index of the byte's low five bits.
+    bytes32 private constant _JSON_SHORT_ESCAPES =
+        0x000022000000000062746e00667200000000000000000000000000005c000000;
 
     /// @dev One bit per byte a URI component keeps: letters, digits and `-_.!~*'()`.
     uint256 private constant _URI_UNRESERVED = 0x47fffffe87fffffe03ff678200000000;
@@ -199,12 +230,14 @@ library LibString {
 
     /// @dev Returns the base 10 decimal representation of `value`.
     function toString(uint256 value) internal pure returns (string memory result) {
-        return _toString(value);
+        return _decimal(value, false);
     }
 
     /// @dev Returns the base 10 decimal representation of `value`.
     function toString(int256 value) internal pure returns (string memory result) {
-        return _toString(value);
+        if (value >= 0) return _decimal(uint256(value), false);
+        // The magnitude of the most negative value does not fit `int256`.
+        return _decimal(value == type(int256).min ? uint256(1) << 255 : uint256(-value), true);
     }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -279,24 +312,22 @@ library LibString {
     /// and the alphabets are capitalized conditionally according to
     /// https://eips.ethereum.org/EIPS/eip-55
     function toHexStringChecksummed(address value) internal pure returns (string memory result) {
-        bytes memory out = new bytes(42);
-        out[0] = "0";
-        out[1] = "x";
-        // The top sixteen bytes make one word of characters; the low four make the top eight
-        // characters of another.
+        // The top sixteen bytes make one word of characters; the low four make eight more,
+        // kept in the top of another word.
         uint256 raw = uint160(value);
         uint256 head = uint256(_hexWord(raw >> 32));
-        uint256 tail = uint256(_hexWord((raw & 0xffffffff) << 96));
-        _writeBytes32(out, 2, bytes32(head));
-        _writeBytes8(out, 34, bytes8(bytes32(tail)));
+        uint256 tail = uint256(_hexWord((raw & 0xffffffff) << 96)) >> 192 << 192;
         // A character is uppercased when it is a letter and its nibble of the hash of the
         // lowercase digits is at least eight: nibble by nibble, the hash's top sixteen bytes
         // line up with the head and the next four with the tail.
-        uint256 hash = uint256(_keccak256Range(out, 2, 40));
-        _writeBytes32(out, 2, bytes32(_checksumCase(head, _nibbles(hash >> 128))));
-        _writeBytes8(
-            out, 34, bytes8(bytes32(_checksumCase(tail, _nibbles(hash & type(uint128).max))))
+        uint256 hash = uint256(keccak256(abi.encodePacked(bytes32(head), bytes8(bytes32(tail)))));
+        head = _checksumCase(head, _nibbles(hash >> 128));
+        tail = _checksumCase(tail, _nibbles(hash & type(uint128).max));
+        // `0x` and the forty characters in two whole words, cut to their 42 bytes.
+        bytes memory out = abi.encodePacked(
+            bytes32((0x3078 << 240) | (head >> 16)), bytes32((head << 240) | (tail >> 16))
         );
+        _setLength(out, 42);
         return string(out);
     }
 
@@ -486,6 +517,7 @@ library LibString {
 
     /// @dev Returns a concatenated string of `a` and `b`.
     /// Cheaper than `string.concat()` and does not de-align the free memory pointer.
+    /// @custom:solar-inline
     function concat(string memory a, string memory b) internal pure returns (string memory) {
         return string(LibBytes.concat(bytes(a), bytes(b)));
     }
@@ -523,6 +555,7 @@ library LibString {
             uint256 word = uint256(_readBytes32(b, n - 32));
             _writeBytes32(out, n - 32, bytes32(word ^ _caseFlips(word, flip)));
         }
+        _zeroPad(out);
         return string(out);
     }
 
@@ -706,9 +739,11 @@ library LibString {
         x = (x | (x << 8)) & MASK_8;
         x = (x | (x << 4)) & MASK_4;
         // Adding six carries every nibble above nine into the next bit, which
-        // marks the ones that become letters rather than digits.
-        uint256 letters = ((x + SPREAD_6) >> 4) & SPREAD_1;
-        return bytes32(x + SPREAD_ASCII_0 + letters * 39);
+        // marks the ones that become letters rather than digits; `0x2a` more
+        // makes the digits `0` to `9`.
+        x += SPREAD_6;
+        uint256 letters = (x >> 4) & SPREAD_1;
+        return bytes32(x + SPREAD_2A + letters * 39);
     }
 
     /// @dev Spreads the thirty-two nibbles of the low sixteen bytes of `x` one to a byte,
@@ -784,52 +819,88 @@ library LibString {
         return ~((tail - (tail >> 7)) | tail);
     }
 
-    /// @dev `value` in decimal. Halving the remaining magnitude finds the
-    /// length in at most seven steps, where dividing by ten once per digit
-    /// costs up to seventy-eight.
-    function _toString(uint256 value) private pure returns (string memory) {
-        uint256 n = 1;
-        uint256 x = value;
-        if (x >= 1e64) {
-            x /= 1e64;
-            n += 64;
+    /// @dev `value` in decimal after a `-` when `negative`. The digits come eight
+    /// at a time from the low end, each group spread one digit to a byte by
+    /// `_decimalGroup` and shifted into the top of a word, four groups to a word.
+    /// The top group loses its leading zeros, and the output is three words,
+    /// written whole and cut to the digits, with the full words shifted into
+    /// place after the sign and the top word's digits.
+    /// @custom:solar-inline
+    function _decimal(uint256 value, bool negative) private pure returns (string memory) {
+        // One digit, after the sign, is written directly.
+        if (value < 10) {
+            if (negative) return _shortString((0x2d30 + value) << 240, 2);
+            return _shortString((0x30 + value) << 248, 1);
         }
-        if (x >= 1e32) {
-            x /= 1e32;
-            n += 32;
-        }
-        if (x >= 1e16) {
-            x /= 1e16;
-            n += 16;
-        }
-        if (x >= 1e8) {
-            x /= 1e8;
-            n += 8;
-        }
-        if (x >= 1e4) {
-            x /= 1e4;
-            n += 4;
-        }
-        if (x >= 1e2) {
-            x /= 1e2;
-            n += 2;
-        }
-        if (x >= 10) ++n;
-        bytes memory out = new bytes(n);
+        uint256 top;
+        // The full words, the more significant one first.
+        uint256 high;
+        uint256 low;
+        uint256 full;
+        // The groups the top word still has room for.
+        uint256 slots = 4;
+        uint256 last;
         do {
-            --n;
-            out[n] = bytes1(uint8(48 + value % 10));
-            value /= 10;
-        } while (n != 0);
+            if (slots == 0) {
+                (low, high, top, slots) = (high, top, 0, 4);
+                full += 32;
+            }
+            last = value % 1e8;
+            value /= 1e8;
+            top = (top >> 64) | ((_decimalGroup(last) | (SPREAD_ASCII_0 >> 192)) << 192);
+            --slots;
+        } while (value != 0);
+        // The top group's leading zeros, and the bits of the top word without
+        // digits: its empty groups and those zeros.
+        uint256 zeros;
+        if (last < 1e4) {
+            zeros = 4;
+            last *= 1e4;
+        }
+        if (last < 1e6) {
+            zeros += 2;
+            last *= 100;
+        }
+        if (last < 1e7) ++zeros;
+        top <<= zeros << 3;
+        uint256 empty = (slots << 6) | (zeros << 3);
+        bytes memory out;
+        if (negative) {
+            if (empty == 0) {
+                // A full top word, of a magnitude below `2**255` with at most one
+                // full word after it, leaves the sign a word of its own.
+                out = abi.encodePacked(
+                    bytes32((0x2d << 248) | (top >> 8)),
+                    bytes32((top << 248) | (high >> 8)),
+                    bytes32(high << 248)
+                );
+                _setLength(out, 33 + full);
+                return string(out);
+            }
+            top = (0x2d << 248) | (top >> 8);
+            empty -= 8;
+        }
+        uint256 used = 256 - empty;
+        out = abi.encodePacked(
+            bytes32(top | (high >> used)),
+            bytes32((high << empty) | (low >> used)),
+            bytes32(low << empty)
+        );
+        _setLength(out, (used >> 3) + full);
         return string(out);
     }
 
-    /// @dev `value` in decimal, with a leading `-` when negative.
-    function _toString(int256 value) private pure returns (string memory) {
-        if (value >= 0) return _toString(uint256(value));
-        // The magnitude of the most negative value does not fit `int256`.
-        uint256 magnitude = value == type(int256).min ? uint256(1) << 255 : uint256(-value);
-        return string(bytes.concat("-", bytes(_toString(magnitude))));
+    /// @dev The eight decimal digits of `x`, which must be below `10**8`, one to a
+    /// byte in the low eight bytes, the most significant first: two halves, then
+    /// quarters, then single digits, each split by a multiply by the divisor's
+    /// reciprocal, which is exact for its lane's range and stays inside the lane.
+    /// @custom:solar-inline
+    function _decimalGroup(uint256 x) private pure returns (uint256 y) {
+        y = ((x / 1e4) << 32) | (x % 1e4);
+        // `ceil(2**20 / 100)` and `ceil(2**10 / 10)`; `2**16 - 100` and `2**8 - 10`
+        // move each quotient up beside its remainder.
+        y += _rawMul((_rawMul(y, 10486) >> 20) & 0x7f0000007f, 0xff9c);
+        y += _rawMul((_rawMul(y, 103) >> 10) & 0xf000f000f000f, 246);
     }
 
     /// @dev `s` with every character JSON requires escaped, without quotes.
@@ -839,140 +910,215 @@ library LibString {
 
     /// @dev `s` with the quote, the backslash and the control characters
     /// escaped, as the short forms where JSON has them and `\u00XX` elsewhere,
-    /// enclosed in double quotes when `addDoubleQuotes`. The output is built at
-    /// its largest size, six characters per input byte, then cut down.
+    /// enclosed in double quotes when `addDoubleQuotes`. The input is read and
+    /// written a word at a time, with the bytes to escape marked in one step;
+    /// each run of marked bytes is then written over the word, an escape after
+    /// another, and the rest of the word after the run. The output has room for
+    /// six characters per input byte, two quotes and a word of slack, so every
+    /// piece can be a whole word whose bytes past the piece the next piece, or
+    /// the final zeros, overwrite.
     function _escapeJSON(string memory s, bool addDoubleQuotes)
         private
         pure
         returns (string memory)
     {
         bytes memory input = bytes(s);
-        bytes memory out = new bytes(input.length * 6 + 2);
-        uint256 o;
-        if (addDoubleQuotes) out[o++] = '"';
-        // Bytes before `bytewise` belong to a word with a byte to replace.
-        uint256 bytewise;
-        for (uint256 i; i < input.length; ++i) {
-            // A word without `"`, `\` or a control byte copies whole; `out` has
-            // room, as every input byte before it took at most six.
-            if (i >= bytewise) {
-                while (input.length - i >= 32) {
-                    uint256 w = uint256(_readBytes32(input, i));
-                    if (_jsonSpecials(w) != 0) break;
-                    _writeBytes32(out, o, bytes32(w));
-                    o += 32;
-                    i += 32;
-                }
-                if (i == input.length) break;
-                bytewise = i + 32;
-            }
-            bytes1 c = input[i];
-            if (c == '"' || c == "\\") {
-                out[o++] = "\\";
-                out[o++] = c;
-            } else if (uint8(c) >= 0x20) {
-                out[o++] = c;
-            } else {
-                out[o++] = "\\";
-                if (c == 0x08) {
-                    out[o++] = "b";
-                } else if (c == 0x09) {
-                    out[o++] = "t";
-                } else if (c == 0x0a) {
-                    out[o++] = "n";
-                } else if (c == 0x0c) {
-                    out[o++] = "f";
-                } else if (c == 0x0d) {
-                    out[o++] = "r";
-                } else {
-                    out[o++] = "u";
-                    out[o++] = "0";
-                    out[o++] = "0";
-                    out[o++] = _DIGITS[uint8(c) >> 4];
-                    out[o++] = _DIGITS[uint8(c) & 15];
-                }
+        uint256 n = input.length;
+        bytes memory out = new bytes(n * 6 + 34);
+        // The characters the escapes add to the bytes they replace, and the
+        // opening quote: the word at `i` goes to `i + extra`.
+        uint256 extra;
+        if (addDoubleQuotes) {
+            out[0] = '"';
+            extra = 1;
+        }
+        for (uint256 i; i < n; i += 32) {
+            // The zero padding past the end reads as control bytes.
+            uint256 w = _wordAt(input, i);
+            uint256 marks = _jsonSpecials(w) & ~(type(uint256).max >> ((n - i) << 3));
+            uint256 o = i + extra;
+            _writeBytes32(out, o, bytes32(w));
+            while (marks != 0) {
+                // Past the bytes before the next one to escape, already
+                // written, then each one of the run it starts, and the rest of
+                // the word after the run.
+                uint256 k = _firstMark(marks);
+                o += k;
+                w <<= k << 3;
+                marks <<= k << 3;
+                do {
+                    (bytes32 escape, uint256 size) = _jsonEscape(w >> 248);
+                    _writeBytes32(out, o, escape);
+                    o += size;
+                    extra += size - 1;
+                    w <<= 8;
+                    marks <<= 8;
+                } while (marks >> 255 != 0);
+                _writeBytes32(out, o, bytes32(w));
             }
         }
-        if (addDoubleQuotes) out[o++] = '"';
-        _truncate(out, o);
+        uint256 end = n + extra;
+        if (addDoubleQuotes) out[end++] = '"';
+        _truncate(out, end);
         return string(out);
+    }
+
+    /// @dev The JSON escape of the byte `c`, which is `"`, `\` or below 0x20,
+    /// left-aligned, and its length.
+    /// @custom:solar-inline
+    function _jsonEscape(uint256 c) private pure returns (bytes32, uint256) {
+        // `\"`, `\\`, `\b`, `\t`, `\n`, `\f` and `\r`, by the byte's low five bits.
+        if ((_JSON_SHORT_ESCAPED >> c) & 1 != 0) {
+            return (bytes32((0x5c00 | uint256(uint8(_JSON_SHORT_ESCAPES[c & 31]))) << 240), 2);
+        }
+        // `\u00` and two lowercase hexadecimal digits, the first `0` or `1`.
+        return (
+            bytes32(
+                (0x5c7530300000 | ((0x30 + (c >> 4)) << 8) | uint256(uint8(_DIGITS[c & 15]))) << 208
+            ),
+            6
+        );
     }
 
     /// @dev `s` with the characters HTML gives meaning to replaced by their
-    /// entities: `&quot;`, `&amp;`, `&#39;`, `&lt;` and `&gt;`. Built at its
-    /// largest size, six characters per input byte, then cut down.
+    /// entities: `&quot;`, `&amp;`, `&#39;`, `&lt;` and `&gt;`. Read a word at a
+    /// time as `_escapeJSON` reads its input, with room for six characters per
+    /// input byte and a word of slack.
     function _escapeHTML(string memory s) private pure returns (string memory) {
         bytes memory input = bytes(s);
-        bytes memory out = new bytes(input.length * 6);
-        uint256 o;
-        // Bytes before `bytewise` belong to a word with a byte to replace.
-        uint256 bytewise;
-        for (uint256 i; i < input.length; ++i) {
-            // A word without `"`, `&`, `'`, `<` or `>` copies whole; `out` has
-            // room, as every input byte before it took at most six.
-            if (i >= bytewise) {
-                while (input.length - i >= 32) {
-                    uint256 w = uint256(_readBytes32(input, i));
-                    if (_htmlSpecials(w) != 0) break;
-                    _writeBytes32(out, o, bytes32(w));
-                    o += 32;
-                    i += 32;
-                }
-                if (i == input.length) break;
-                bytewise = i + 32;
-            }
-            bytes1 c = input[i];
-            if (c == '"') {
-                o = _put(out, o, "&quot;", 6);
-            } else if (c == "&") {
-                o = _put(out, o, "&amp;", 5);
-            } else if (c == "'") {
-                o = _put(out, o, "&#39;", 5);
-            } else if (c == "<") {
-                o = _put(out, o, "&lt;", 4);
-            } else if (c == ">") {
-                o = _put(out, o, "&gt;", 4);
-            } else {
-                out[o++] = c;
+        uint256 n = input.length;
+        bytes memory out = new bytes(n * 6 + 32);
+        // The characters the entities add to the bytes they replace: the word
+        // at `i` goes to `i + extra`.
+        uint256 extra;
+        for (uint256 i; i < n; i += 32) {
+            // No zero byte is one to replace, so the padding past the end
+            // needs no mask.
+            uint256 w = _wordAt(input, i);
+            uint256 marks = _htmlSpecials(w);
+            uint256 o = i + extra;
+            _writeBytes32(out, o, bytes32(w));
+            while (marks != 0) {
+                uint256 k = _firstMark(marks);
+                o += k;
+                w <<= k << 3;
+                marks <<= k << 3;
+                do {
+                    (bytes32 entity, uint256 size) = _htmlEntity(w >> 248);
+                    _writeBytes32(out, o, entity);
+                    o += size;
+                    extra += size - 1;
+                    w <<= 8;
+                    marks <<= 8;
+                } while (marks >> 255 != 0);
+                _writeBytes32(out, o, bytes32(w));
             }
         }
-        _truncate(out, o);
+        _truncate(out, n + extra);
         return string(out);
     }
 
-    /// @dev Writes the leading `count` bytes of `text` into `out` at `o` and
-    /// returns the offset after them.
+    /// @dev The HTML entity of the byte `c`, which is one `escapeHTML` replaces,
+    /// left-aligned, and its length: the byte's low five bits pick the entity's
+    /// length and offset in the string of all five.
     /// @custom:solar-inline
-    function _put(bytes memory out, uint256 o, bytes32 text, uint256 count)
-        private
-        pure
-        returns (uint256)
-    {
-        for (uint256 k; k < count; ++k) {
-            out[o + k] = text[k];
-        }
-        return o + count;
+    function _htmlEntity(uint256 c) private pure returns (bytes32, uint256) {
+        uint256 t = uint8(_HTML_ENTITY_SPANS[c & 31]);
+        return (_HTML_ENTITIES << ((t & 31) << 3), t >> 5);
+    }
+
+    /// @dev The bytes of `b` from `offset`, which must be before its end, up to a word,
+    /// left-aligned and zero past the end. Untagged, unlike `_readBytesN`, as is
+    /// `_firstMark`: a build for gas still inlines both, and a build for size keeps
+    /// one copy of each instead of one per escaping loop, whose repeats its
+    /// outliner would share with the other functions' copies.
+    function _wordAt(bytes memory b, uint256 offset) private pure returns (uint256) {
+        return uint256(_readBytesN(b, offset, b.length - offset));
+    }
+
+    /// @dev The index, from the top, of the first byte of `marks` with its top
+    /// bit set. `marks` has only top bits set, and at least one: spread down to
+    /// every later byte, the marks leave unmarked exactly the bytes before the
+    /// first, which a multiplication by a one in every byte counts into the top
+    /// byte, as in `_smallStringLength`.
+    function _firstMark(uint256 marks) private pure returns (uint256) {
+        marks |= marks >> 8;
+        marks |= marks >> 16;
+        marks |= marks >> 32;
+        marks |= marks >> 64;
+        marks |= marks >> 128;
+        return _rawMul((~marks & _HIGH_BITS) >> 7, LANES_01) >> 248;
     }
 
     /// @dev `s` as a URI component, like JavaScript's `encodeURIComponent`:
     /// every byte other than the letters, the digits and `-_.!~*'()` becomes
-    /// `%` and two uppercase hexadecimal digits.
+    /// `%` and two uppercase hexadecimal digits. Read a word at a time as
+    /// `_escapeJSON` reads its input, with room for three characters per input
+    /// byte and a word of slack.
     function _encodeURIComponent(string memory s) private pure returns (string memory) {
         bytes memory input = bytes(s);
-        bytes memory out = new bytes(input.length * 3);
-        uint256 o;
-        for (uint256 i; i < input.length; ++i) {
-            bytes1 c = input[i];
-            if ((_URI_UNRESERVED >> uint8(c)) & 1 != 0) {
-                out[o++] = c;
-            } else {
-                out[o++] = "%";
-                out[o++] = _UPPER_DIGITS[uint8(c) >> 4];
-                out[o++] = _UPPER_DIGITS[uint8(c) & 15];
+        uint256 n = input.length;
+        bytes memory out = new bytes(n * 3 + 32);
+        // Two characters for each byte encoded so far: the word at `i` goes to
+        // `i + extra`.
+        uint256 extra;
+        for (uint256 i; i < n; i += 32) {
+            // The zero padding past the end reads as bytes to encode.
+            uint256 w = _wordAt(input, i);
+            uint256 marks = _uriEscaped(w) & ~(type(uint256).max >> ((n - i) << 3));
+            uint256 o = i + extra;
+            _writeBytes32(out, o, bytes32(w));
+            while (marks != 0) {
+                uint256 k = _firstMark(marks);
+                o += k;
+                w <<= k << 3;
+                marks <<= k << 3;
+                do {
+                    uint256 c = w >> 248;
+                    _writeBytes32(
+                        out,
+                        o,
+                        bytes32(
+                            (0x250000
+                                    | (uint256(uint8(_UPPER_HEX[c >> 4])) << 8)
+                                    | uint256(uint8(_UPPER_HEX[c & 15]))) << 232
+                        )
+                    );
+                    o += 3;
+                    extra += 2;
+                    w <<= 8;
+                    marks <<= 8;
+                } while (marks >> 255 != 0);
+                _writeBytes32(out, o, bytes32(w));
             }
         }
-        _truncate(out, o);
+        _truncate(out, n + extra);
         return string(out);
+    }
+
+    /// @dev `0x80` in each byte of `w` that `encodeURIComponent` encodes, and
+    /// zero in every other byte: the bytes with the top bit set, and the ones
+    /// outside the letters, the digits and `-_.!~*'()`. Without the case bit the
+    /// letters are one range, `'()*` and `-.` are ranges too, and `_` and `~`
+    /// are tested with bit three flipped, so that no two tests share a
+    /// constant.
+    function _uriEscaped(uint256 w) private pure returns (uint256) {
+        uint256 low = w & LANES_7F;
+        uint256 flipped = low ^ (0x08 * LANES_01);
+        uint256 kept = _inRange(low & (0xdf * LANES_01), 0x41, 0x5a) | _inRange(low, 0x30, 0x39)
+            | _inRange(low, 0x27, 0x2a) | _inRange(low, 0x2d, 0x2e) | _inRange(low, 0x21, 0x21)
+            | _inRange(flipped, 0x57, 0x57) | _inRange(flipped, 0x76, 0x76);
+        return (~kept | w) & _HIGH_BITS;
+    }
+
+    /// @dev The top bit of each byte of `low`, whose bytes are below 0x80, that is
+    /// at least `a` and at most `b`, with other bits set below it: adding
+    /// `0x80 - a` reaches a byte's top bit exactly when it is at least `a`, adding
+    /// `0x7f - b` exactly when it is above `b`, and neither carries into the
+    /// next byte.
+    /// @custom:solar-inline
+    function _inRange(uint256 low, uint256 a, uint256 b) private pure returns (uint256) {
+        return (low + (0x80 - a) * LANES_01) & ~(low + (0x7f - b) * LANES_01);
     }
 
     /// @dev `0x80` in each byte of `z` that is zero, and zero in every other
@@ -1027,16 +1173,20 @@ library LibString {
         pure
         returns (string memory)
     {
+        if (byteCount < 33) return _hexString(value, 2 * byteCount, false);
         bytes memory out = new bytes(byteCount * 2);
         _hexInto(out, 0, value, byteCount);
+        _zeroPad(out);
         return string(out);
     }
 
     /// @dev `_toHexStringNoPrefix(value, byteCount)` after `0x`.
     function _toHexString(uint256 value, uint256 byteCount) private pure returns (string memory) {
+        if (byteCount < 33) return _hexString(value, 2 * byteCount, true);
         bytes memory out = new bytes(byteCount * 2 + 2);
         (out[0], out[1]) = ("0", "x");
         _hexInto(out, 2, value, byteCount);
+        _zeroPad(out);
         return string(out);
     }
 
@@ -1091,68 +1241,91 @@ library LibString {
         if (byteCount < 32 && value >> (8 * byteCount) != 0) revert HexLengthInsufficient();
     }
 
-    /// @dev Writes the low `byteCount` bytes of `value` into `out` at `offset`
-    /// as `2 * byteCount` lowercase hexadecimal digits, once `_checkHexLength`
-    /// found that `value` fits in them. Sixteen bytes make a word of digits;
-    /// bytes past the word's are zeros.
+    /// @dev Writes `byteCount` bytes of `value`, more than a word's 32, into `out` at
+    /// `offset` as `2 * byteCount` lowercase hexadecimal digits, ending at `out`'s end:
+    /// `0` characters for the bytes above the word, a word of them at a time, then the
+    /// word's 64 digits, which overwrite the last word of `0`s where they overlap.
     function _hexInto(bytes memory out, uint256 offset, uint256 value, uint256 byteCount)
         private
         pure
     {
-        uint256 o = offset;
-        for (; byteCount > 32; --byteCount) {
-            (out[o], out[o + 1]) = ("0", "0");
-            o += 2;
+        uint256 digits = offset + 2 * byteCount - 64;
+        for (uint256 o = offset; o < digits; o += 32) {
+            _writeBytes32(out, o, bytes32(SPREAD_ASCII_0));
         }
-        if (byteCount > 16) {
-            // The high bytes' digits are the last ones of their word.
-            uint256 high = byteCount - 16;
-            uint256 digits = uint256(_hexWord(value >> 128)) << (8 * (32 - 2 * high));
-            _writeBytesN(out, o, bytes32(digits), 2 * high);
-            _writeBytes32(out, o + 2 * high, _hexWord(value & type(uint128).max));
-        } else if (byteCount != 0) {
-            uint256 digits = uint256(_hexWord(value)) << (8 * (32 - 2 * byteCount));
-            _writeBytesN(out, o, bytes32(digits), 2 * byteCount);
-        }
+        _writeBytes32(out, digits, _hexWord(value >> 128));
+        _writeBytes32(out, digits + 32, _hexWord(value & type(uint128).max));
     }
 
     /// @dev Minimal lowercase hexadecimal digits without a prefix.
     function _toMinimalHexStringNoPrefix(uint256 value) private pure returns (string memory) {
-        uint256 n = _nibbleLength(value);
-        bytes memory out = new bytes(n);
-        _minimalHexInto(out, 0, value, n);
-        return string(out);
+        return _hexString(value, _nibbleLength(value), false);
     }
 
     /// @dev Minimal lowercase hexadecimal digits after `0x`.
     function _toMinimalHexString(uint256 value) private pure returns (string memory) {
-        uint256 n = _nibbleLength(value);
-        bytes memory out = new bytes(n + 2);
-        (out[0], out[1]) = ("0", "x");
-        _minimalHexInto(out, 2, value, n);
+        return _hexString(value, _nibbleLength(value), true);
+    }
+
+    /// @dev The last `n` of the 64 lowercase hexadecimal digits of `value`, after
+    /// `0x` when `prefixed`, where the prefix and the digits beyond the 32 of the
+    /// low 16 bytes take at most a word: the head word holds them, and the low
+    /// digits follow, spilling into a second word when the head leaves too
+    /// little room. `value` must fit in the `n` digits.
+    function _hexString(uint256 value, uint256 n, bool prefixed)
+        private
+        pure
+        returns (string memory)
+    {
+        uint256 p = prefixed ? 2 : 0;
+        uint256 head = prefixed ? 0x3078 << 240 : 0;
+        if (n + p < 33) {
+            // `value` is below `2**128`, and all its digits fit the head word.
+            return
+                _shortString(head | ((uint256(_hexWord(value)) << (256 - 8 * n)) >> (8 * p)), n + p);
+        }
+        // The low 16 bytes' digits and the high bytes' ones, left-aligned.
+        uint256 lo = uint256(_hexWord(value & type(uint128).max));
+        uint256 high;
+        uint256 a = p;
+        if (n > 32) {
+            a += n - 32;
+            high = uint256(_hexWord(value >> 128)) << (512 - 8 * n);
+        } else {
+            lo <<= 256 - 8 * n;
+        }
+        head |= high >> (8 * p);
+        bytes memory out;
+        if (a < 33) {
+            out = abi.encodePacked(bytes32(head | (lo >> (8 * a))), bytes32(lo << (256 - 8 * a)));
+        } else {
+            // The prefix and 31 or 32 high digits overflow the head word into a
+            // second one, before the low digits.
+            a -= 32;
+            out = abi.encodePacked(
+                bytes32(head),
+                bytes32((high << (256 - 8 * p)) | (lo >> (8 * a))),
+                bytes32(lo << (256 - 8 * a))
+            );
+        }
+        _setLength(out, n + p);
         return string(out);
     }
 
-    /// @dev Writes the last `n` of the 64 digits of `value` into `out` at `offset`.
-    function _minimalHexInto(bytes memory out, uint256 offset, uint256 value, uint256 n)
-        private
-        pure
-    {
-        if (n > 32) {
-            uint256 high = n - 32;
-            uint256 digits = uint256(_hexWord(value >> 128)) << (8 * (32 - high));
-            _writeBytesN(out, offset, bytes32(digits), high);
-            _writeBytes32(out, offset + high, _hexWord(value & type(uint128).max));
-        } else {
-            uint256 digits = uint256(_hexWord(value & type(uint128).max)) << (8 * (32 - n));
-            _writeBytesN(out, offset, bytes32(digits), n);
-        }
+    /// @dev The leading `n` bytes of `word`, whose other bytes are zero, as a
+    /// string: the word written whole, then the length cut to them.
+    /// @custom:solar-inline
+    function _shortString(uint256 word, uint256 n) private pure returns (string memory) {
+        bytes memory out = abi.encodePacked(bytes32(word));
+        _setLength(out, n);
+        return string(out);
     }
 
     /// @dev The digits of `data`, without a prefix.
     function _hexEncode(bytes memory data) private pure returns (string memory) {
         bytes memory out = new bytes(data.length * 2);
         _hexEncodeInto(out, 0, data);
+        _zeroPad(out);
         return string(out);
     }
 
@@ -1161,6 +1334,7 @@ library LibString {
         bytes memory out = new bytes(data.length * 2 + 2);
         (out[0], out[1]) = ("0", "x");
         _hexEncodeInto(out, 2, data);
+        _zeroPad(out);
         return string(out);
     }
 
@@ -1204,8 +1378,9 @@ library LibString {
     function _unpackOne(bytes32 packed) private pure returns (string memory result) {
         uint256 n = uint8(packed[0]);
         if (n > 31) n = 31;
-        bytes memory out = new bytes(n);
-        _writeBytesN(out, 0, packed << 8, n);
+        // The contents after the length byte, cut to `n` bytes, in one fresh word.
+        bytes memory out = abi.encodePacked((packed << 8) & ~bytes32(type(uint256).max >> (n << 3)));
+        _setLength(out, n);
         return string(out);
     }
 
@@ -1230,12 +1405,16 @@ library LibString {
     {
         uint256 aLength = uint8(packed[0]);
         if (aLength > 30) aLength = 30;
-        bytes memory a = new bytes(aLength);
-        _writeBytesN(a, 0, packed << 8, aLength);
+        // Each string's contents, cut to its length, in one fresh word.
+        bytes memory a =
+            abi.encodePacked((packed << 8) & ~bytes32(type(uint256).max >> (aLength << 3)));
+        _setLength(a, aLength);
         uint256 bLength = uint8(packed[aLength + 1]);
         if (bLength > 30 - aLength) bLength = 30 - aLength;
-        bytes memory b = new bytes(bLength);
-        _writeBytesN(b, 0, packed << ((aLength + 2) * 8), bLength);
+        bytes memory b = abi.encodePacked(
+            (packed << ((aLength + 2) * 8)) & ~bytes32(type(uint256).max >> (bLength << 3))
+        );
+        _setLength(b, bLength);
         return (string(a), string(b));
     }
 
@@ -1251,12 +1430,37 @@ library LibString {
     /// its last word, so the bytes past the new end read as zero padding.
     /// Solidity cannot spell a shorter length for an existing buffer.
     /// @custom:solar-trusted
+    /// @custom:solar-inline
     function _truncate(bytes memory b, uint256 n) private pure {
         if (n > b.length) n = new uint256[](0)[0];
         /// @solidity memory-safe-assembly
         assembly {
             mstore(b, n)
             mstore(add(add(b, 0x20), n), 0)
+        }
+    }
+
+    /// @dev Shrinks `b` to its first `n` bytes in place. The caller has cleared the
+    /// bytes past `n` in its last word, so they read as zero padding.
+    /// @custom:solar-trusted
+    /// @custom:solar-inline
+    function _setLength(bytes memory b, uint256 n) private pure {
+        if (n > b.length) n = new uint256[](0)[0];
+        /// @solidity memory-safe-assembly
+        assembly {
+            mstore(b, n)
+        }
+    }
+
+    /// @dev Zeroizes the word after `b`'s last byte, the rest of `b`'s last word with it, which
+    /// legacy solc's `new bytes(n)` leaves dirty. `b` must be the last allocation, so that the
+    /// rest of that word is free memory.
+    /// @custom:solar-trusted
+    /// @custom:solar-inline
+    function _zeroPad(bytes memory b) private pure {
+        /// @solidity memory-safe-assembly
+        assembly {
+            mstore(add(add(b, 0x20), mload(b)), 0)
         }
     }
 
@@ -1296,34 +1500,6 @@ library LibString {
         }
     }
 
-    /// @dev Writes `value` into `b` at `offset`.
-    /// @custom:solar-inline
-    function _writeBytes8(bytes memory b, uint256 offset, bytes8 value) private pure {
-        for (uint256 k; k < 8; ++k) {
-            b[offset + k] = value[k];
-        }
-    }
-
-    /// @dev The keccak-256 hash of the `count` bytes of `b` at `offset`.
-    function _keccak256Range(bytes memory b, uint256 offset, uint256 count)
-        private
-        pure
-        returns (bytes32)
-    {
-        if (count > b.length || offset > b.length - count) count = _outOfBounds();
-        bytes memory range = new bytes(count);
-        for (uint256 k; k < count; ++k) {
-            range[k] = b[offset + k];
-        }
-        return keccak256(range);
-    }
-
-    /// @dev Raises the `Panic(0x32)` an out-of-range index raises, which is the
-    /// portable spelling of a failed range check.
-    function _outOfBounds() private pure returns (uint256) {
-        return new uint256[](0)[0];
-    }
-
     /// @dev The leading `count` bytes of `b` from `offset`, at most a word, left-aligned.
     /// @custom:solar-inline
     function _readBytesN(bytes memory b, uint256 offset, uint256 count)
@@ -1333,17 +1509,6 @@ library LibString {
     {
         for (uint256 k; k < count; ++k) {
             result |= bytes32(b[offset + k]) >> (8 * k);
-        }
-    }
-
-    /// @dev Writes the leading `count` bytes of `value`, at most a word, to `b` at `offset`.
-    /// @custom:solar-inline
-    function _writeBytesN(bytes memory b, uint256 offset, bytes32 value, uint256 count)
-        private
-        pure
-    {
-        for (uint256 k; k < count; ++k) {
-            b[offset + k] = value[k];
         }
     }
 
