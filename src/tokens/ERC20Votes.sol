@@ -6,6 +6,21 @@ import {ERC20} from "./ERC20.sol";
 /// @notice ERC20 with votes based on ERC5805 and ERC6372.
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/tokens/ERC20Votes.sol)
 /// @author Modified from OpenZeppelin (https://github.com/OpenZeppelin/openzeppelin-contracts/blob/master/contracts/token/ERC20/extensions/ERC20Votes.sol)
+///
+/// @dev The checked port keeps the delegates and checkpoints in the assembly's slots and
+/// words, so it is storage-compatible with it: a checkpoint word packs its key, a 48-bit
+/// length (the first checkpoint's is the current one) and a value of up to 160 bits that is
+/// not this contract's address; any other value sits whole at `not(checkpointSlot)` behind
+/// the address, and stays there when a later write fits. The slots are `abi.encodePacked`
+/// hashes derived in Solidity; Solidity cannot name them, so two trusted helpers read and
+/// write a slot, and a third adds an index to a length slot with wrap-around, as the
+/// assembly does. The pushes and lookups keep the assembly's checks, custom errors and
+/// search probes, the events are ordinary emits, and the signer is recovered by a plain
+/// low-level call to the precompile, read as the assembly reads it. Where the assembly runs
+/// out of gas or hits `invalid()`, on a block number from `2 ** 48` and on a checkpoint key
+/// that goes back or a length past 48 bits, this port reverts with the same empty data. The
+/// private helpers carry the contract's name, so that it still combines with other mixins.
+/// @custom:solar-safe memory arithmetic
 abstract contract ERC20Votes is ERC20 {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                       CUSTOM ERRORS                        */
@@ -98,12 +113,9 @@ abstract contract ERC20Votes is ERC20 {
 
     /// @dev Returns the current clock.
     function clock() public view virtual returns (uint48 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := number()
-            // Branch-less out-of-gas revert if `block.number >= 2 ** 48`.
-            returndatacopy(returndatasize(), returndatasize(), sub(0, shr(48, number())))
-        }
+        // Revert with no data, as the assembly's out-of-gas revert, if `block.number >= 2 ** 48`.
+        if (block.number >> 48 != 0) revert();
+        result = uint48(block.number);
     }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -128,12 +140,7 @@ abstract contract ERC20Votes is ERC20 {
 
     /// @dev Returns the current voting delegate of `delegator`.
     function delegates(address delegator) public view virtual returns (address result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x04, _ERC20_VOTES_MASTER_SLOT_SEED)
-            mstore(0x00, delegator)
-            result := sload(keccak256(0x0c, 0x18))
-        }
+        result = address(uint160(_erc20VotesSload(_erc20VotesDelegateSlot(delegator))));
     }
 
     /// @dev Set the voting delegate of the caller to `delegatee`.
@@ -155,45 +162,21 @@ abstract contract ERC20Votes is ERC20 {
         //  We simply calculate it on-the-fly to allow for cases where the `name` may change.
         if (nameHash == bytes32(0)) nameHash = keccak256(bytes(name()));
         bytes32 versionHash = _versionHash();
-        /// @solidity memory-safe-assembly
-        assembly {
-            if gt(timestamp(), expiry) {
-                mstore(0x00, 0x3480e9e1) // `ERC5805DelegateSignatureExpired()`.
-                revert(0x1c, 0x04)
-            }
-            let m := mload(0x40)
+        if (block.timestamp > expiry) revert ERC5805DelegateSignatureExpired();
+        bytes32 digest;
+        {
             // Prepare the struct hash.
-            mstore(0x00, _ERC5805_DELEGATION_TYPEHASH)
-            mstore(0x20, shr(96, shl(96, delegatee)))
-            mstore(0x40, nonce)
-            mstore(0x60, expiry)
-            mstore(0x40, keccak256(0x00, 0x80))
-            mstore(0x00, 0x1901) // Store "\x19\x01".
+            bytes32 structHash =
+                keccak256(abi.encode(_ERC5805_DELEGATION_TYPEHASH, delegatee, nonce, expiry));
             // Prepare the domain separator.
-            mstore(m, _DOMAIN_TYPEHASH)
-            mstore(add(m, 0x20), nameHash)
-            mstore(add(m, 0x40), versionHash)
-            mstore(add(m, 0x60), chainid())
-            mstore(add(m, 0x80), address())
-            mstore(0x20, keccak256(m, 0xa0))
-            // Prepare the ecrecover calldata.
-            mstore(0x00, keccak256(0x1e, 0x42))
-            mstore(0x20, and(0xff, v))
-            mstore(0x40, r)
-            mstore(0x60, s)
-            signer := mload(staticcall(gas(), 1, 0x00, 0x80, 0x01, 0x20))
-            mstore(0x40, m) // Restore the free memory pointer.
-            mstore(0x60, 0) // Restore the zero pointer.
-            // `returndatasize()` will be `0x20` upon success, and `0x00` otherwise.
-            expiry := iszero(returndatasize()) // Reuse `expiry` to denote `ecrecover` failure.
+            bytes32 domainSeparator = keccak256(
+                abi.encode(_DOMAIN_TYPEHASH, nameHash, versionHash, block.chainid, address(this))
+            );
+            digest = keccak256(abi.encodePacked(hex"1901", domainSeparator, structHash));
         }
-        if ((nonces(signer) ^ nonce) | expiry != 0) {
-            /// @solidity memory-safe-assembly
-            assembly {
-                mstore(0x00, 0x1838d95c) // `ERC5805DelegateInvalidSignature()`.
-                revert(0x1c, 0x04)
-            }
-        }
+        bool failed;
+        (signer, failed) = _erc20VotesRecover(digest, v, r, s);
+        if (nonces(signer) != nonce || failed) revert ERC5805DelegateInvalidSignature();
         _incrementNonce(signer);
         _delegate(signer, delegatee);
     }
@@ -204,11 +187,7 @@ abstract contract ERC20Votes is ERC20 {
 
     /// @dev Returns the number of checkpoints for `account`.
     function checkpointCount(address account) public view virtual returns (uint256 result) {
-        result = _delegateCheckpointsSlot(account);
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := shr(208, shl(160, sload(result)))
-        }
+        result = uint48(_erc20VotesSload(_delegateCheckpointsSlot(account)) >> 48);
     }
 
     /// @dev Returns the voting checkpoint for `account` at index `i`.
@@ -219,19 +198,12 @@ abstract contract ERC20Votes is ERC20 {
         returns (uint48 checkpointClock, uint256 checkpointValue)
     {
         uint256 lengthSlot = _delegateCheckpointsSlot(account);
-        /// @solidity memory-safe-assembly
-        assembly {
-            if iszero(lt(i, shr(208, shl(160, sload(lengthSlot))))) {
-                mstore(0x00, 0x86df9d10) // `ERC5805CheckpointIndexOutOfBounds()`.
-                revert(0x1c, 0x04)
-            }
-            let checkpointPacked := sload(add(i, lengthSlot))
-            checkpointClock := and(0xffffffffffff, checkpointPacked)
-            checkpointValue := shr(96, checkpointPacked)
-            if eq(checkpointValue, address()) {
-                checkpointValue := sload(not(add(i, lengthSlot)))
-            }
-        }
+        uint256 lengthSlotPacked = _erc20VotesSload(lengthSlot);
+        if (i >= uint48(lengthSlotPacked >> 48)) revert ERC5805CheckpointIndexOutOfBounds();
+        uint256 checkpointSlot = _erc20VotesAdd(i, lengthSlot);
+        uint256 checkpointPacked = _erc20VotesSload(checkpointSlot);
+        checkpointClock = uint48(checkpointPacked);
+        checkpointValue = _erc20VotesCheckpointValue(checkpointSlot, checkpointPacked);
     }
 
     /// @dev Returns the latest amount of total voting units.
@@ -250,8 +222,7 @@ abstract contract ERC20Votes is ERC20 {
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     /// @dev Returns the amount of voting units `delegator` has control over.
-    /// Note: Overriding this function may compromise the internal vote accounting.
-    /// `ERC20Votes` assumes tokens map to voting units 1:1 and this is not easy to change.
+    /// Override if you need a different formula.
     function _getVotingUnits(address delegator) internal view virtual returns (uint256) {
         return balanceOf(delegator);
     }
@@ -266,8 +237,6 @@ abstract contract ERC20Votes is ERC20 {
     }
 
     /// @dev Used in `_afterTokenTransfer(address from, address to, uint256 amount)`.
-    /// Note: this moves the raw ERC20 `amount`, and on a mint or burn writes it to the total
-    /// supply checkpoint as well. See the NOTE on `_getVotingUnits`.
     function _transferVotingUnits(address from, address to, uint256 amount) internal virtual {
         if (from == address(0)) {
             _checkpointPushDiff(_ERC20_VOTES_MASTER_SLOT_SEED << 96, clock(), amount, true);
@@ -287,42 +256,25 @@ abstract contract ERC20Votes is ERC20 {
         if (fromCleaned != 0) {
             (uint256 oldValue, uint256 newValue) =
                 _checkpointPushDiff(_delegateCheckpointsSlot(from), clock(), amount, false);
-            /// @solidity memory-safe-assembly
-            assembly {
-                // Emit the {DelegateVotesChanged} event.
-                mstore(0x00, oldValue)
-                mstore(0x20, newValue)
-                log2(0x00, 0x40, _DELEGATE_VOTES_CHANGED_EVENT_SIGNATURE, fromCleaned)
-            }
+            // Emit the {DelegateVotesChanged} event.
+            emit DelegateVotesChanged(from, oldValue, newValue);
         }
         if (toCleaned != 0) {
             (uint256 oldValue, uint256 newValue) =
                 _checkpointPushDiff(_delegateCheckpointsSlot(to), clock(), amount, true);
-            /// @solidity memory-safe-assembly
-            assembly {
-                // Emit the {DelegateVotesChanged} event.
-                mstore(0x00, oldValue)
-                mstore(0x20, newValue)
-                log2(0x00, 0x40, _DELEGATE_VOTES_CHANGED_EVENT_SIGNATURE, toCleaned)
-            }
+            // Emit the {DelegateVotesChanged} event.
+            emit DelegateVotesChanged(to, oldValue, newValue);
         }
     }
 
     /// @dev Delegates all of `account`'s voting units to `delegatee`.
     /// Emits the {DelegateChanged} and {DelegateVotesChanged} events.
     function _delegate(address account, address delegatee) internal virtual {
-        address from;
-        /// @solidity memory-safe-assembly
-        assembly {
-            let to := shr(96, shl(96, delegatee))
-            mstore(0x04, _ERC20_VOTES_MASTER_SLOT_SEED)
-            mstore(0x00, account)
-            let delegateSlot := keccak256(0x0c, 0x18)
-            from := sload(delegateSlot)
-            sstore(delegateSlot, to)
-            // Emit the {DelegateChanged} event.
-            log4(0x00, 0x00, _DELEGATE_CHANGED_EVENT_SIGNATURE, shr(96, mload(0x0c)), from, to)
-        }
+        uint256 delegateSlot = _erc20VotesDelegateSlot(account);
+        address from = address(uint160(_erc20VotesSload(delegateSlot)));
+        _erc20VotesSstore(delegateSlot, uint160(delegatee));
+        // Emit the {DelegateChanged} event.
+        emit DelegateChanged(account, from, delegatee);
         _moveDelegateVotes(from, delegatee, _getVotingUnits(account));
     }
 
@@ -332,12 +284,10 @@ abstract contract ERC20Votes is ERC20 {
 
     /// @dev Returns the delegate checkpoints slot for `account`.
     function _delegateCheckpointsSlot(address account) private pure returns (uint256 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x04, _ERC20_VOTES_MASTER_SLOT_SEED)
-            mstore(0x00, account)
-            result := keccak256(0x0c, 0x17)
-        }
+        // The account's address, then the seed's first three bytes.
+        result = uint256(
+            keccak256(abi.encodePacked(account, uint24(_ERC20_VOTES_MASTER_SLOT_SEED >> 8)))
+        );
     }
 
     /// @dev Pushes a checkpoint.
@@ -345,68 +295,42 @@ abstract contract ERC20Votes is ERC20 {
         private
         returns (uint256 oldValue, uint256 newValue)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let lengthSlotPacked := sload(lengthSlot)
-            for { let n := shr(208, shl(160, lengthSlotPacked)) } 1 {} {
-                if iszero(n) {
-                    if iszero(or(isAdd, iszero(amount))) {
-                        mstore(0x00, 0x5915f686) // `ERC5805CheckpointValueUnderflow()`.
-                        revert(0x1c, 0x04)
-                    }
-                    newValue := amount
-                    if iszero(or(eq(newValue, address()), shr(160, newValue))) {
-                        sstore(lengthSlot, or(or(key, shl(48, 1)), shl(96, newValue)))
-                        break
-                    }
-                    sstore(lengthSlot, or(or(key, shl(48, 1)), shl(96, address())))
-                    sstore(not(lengthSlot), newValue)
-                    break
-                }
-                let checkpointSlot := add(sub(n, 1), lengthSlot)
-                let lastPacked := sload(checkpointSlot)
-                oldValue := shr(96, lastPacked)
-                if eq(oldValue, address()) { oldValue := sload(not(checkpointSlot)) }
-                for {} 1 {} {
-                    if iszero(isAdd) {
-                        newValue := sub(oldValue, amount)
-                        if iszero(gt(newValue, oldValue)) { break }
-                        mstore(0x00, 0x5915f686) // `ERC5805CheckpointValueUnderflow()`.
-                        revert(0x1c, 0x04)
-                    }
-                    newValue := add(oldValue, amount)
-                    if iszero(lt(newValue, oldValue)) { break }
-                    mstore(0x00, 0x9dbbeb75) // `ERC5805CheckpointValueOverflow()`.
-                    revert(0x1c, 0x04)
-                }
-                let lastKey := and(0xffffffffffff, lastPacked)
-                if iszero(eq(lastKey, key)) {
-                    n := add(1, n)
-                    checkpointSlot := add(1, checkpointSlot)
-                    sstore(lengthSlot, add(shl(48, 1), lengthSlotPacked))
-                }
-                if or(gt(lastKey, key), shr(48, n)) { invalid() }
-                if iszero(or(eq(newValue, address()), shr(160, newValue))) {
-                    sstore(checkpointSlot, or(or(key, shl(48, n)), shl(96, newValue)))
-                    break
-                }
-                sstore(checkpointSlot, or(or(key, shl(48, n)), shl(96, address())))
-                sstore(not(checkpointSlot), newValue)
-                break
-            }
+        uint256 lengthSlotPacked = _erc20VotesSload(lengthSlot);
+        uint256 n = uint48(lengthSlotPacked >> 48);
+        if (n == 0) {
+            if (!isAdd && amount != 0) revert ERC5805CheckpointValueUnderflow();
+            newValue = amount;
+            _erc20VotesStoreCheckpoint(lengthSlot, key | 1 << 48, newValue);
+            return (oldValue, newValue);
         }
+        uint256 checkpointSlot = _erc20VotesAdd(n - 1, lengthSlot);
+        uint256 lastPacked = _erc20VotesSload(checkpointSlot);
+        oldValue = _erc20VotesCheckpointValue(checkpointSlot, lastPacked);
+        if (!isAdd) {
+            if (amount > oldValue) revert ERC5805CheckpointValueUnderflow();
+            newValue = oldValue - amount;
+        } else {
+            if (amount > type(uint256).max - oldValue) revert ERC5805CheckpointValueOverflow();
+            newValue = oldValue + amount;
+        }
+        uint256 lastKey = uint48(lastPacked);
+        if (lastKey != key) {
+            n = n + 1;
+            checkpointSlot = _erc20VotesAdd(checkpointSlot, 1);
+            _erc20VotesSstore(lengthSlot, lengthSlotPacked + (1 << 48));
+        }
+        // Revert with no data, as the assembly's `invalid()`, if the key goes back or the
+        // length overflows.
+        if (lastKey > key || n >> 48 != 0) revert();
+        _erc20VotesStoreCheckpoint(checkpointSlot, key | n << 48, newValue);
     }
 
     /// @dev Returns the latest value in the checkpoints.
     function _checkpointLatest(uint256 lengthSlot) private view returns (uint256 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := shr(208, shl(160, sload(lengthSlot)))
-            if result {
-                lengthSlot := add(sub(result, 1), lengthSlot) // Reuse for `checkpointSlot`.
-                result := shr(96, sload(lengthSlot))
-                if eq(result, address()) { result := sload(not(lengthSlot)) }
-            }
+        uint256 n = uint48(_erc20VotesSload(lengthSlot) >> 48);
+        if (n != 0) {
+            uint256 checkpointSlot = _erc20VotesAdd(n - 1, lengthSlot);
+            result = _erc20VotesCheckpointValue(checkpointSlot, _erc20VotesSload(checkpointSlot));
         }
     }
 
@@ -416,48 +340,127 @@ abstract contract ERC20Votes is ERC20 {
         view
         returns (uint256 result)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let l := 0 // Low.
-            let h := shr(208, shl(160, sload(lengthSlot))) // High.
-            // Start the binary search nearer to the right to optimize for recent checkpoints.
-            for {} iszero(lt(h, 6)) {} {
-                let m := shl(4, lt(0xffff, h))
-                m := shl(shr(1, or(m, shl(3, lt(0xff, shr(m, h))))), 16)
-                m := shr(1, add(m, div(h, m)))
-                m := shr(1, add(m, div(h, m)))
-                m := shr(1, add(m, div(h, m)))
-                m := shr(1, add(m, div(h, m)))
-                m := shr(1, add(m, div(h, m)))
-                m := sub(h, shr(1, add(m, div(h, m)))) // Approx `h - sqrt(h)`.
-                if iszero(lt(key, and(sload(add(m, lengthSlot)), 0xffffffffffff))) {
-                    l := add(1, m)
-                    break
-                }
-                h := m
-                break
-            }
-            // Binary search.
-            for {} lt(l, h) {} {
-                let m := shr(1, add(l, h)) // Won't overflow in practice.
-                if iszero(lt(key, and(sload(add(m, lengthSlot)), 0xffffffffffff))) {
-                    l := add(1, m)
-                    continue
-                }
-                h := m
-            }
-            let checkpointSlot := add(sub(h, 1), lengthSlot)
-            result := mul(iszero(iszero(h)), shr(96, sload(checkpointSlot)))
-            if eq(result, address()) { result := sload(not(checkpointSlot)) }
+        uint256 l; // Low.
+        uint256 h = uint48(_erc20VotesSload(lengthSlot) >> 48); // High.
+        // Start the binary search nearer to the right to optimize for recent checkpoints.
+        if (h >= 6) {
+            // The assembly's first guess: `16 << 4k` for the `k` from 0 to 3 that suits `h`.
+            uint256 m = h > 0xffffff ? 0x10000 : h > 0xffff ? 0x1000 : h > 0xff ? 0x100 : 0x10;
+            m = (m + h / m) >> 1;
+            m = (m + h / m) >> 1;
+            m = (m + h / m) >> 1;
+            m = (m + h / m) >> 1;
+            m = (m + h / m) >> 1;
+            m = h - ((m + h / m) >> 1); // Approx `h - sqrt(h)`.
+            if (key >= uint48(_erc20VotesSload(_erc20VotesAdd(m, lengthSlot)))) l = m + 1;
+            else h = m;
+        }
+        // Binary search.
+        while (l < h) {
+            uint256 m = (l + h) >> 1; // Won't overflow in practice.
+            if (key >= uint48(_erc20VotesSload(_erc20VotesAdd(m, lengthSlot)))) l = m + 1;
+            else h = m;
+        }
+        if (h != 0) {
+            uint256 checkpointSlot = _erc20VotesAdd(h - 1, lengthSlot);
+            result = _erc20VotesCheckpointValue(checkpointSlot, _erc20VotesSload(checkpointSlot));
         }
     }
 
     /// @dev Reverts with `ERC5805FutureLookup()`.
+    /// @custom:solar-terminates
     function _revertERC5805FutureLookup() private pure {
+        revert ERC5805FutureLookup();
+    }
+
+    /// @dev The delegate slot of `account`: the hash of its address and the seed.
+    /// @custom:solar-inline
+    function _erc20VotesDelegateSlot(address account) private pure returns (uint256) {
+        return uint256(keccak256(abi.encodePacked(account, uint32(_ERC20_VOTES_MASTER_SLOT_SEED))));
+    }
+
+    /// @dev The signer of `digest` by the ecrecover precompile, and whether it gave no answer.
+    function _erc20VotesRecover(bytes32 digest, uint8 v, bytes32 r, bytes32 s)
+        private
+        view
+        returns (address signer, bool failed)
+    {
+        (bool success, bytes memory recovered) = address(1).staticcall(abi.encode(digest, v, r, s));
+        // `returndatasize()` will be `0x20` upon success, and `0x00` otherwise. Without an
+        // answer, the signer is the word the assembly reads instead: its call's input from
+        // byte 1, or the digest if the call itself failed.
+        failed = recovered.length == 0;
+        uint256 signerWord = uint256(digest);
+        if (!failed) signerWord = uint256(_erc20VotesReadBytes32(recovered, 0));
+        else if (success) signerWord <<= 8;
+        signer = address(uint160(signerWord));
+    }
+
+    /// @dev The value of the checkpoint at `checkpointSlot`, whose word is `packed`: its top
+    /// 160 bits, unless they are this contract's address, which stands for the value kept
+    /// whole at `not(checkpointSlot)`.
+    /// @custom:solar-inline
+    function _erc20VotesCheckpointValue(uint256 checkpointSlot, uint256 packed)
+        private
+        view
+        returns (uint256 value)
+    {
+        value = packed >> 96;
+        if (value == uint160(address(this))) value = _erc20VotesSload(~checkpointSlot);
+    }
+
+    /// @dev Stores the checkpoint `keyAndLength` with `value` at `checkpointSlot`: the value in
+    /// the top 160 bits if it fits there and is not this contract's address, else the address
+    /// there and the value at `not(checkpointSlot)`.
+    function _erc20VotesStoreCheckpoint(uint256 checkpointSlot, uint256 keyAndLength, uint256 value)
+        private
+    {
+        if (value == uint160(address(this)) || value >> 160 != 0) {
+            _erc20VotesSstore(checkpointSlot, keyAndLength | uint256(uint160(address(this))) << 96);
+            _erc20VotesSstore(~checkpointSlot, value);
+        } else {
+            _erc20VotesSstore(checkpointSlot, keyAndLength | value << 96);
+        }
+    }
+
+    /// @dev The 32 bytes of `b` at `offset`.
+    /// @custom:solar-inline
+    function _erc20VotesReadBytes32(bytes memory b, uint256 offset)
+        private
+        pure
+        returns (bytes32 result)
+    {
+        for (uint256 k; k < 32; ++k) {
+            result |= bytes32(b[offset + k]) >> (8 * k);
+        }
+    }
+
+    /// @dev Returns the word in storage slot `slot`. Solidity cannot name a slot it did not
+    /// allocate.
+    /// @custom:solar-trusted
+    function _erc20VotesSload(uint256 slot) private view returns (uint256 value) {
         /// @solidity memory-safe-assembly
         assembly {
-            mstore(0x00, 0xf9874464) // `ERC5805FutureLookup()`.
-            revert(0x1c, 0x04)
+            value := sload(slot)
+        }
+    }
+
+    /// @dev Stores `value` in storage slot `slot`. Solidity cannot name a slot it did not
+    /// allocate.
+    /// @custom:solar-trusted
+    function _erc20VotesSstore(uint256 slot, uint256 value) private {
+        /// @solidity memory-safe-assembly
+        assembly {
+            sstore(slot, value)
+        }
+    }
+
+    /// @dev `a + b` modulo `2**256`, as the assembly adds an index to a length slot; checked
+    /// arithmetic would revert where it wraps.
+    /// @custom:solar-trusted
+    function _erc20VotesAdd(uint256 a, uint256 b) private pure returns (uint256 c) {
+        unchecked {
+            c = a + b;
         }
     }
 }

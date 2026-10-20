@@ -74,6 +74,10 @@ LIBRARIES = [
     "EnumerableMapLib",
     "LibStorage",
     "RedBlackTreeLib",
+    "auth/EnumerableRoles",
+    "auth/TimedRoles",
+    "tokens/ERC2981",
+    "tokens/ERC20Votes",
 ]
 
 
