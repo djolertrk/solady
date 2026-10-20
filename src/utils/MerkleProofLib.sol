@@ -98,7 +98,10 @@ library MerkleProofLib {
 
     /// @dev Runs the queue whose first `back` entries `hashes` holds, one hash
     /// per flag, and returns the last hash and whether every read stayed in the
-    /// written queue and the proof, and every proof element was used.
+    /// written queue and the proof, and every proof element was used. `hashes`
+    /// has room for every hash the flags make, so `back` never reaches its
+    /// length; testing that first bounds every queue index the step reads.
+    /// @custom:solar-inline
     function _rebuild(
         bytes32[] memory hashes,
         uint256 back,
@@ -109,16 +112,16 @@ library MerkleProofLib {
         uint256 used;
         for (uint256 i; i < flags.length; ++i) {
             // Each index is checked before it steps, so the step cannot wrap.
-            if (front == back) return (false, 0);
+            if (back >= hashes.length || front >= back) return (false, 0);
             bytes32 a = hashes[front];
             ++front;
             bytes32 b;
             if (flags[i]) {
-                if (front == back) return (false, 0);
+                if (front >= back) return (false, 0);
                 b = hashes[front];
                 ++front;
             } else {
-                if (used == proof.length) return (false, 0);
+                if (used >= proof.length) return (false, 0);
                 b = proof[used];
                 ++used;
             }
@@ -130,6 +133,7 @@ library MerkleProofLib {
     }
 
     /// @dev `_rebuild` for a proof and flags in calldata.
+    /// @custom:solar-inline
     function _rebuildCalldata(
         bytes32[] memory hashes,
         uint256 back,
@@ -140,16 +144,16 @@ library MerkleProofLib {
         uint256 used;
         for (uint256 i; i < flags.length; ++i) {
             // Each index is checked before it steps, so the step cannot wrap.
-            if (front == back) return (false, 0);
+            if (back >= hashes.length || front >= back) return (false, 0);
             bytes32 a = hashes[front];
             ++front;
             bytes32 b;
             if (flags[i]) {
-                if (front == back) return (false, 0);
+                if (front >= back) return (false, 0);
                 b = hashes[front];
                 ++front;
             } else {
-                if (used == proof.length) return (false, 0);
+                if (used >= proof.length) return (false, 0);
                 b = proof[used];
                 ++used;
             }
