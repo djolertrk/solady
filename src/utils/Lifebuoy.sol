@@ -34,6 +34,13 @@ pragma solidity ^0.8.4;
 ///
 /// This contract is optimized with a priority on minimal bytecode size,
 /// as the methods are not intended to be called often.
+///
+/// The checked port keeps the lock flags in upstream's slot, which Solidity cannot name, so
+/// the trusted `_lifebuoySload` and `_lifebuoySstore` read and write it. The deployer hash is
+/// `keccak256(abi.encode(address(this), deployer))`, and the rescues and the `owner()` query
+/// are plain calls with the calldata, value and gas the assembly passes; the ERC1155 rescue
+/// appends `data` unpadded, as the assembly does.
+/// @custom:solar-safe memory arithmetic
 contract Lifebuoy {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                       CUSTOM ERRORS                        */
@@ -103,15 +110,8 @@ contract Lifebuoy {
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     constructor() payable {
-        bytes32 hash;
         uint256 deployer = uint160(_lifebuoyDefaultDeployer());
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x00, address())
-            mstore(0x20, deployer)
-            hash := keccak256(0x00, 0x40)
-        }
-        _lifebuoyDeployerHash = hash;
+        _lifebuoyDeployerHash = keccak256(abi.encode(address(this), deployer));
     }
 
     /// @dev Returns `tx.origin` by default. Override to return another address if needed.
@@ -136,13 +136,8 @@ contract Lifebuoy {
         virtual
         onlyRescuer(_LIFEBUOY_RESCUE_ETH_LOCK)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            if iszero(call(gas(), to, amount, codesize(), 0x00, codesize(), 0x00)) {
-                mstore(0x00, 0x7ec62e76) // `RescueTransferFailed()`.
-                revert(0x1c, 0x04)
-            }
-        }
+        (bool success,) = to.call{value: amount}("");
+        if (!success) revert RescueTransferFailed();
     }
 
     /// @dev Sends `amount` of ERC20 `token` from the current contract to `to`.
@@ -153,17 +148,10 @@ contract Lifebuoy {
         virtual
         onlyRescuer(_LIFEBUOY_RESCUE_ERC20_LOCK)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x14, to) // Store the `to` argument.
-            mstore(0x34, amount) // Store the `amount` argument.
-            // `RescueTransferFailed()` and `transfer(address,uint256)`.
-            mstore(0x00, shl(96, 0x7ec62e76a9059cbb))
-            if iszero(call(gas(), token, callvalue(), 0x10, 0x44, codesize(), 0x00)) {
-                revert(0x0c, 0x04)
-            }
-            mstore(0x34, 0) // Restore the part of the free memory pointer that was overwritten.
-        }
+        // `transfer(address,uint256)`.
+        (bool success,) =
+            token.call{value: msg.value}(abi.encodeWithSelector(0xa9059cbb, to, amount));
+        if (!success) revert RescueTransferFailed();
     }
 
     /// @dev Sends `id` of ERC721 `token` from the current contract to `to`.
@@ -174,20 +162,10 @@ contract Lifebuoy {
         virtual
         onlyRescuer(_LIFEBUOY_RESCUE_ERC721_LOCK)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let m := mload(0x40) // Cache the free memory pointer.
-            mstore(0x60, id) // Store the `id` argument.
-            mstore(0x40, shr(96, shl(96, to))) // Store the `to` argument.
-            mstore(0x20, address()) // Store the `from` argument.
-            // `RescueTransferFailed()` and `transferFrom(address,address,uint256)`.
-            mstore(0x00, 0x7ec62e7623b872dd)
-            if iszero(call(gas(), token, callvalue(), 0x1c, 0x64, codesize(), 0x00)) {
-                revert(0x18, 0x04)
-            }
-            mstore(0x60, 0) // Restore the zero slot to zero.
-            mstore(0x40, m) // Restore the free memory pointer.
-        }
+        // `transferFrom(address,address,uint256)`.
+        (bool success,) =
+            token.call{value: msg.value}(abi.encodeWithSelector(0x23b872dd, address(this), to, id));
+        if (!success) revert RescueTransferFailed();
     }
 
     /// @dev Sends `amount` of `id` of ERC1155 `token` from the current contract to `to`.
@@ -199,23 +177,15 @@ contract Lifebuoy {
         uint256 amount,
         bytes calldata data
     ) public payable virtual onlyRescuer(_LIFEBUOY_RESCUE_ERC1155_LOCK) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let m := mload(0x40) // Cache the free memory pointer.
-            // `RescueTransferFailed()` and `safeTransferFrom(address,address,uint256,uint256,bytes)`.
-            mstore(m, 0x7ec62e76f242432a)
-            mstore(add(0x20, m), address()) // Store the `from` argument.
-            mstore(add(0x40, m), shr(96, shl(96, to))) // Store the `to` argument.
-            mstore(add(0x60, m), id) // Store the `id` argument.
-            mstore(add(0x80, m), amount) // Store the `amount` argument.
-            mstore(add(0xa0, m), 0xa0) // Store the offset to `data`.
-            mstore(add(0xc0, m), data.length)
-            calldatacopy(add(m, 0xe0), data.offset, data.length)
-            // forgefmt: disable-next-item
-            if iszero(
-                call(gas(), token, callvalue(), add(m, 0x1c), add(0xc4, data.length), codesize(), 0x00)
-            ) { revert(add(m, 0x18), 0x04) }
-        }
+        // `safeTransferFrom(address,address,uint256,uint256,bytes)`, with `data` unpadded.
+        (bool success,) = token.call{value: msg.value}(
+            abi.encodePacked(
+                bytes4(0xf242432a),
+                abi.encode(address(this), to, id, amount, 0xa0, data.length),
+                data
+            )
+        );
+        if (!success) revert RescueTransferFailed();
     }
 
     /// @dev Sends `amount` of `id` of ERC6909 `token` from the current contract to `to`.
@@ -226,20 +196,10 @@ contract Lifebuoy {
         virtual
         onlyRescuer(_LIFEBUOY_RESCUE_ERC6909_LOCK)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let m := mload(0x40) // Cache the free memory pointer.
-            mstore(0x14, to) // Store the `to` argument.
-            mstore(0x34, id) // Store the `id` argument.
-            mstore(0x54, amount) // Store the `amount` argument.
-            // `RescueTransferFailed()` and `transfer(address,uint256,uint256)`.
-            mstore(0x00, shl(96, 0x7ec62e76095bcdb6))
-            if iszero(call(gas(), token, callvalue(), 0x10, 0x64, codesize(), 0x00)) {
-                revert(0x0c, 0x04)
-            }
-            mstore(0x60, 0) // Restore the zero slot to zero.
-            mstore(0x40, m) // Restore the free memory pointer.
-        }
+        // `transfer(address,uint256,uint256)`.
+        (bool success,) =
+            token.call{value: msg.value}(abi.encodeWithSelector(0x095bcdb6, to, id, amount));
+        if (!success) revert RescueTransferFailed();
     }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -249,10 +209,7 @@ contract Lifebuoy {
     /// @dev Returns the flags denoting whether access to rescue functions
     /// (including `lockRescue`) is locked.
     function rescueLocked() public view virtual returns (uint256 locks) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            locks := sload(_RESCUE_LOCKED_FLAGS_SLOT)
-        }
+        locks = _lifebuoySload(uint256(_RESCUE_LOCKED_FLAGS_SLOT));
     }
 
     /// @dev Locks (i.e. permanently removes) access to rescue functions (including `lockRescue`).
@@ -267,11 +224,8 @@ contract Lifebuoy {
 
     /// @dev Internal function to set the lock flags without going through access control.
     function _lockRescue(uint256 locksToSet) internal virtual {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let s := _RESCUE_LOCKED_FLAGS_SLOT
-            sstore(s, or(sload(s), locksToSet))
-        }
+        uint256 s = uint256(_RESCUE_LOCKED_FLAGS_SLOT);
+        _lifebuoySstore(s, _lifebuoySload(s) | locksToSet);
     }
 
     /// @dev Requires that the rescue function being guarded is:
@@ -282,35 +236,52 @@ contract Lifebuoy {
     function _checkRescuer(uint256 modeLock) internal view virtual {
         uint256 locks = rescueLocked();
         bytes32 h = _lifebuoyDeployerHash;
-        /// @solidity memory-safe-assembly
-        assembly {
-            for {} 1 {} {
-                // If the `modeLock` flag is true, set all bits in `locks` to true.
-                locks := or(sub(0, iszero(iszero(and(modeLock, locks)))), locks)
-                // Caller is the deployer
-                // AND the contract is not a proxy
-                // AND `locks & _LIFEBUOY_DEPLOYER_ACCESS_LOCK` is false.
-                mstore(0x20, caller())
-                mstore(and(locks, _LIFEBUOY_DEPLOYER_ACCESS_LOCK), address())
-                if eq(keccak256(0x00, 0x40), h) { break }
-                // If the caller is `owner()`
-                // AND `locks & _LIFEBUOY_OWNER_ACCESS_LOCK` is false.
-                mstore(0x08, 0x8da5cb5b0a0362e0) // `owner()` and `RescueUnauthorizedOrLocked()`.
-                if and( // The arguments of `and` are evaluated from right to left.
-                    lt(
-                        and(locks, _LIFEBUOY_OWNER_ACCESS_LOCK),
-                        and(gt(returndatasize(), 0x1f), eq(mload(0x00), caller()))
-                    ),
-                    staticcall(gas(), address(), 0x20, 0x04, 0x00, 0x20)
-                ) { break }
-                revert(0x24, 0x04)
-            }
+        // If the `modeLock` flag is true, set all bits in `locks` to true.
+        if (modeLock & locks != 0) locks = type(uint256).max;
+        // Caller is the deployer
+        // AND the contract is not a proxy
+        // AND `locks & _LIFEBUOY_DEPLOYER_ACCESS_LOCK` is false.
+        if (locks & _LIFEBUOY_DEPLOYER_ACCESS_LOCK == 0) {
+            if (keccak256(abi.encode(address(this), msg.sender)) == h) return;
         }
+        // If the caller is `owner()`
+        // AND `locks & _LIFEBUOY_OWNER_ACCESS_LOCK` is false.
+        // The query is made whether or not the owner's access is locked.
+        (bool success, bytes memory result) =
+            address(this).staticcall(abi.encodeWithSelector(0x8da5cb5b)); // `owner()`.
+        if (success && locks & _LIFEBUOY_OWNER_ACCESS_LOCK == 0 && result.length > 0x1f) {
+            if (abi.decode(result, (uint256)) == uint160(msg.sender)) return;
+        }
+        revert RescueUnauthorizedOrLocked();
     }
 
     /// @dev Modifier that calls `_checkRescuer()` at the start of the function.
     modifier onlyRescuer(uint256 modeLock) virtual {
         _checkRescuer(modeLock);
         _;
+    }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      PRIVATE HELPERS                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev Returns the word in storage slot `slot`. Solidity cannot name a slot it did not
+    /// allocate.
+    /// @custom:solar-trusted
+    function _lifebuoySload(uint256 slot) private view returns (uint256 value) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            value := sload(slot)
+        }
+    }
+
+    /// @dev Stores `value` in storage slot `slot`. Solidity cannot name a slot it did not
+    /// allocate.
+    /// @custom:solar-trusted
+    function _lifebuoySstore(uint256 slot, uint256 value) private {
+        /// @solidity memory-safe-assembly
+        assembly {
+            sstore(slot, value)
+        }
     }
 }
