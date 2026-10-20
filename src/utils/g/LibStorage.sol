@@ -24,6 +24,11 @@ using LibStorage for Ref global;
 
 /// @notice Library for basic storage operations.
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/utils/g/LibStorage.sol)
+/// @dev The checked port hashes a bump's slot, the seed and the low 216 bits of its counter
+/// with `abi.encodePacked`, the same 63 bytes the assembly hashes. Trusted helpers read a
+/// bump's slot number and make `Bump` and `Ref` storage pointers from slot numbers, which
+/// Solidity cannot spell, and wrap the counter's increment at `2**256` as upstream does.
+/// @custom:solar-safe memory arithmetic
 library LibStorage {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                         CONSTANTS                          */
@@ -40,51 +45,76 @@ library LibStorage {
     /// @dev Returns the current storage slot pointed by the bump.
     /// Use inline-assembly to cast the result to a desired custom data type storage pointer.
     function slot(Bump storage b) internal view returns (bytes32 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x1f, sload(b.slot))
-            mstore(0x04, _BUMPED_STORAGE_REF_SLOT_SEED)
-            mstore(0x00, b.slot)
-            result := keccak256(0x00, 0x3f)
-        }
+        result = keccak256(
+            abi.encodePacked(_slot(b), uint32(_BUMPED_STORAGE_REF_SLOT_SEED), uint216(b._current))
+        );
     }
 
     /// @dev Makes the bump point to a whole new storage slot.
     function invalidate(Bump storage b) internal {
-        unchecked {
-            ++b._current;
-        }
+        b._current = _add(b._current, 1);
     }
 
     /// @dev Returns a bump at the storage slot.
     function bump(bytes32 sSlot) internal pure returns (Bump storage $) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            $.slot := sSlot
-        }
+        $ = _bumpAt(uint256(sSlot));
     }
 
     /// @dev Returns a bump at the storage slot.
     function bump(uint256 sSlot) internal pure returns (Bump storage $) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            $.slot := sSlot
-        }
+        $ = _bumpAt(sSlot);
     }
 
     /// @dev Returns a pointer to a `uint256` in storage.
     function ref(bytes32 sSlot) internal pure returns (Ref storage $) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            $.slot := sSlot
-        }
+        $ = _refAt(uint256(sSlot));
     }
 
     /// @dev Returns a pointer to a `uint256` in storage.
     function ref(uint256 sSlot) internal pure returns (Ref storage $) {
+        $ = _refAt(sSlot);
+    }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      PRIVATE HELPERS                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev The storage slot of `b`.
+    /// Solidity does not expose a storage pointer's slot number.
+    /// @custom:solar-trusted
+    function _slot(Bump storage b) private pure returns (uint256 s) {
         /// @solidity memory-safe-assembly
         assembly {
-            $.slot := sSlot
+            s := b.slot
+        }
+    }
+
+    /// @dev The bump at storage slot `s`.
+    /// Solidity cannot make a storage pointer from a slot number.
+    /// @custom:solar-trusted
+    function _bumpAt(uint256 s) private pure returns (Bump storage $) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            $.slot := s
+        }
+    }
+
+    /// @dev The `uint256` pointer at storage slot `s`.
+    /// Solidity cannot make a storage pointer from a slot number.
+    /// @custom:solar-trusted
+    function _refAt(uint256 s) private pure returns (Ref storage $) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            $.slot := s
+        }
+    }
+
+    /// @dev `a + b` modulo `2**256`.
+    /// Checked arithmetic reverts where upstream's increment wraps.
+    /// @custom:solar-trusted
+    function _add(uint256 a, uint256 b) private pure returns (uint256 c) {
+        unchecked {
+            c = a + b;
         }
     }
 }

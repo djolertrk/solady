@@ -19,6 +19,17 @@ using RedBlackTreeLib for Tree global;
 /// @author Modified from BokkyPooBahsRedBlackTreeLibrary (https://github.com/bokkypoobah/BokkyPooBahsRedBlackTreeLibrary)
 /// @dev This implementation does not support the zero (i.e. empty) value.
 ///      This implementation supports up to 2147483647 values.
+///
+/// The checked port keeps upstream's storage layout and node packing, and reads and writes
+/// the same slots and words in the same order. Node slots are offsets of a hashed base that
+/// Solidity cannot name, so trusted helpers read and write a slot by number and read the
+/// tree's slot number. The Yul functions of `_update` are private functions that take and
+/// return the root index, which upstream keeps in scratch memory with the node count, and
+/// `_revert` raises the custom error of an error code. `values` fills an array from `new`
+/// with bounds-checked writes: if the node count disagrees with the nodes under the root,
+/// which only a direct storage write can cause, it reverts or leaves zeros where upstream
+/// writes past or short of its array.
+/// @custom:solar-safe memory arithmetic
 library RedBlackTreeLib {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                       CUSTOM ERRORS                        */
@@ -102,10 +113,7 @@ library RedBlackTreeLib {
     /// @dev Returns the number of unique values in the tree.
     function size(Tree storage tree) internal view returns (uint256 result) {
         uint256 nodes = _nodes(tree);
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := and(sload(nodes), _BITMASK_KEY)
-        }
+        result = _sload(nodes) & _BITMASK_KEY;
     }
 
     /// @dev Returns an array of all the values in the tree in ascending sorted order.
@@ -113,27 +121,10 @@ library RedBlackTreeLib {
     /// It is intended for usage in off-chain view functions.
     function values(Tree storage tree) internal view returns (uint256[] memory result) {
         uint256 nodes = _nodes(tree);
-        /// @solidity memory-safe-assembly
-        assembly {
-            function visit(current_) {
-                if iszero(current_) { leave } // If the current node is null, leave.
-                current_ := or(mload(0x00), current_) // Current node's storage slot.
-                let packed_ := sload(current_)
-                visit(and(packed_, _BITMASK_KEY)) // Visit left child.
-                let value_ := shr(_BITPOS_PACKED_VALUE, packed_) // Current value.
-                if iszero(value_) { value_ := sload(or(current_, _BIT_FULL_VALUE_SLOT)) }
-                mstore(mload(0x20), value_) // Append the value to `results`.
-                mstore(0x20, add(0x20, mload(0x20))) // Advance the offset into `results`.
-                visit(and(shr(_BITPOS_RIGHT, packed_), _BITMASK_KEY)) // Visit right child.
-            }
-            result := mload(0x40)
-            let rootPacked := sload(nodes)
-            mstore(result, and(rootPacked, _BITMASK_KEY)) // Length of `result`.
-            mstore(0x00, nodes) // Cache the nodes pointer in scratch space.
-            mstore(0x20, add(result, 0x20)) // Cache the offset into `results` in scratch space.
-            mstore(0x40, add(mload(0x20), shl(5, mload(result)))) // Allocate memory.
-            visit(shr(128, rootPacked)) // Start the tree traversal from the root node.
-        }
+        uint256 rootPacked = _sload(nodes);
+        result = new uint256[](rootPacked & _BITMASK_KEY);
+        uint256 root = rootPacked >> 128;
+        if (root != uint256(0)) _visit(nodes, root, result, 0); // Start from the root node.
     }
 
     /// @dev Returns a pointer to the value `x`.
@@ -148,18 +139,16 @@ library RedBlackTreeLib {
     /// If the tree is empty, the returned pointer will be empty.
     function nearest(Tree storage tree, uint256 x) internal view returns (bytes32 result) {
         (uint256 nodes, uint256 cursor, uint256 key) = _find(tree, x);
-        unchecked {
-            if (cursor == uint256(0)) return result; // Nothing found -- empty tree.
-            if (key != uint256(0)) return _pack(nodes, key); // Exact match.
-            bytes32 a = _pack(nodes, cursor);
-            uint256 aValue = value(a);
-            bytes32 b = x < aValue ? prev(a) : next(a);
-            if (b == bytes32(0)) return a; // Only node found.
-            uint256 bValue = value(b);
-            uint256 aDist = x < aValue ? aValue - x : x - aValue;
-            uint256 bDist = x < bValue ? bValue - x : x - bValue;
-            return (aDist == bDist ? aValue < bValue : aDist < bDist) ? a : b;
-        }
+        if (cursor == uint256(0)) return result; // Nothing found -- empty tree.
+        if (key != uint256(0)) return _pack(nodes, key); // Exact match.
+        bytes32 a = _pack(nodes, cursor);
+        uint256 aValue = value(a);
+        bytes32 b = x < aValue ? prev(a) : next(a);
+        if (b == bytes32(0)) return a; // Only node found.
+        uint256 bValue = value(b);
+        uint256 aDist = x < aValue ? aValue - x : x - aValue;
+        uint256 bDist = x < bValue ? bValue - x : x - bValue;
+        return (aDist == bDist ? aValue < bValue : aDist < bDist) ? a : b;
     }
 
     /// @dev Returns a pointer to the nearest value lesser or equal to `x`.
@@ -239,12 +228,9 @@ library RedBlackTreeLib {
     /// If `ptr` is empty, the result will be zero.
     function value(bytes32 ptr) internal view returns (uint256 result) {
         if (ptr == bytes32(0)) return result;
-        /// @solidity memory-safe-assembly
-        assembly {
-            let packed := sload(ptr)
-            result := shr(_BITPOS_PACKED_VALUE, packed)
-            if iszero(result) { result := sload(or(ptr, _BIT_FULL_VALUE_SLOT)) }
-        }
+        uint256 packed = _sload(uint256(ptr));
+        result = packed >> _BITPOS_PACKED_VALUE;
+        if (result == uint256(0)) result = _sload(uint256(ptr) | _BIT_FULL_VALUE_SLOT);
     }
 
     /// @dev Returns a pointer to the smallest value in the tree.
@@ -284,70 +270,53 @@ library RedBlackTreeLib {
 
     /// @dev Unpacks the pointer `ptr` to its components.
     function _unpack(bytes32 ptr) private pure returns (uint256 nodes, uint256 key) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            nodes := shl(_NODES_SLOT_SHIFT, shr(_NODES_SLOT_SHIFT, ptr))
-            key := and(_BITMASK_KEY, ptr)
-        }
+        nodes = (uint256(ptr) >> _NODES_SLOT_SHIFT) << _NODES_SLOT_SHIFT;
+        key = _BITMASK_KEY & uint256(ptr);
     }
 
     /// @dev Packs `nodes` and `key` into a single pointer.
     function _pack(uint256 nodes, uint256 key) private pure returns (bytes32 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := mul(or(nodes, key), iszero(iszero(key)))
-        }
+        if (key != uint256(0)) result = bytes32(nodes | key);
     }
 
     /// @dev Returns the pointer to either end of the tree.
     function _end(Tree storage tree, uint256 L) private view returns (bytes32 result) {
         uint256 nodes = _nodes(tree);
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := shr(128, sload(nodes))
-            if result {
-                for {} 1 {} {
-                    let packed := sload(or(nodes, result))
-                    let left := and(shr(L, packed), _BITMASK_KEY)
-                    if iszero(left) { break }
-                    result := left
-                }
+        uint256 key = _sload(nodes) >> 128;
+        if (key != uint256(0)) {
+            while (true) {
+                uint256 packed = _sload(nodes | key);
+                uint256 left = (packed >> L) & _BITMASK_KEY;
+                if (left == uint256(0)) break;
+                key = left;
             }
         }
-        result = _pack(nodes, uint256(result));
+        result = _pack(nodes, key);
     }
 
     /// @dev Step the pointer `ptr` forwards or backwards.
     function _step(bytes32 ptr, uint256 L, uint256 R) private view returns (bytes32 result) {
         if (ptr == bytes32(0)) return ptr;
         (uint256 nodes, uint256 target) = _unpack(ptr);
-        /// @solidity memory-safe-assembly
-        assembly {
-            let packed := sload(ptr)
-            for { result := and(shr(R, packed), _BITMASK_KEY) } 1 {} {
-                if iszero(result) {
-                    result := and(shr(_BITPOS_PARENT, packed), _BITMASK_KEY)
-                    for {} 1 {} {
-                        if iszero(result) { break }
-                        packed := sload(or(nodes, result))
-                        if iszero(eq(target, and(shr(R, packed), _BITMASK_KEY))) {
-                            break
-                        }
-                        target := result
-                        result := and(shr(_BITPOS_PARENT, packed), _BITMASK_KEY)
-                    }
-                    break
-                }
-                for {} 1 {} {
-                    packed := sload(or(nodes, result))
-                    let left := and(shr(L, packed), _BITMASK_KEY)
-                    if iszero(left) { break }
-                    result := left
-                }
-                break
+        uint256 packed = _sload(uint256(ptr));
+        uint256 key = (packed >> R) & _BITMASK_KEY;
+        if (key == uint256(0)) {
+            key = (packed >> _BITPOS_PARENT) & _BITMASK_KEY;
+            while (key != uint256(0)) {
+                packed = _sload(nodes | key);
+                if (target != (packed >> R) & _BITMASK_KEY) break;
+                target = key;
+                key = (packed >> _BITPOS_PARENT) & _BITMASK_KEY;
+            }
+        } else {
+            while (true) {
+                packed = _sload(nodes | key);
+                uint256 left = (packed >> L) & _BITMASK_KEY;
+                if (left == uint256(0)) break;
+                key = left;
             }
         }
-        result = _pack(nodes, uint256(result));
+        result = _pack(nodes, key);
     }
 
     /// @dev Inserts or delete the value `x` from the tree.
@@ -355,336 +324,34 @@ library RedBlackTreeLib {
         private
         returns (uint256 err)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            function getKey(packed_, bitpos_) -> index_ {
-                index_ := and(_BITMASK_KEY, shr(bitpos_, packed_))
+        uint256 rootPacked = _sload(nodes);
+        uint256 root = rootPacked >> 128;
+        uint256 totalNodes = uint128(rootPacked);
+        if (mode == uint256(0)) {
+            if (key != uint256(0)) {
+                err = ERROR_VALUE_ALREADY_EXISTS;
+            } else if (totalNodes >= _BITMASK_KEY) {
+                err = ERROR_TREE_IS_FULL;
+            } else {
+                ++totalNodes;
+                root = _insert(nodes, cursor, totalNodes, x, root);
             }
-
-            function setKey(packed_, bitpos_, key_) -> result_ {
-                result_ := or(and(not(shl(bitpos_, _BITMASK_KEY)), packed_), shl(bitpos_, key_))
+        } else {
+            if (key > totalNodes) {
+                err = ERROR_POINTER_OUT_OF_BOUNDS;
+            } else if (key == uint256(0)) {
+                err = ERROR_VALUE_DOES_NOT_EXISTS;
+            } else {
+                root = _remove(nodes, key, root, totalNodes);
+                --totalNodes;
             }
-
-            function rotate(nodes_, key_, L, R) {
-                let packed_ := sload(or(nodes_, key_))
-                let cursor_ := getKey(packed_, R)
-                let parent_ := getKey(packed_, _BITPOS_PARENT)
-                let cursorPacked_ := sload(or(nodes_, cursor_))
-                let cursorLeft_ := getKey(cursorPacked_, L)
-
-                if cursorLeft_ {
-                    let s_ := or(nodes_, cursorLeft_)
-                    sstore(s_, setKey(sload(s_), _BITPOS_PARENT, key_))
-                }
-
-                for {} 1 {} {
-                    if iszero(parent_) {
-                        mstore(0x00, cursor_)
-                        break
-                    }
-                    let s_ := or(nodes_, parent_)
-                    let parentPacked_ := sload(s_)
-                    if eq(key_, getKey(parentPacked_, L)) {
-                        sstore(s_, setKey(parentPacked_, L, cursor_))
-                        break
-                    }
-                    sstore(s_, setKey(parentPacked_, R, cursor_))
-                    break
-                }
-                packed_ := setKey(packed_, R, cursorLeft_)
-                sstore(or(nodes_, key_), setKey(packed_, _BITPOS_PARENT, cursor_))
-                cursorPacked_ := setKey(cursorPacked_, _BITPOS_PARENT, parent_)
-                sstore(or(nodes_, cursor_), setKey(cursorPacked_, L, key_))
-            }
-
-            function insert(nodes_, cursor_, key_, x_) -> err_ {
-                if key_ {
-                    err_ := ERROR_VALUE_ALREADY_EXISTS
-                    leave
-                }
-
-                let totalNodes_ := add(shr(128, mload(0x20)), 1)
-                if gt(totalNodes_, _BITMASK_KEY) {
-                    err_ := ERROR_TREE_IS_FULL
-                    leave
-                }
-
-                mstore(0x20, shl(128, totalNodes_))
-
-                {
-                    let packed_ := or(_BITMASK_RED, shl(_BITPOS_PARENT, cursor_))
-                    let nodePointer_ := or(nodes_, totalNodes_)
-
-                    for {} 1 {} {
-                        if iszero(gt(x_, _BITMASK_PACKED_VALUE)) {
-                            packed_ := or(shl(_BITPOS_PACKED_VALUE, x_), packed_)
-                            break
-                        }
-                        sstore(or(nodePointer_, _BIT_FULL_VALUE_SLOT), x_)
-                        break
-                    }
-                    sstore(nodePointer_, packed_)
-
-                    for {} 1 {} {
-                        if iszero(cursor_) {
-                            mstore(0x00, totalNodes_)
-                            break
-                        }
-                        let s_ := or(nodes_, cursor_)
-                        let cPacked_ := sload(s_)
-                        let cValue_ := shr(_BITPOS_PACKED_VALUE, cPacked_)
-                        if iszero(cValue_) {
-                            cValue_ := sload(or(s_, _BIT_FULL_VALUE_SLOT))
-                        }
-                        if iszero(lt(x_, cValue_)) {
-                            sstore(s_, setKey(cPacked_, _BITPOS_RIGHT, totalNodes_))
-                            break
-                        }
-                        sstore(s_, setKey(cPacked_, _BITPOS_LEFT, totalNodes_))
-                        break
-                    }
-                }
-
-                // Insert fixup workflow:
-
-                key_ := totalNodes_
-                let BR := _BITMASK_RED
-                for {} iszero(eq(key_, mload(0x00))) {} {
-                    let packed_ := sload(or(nodes_, key_))
-                    let parent_ := getKey(packed_, _BITPOS_PARENT)
-                    let parentPacked_ := sload(or(nodes_, parent_))
-                    if iszero(and(BR, parentPacked_)) { break }
-
-                    let grandParent_ := getKey(parentPacked_, _BITPOS_PARENT)
-                    let grandParentPacked_ := sload(or(nodes_, grandParent_))
-
-                    let R := mul(eq(parent_, getKey(grandParentPacked_, 0)), _BITPOS_RIGHT)
-                    let L := xor(R, _BITPOS_RIGHT)
-
-                    let c_ := getKey(grandParentPacked_, R)
-                    let cPacked_ := sload(or(nodes_, c_))
-                    if iszero(and(BR, cPacked_)) {
-                        if eq(key_, getKey(parentPacked_, R)) {
-                            key_ := parent_
-                            rotate(nodes_, key_, L, R)
-                            parent_ := getKey(sload(or(nodes_, key_)), _BITPOS_PARENT)
-                            parentPacked_ := sload(or(nodes_, parent_))
-                        }
-                        sstore(or(nodes_, parent_), and(parentPacked_, not(BR)))
-                        let s_ := or(nodes_, grandParent_)
-                        sstore(s_, or(sload(s_), BR))
-                        rotate(nodes_, grandParent_, R, L)
-                        break
-                    }
-                    sstore(or(nodes_, parent_), and(parentPacked_, not(BR)))
-                    sstore(or(nodes_, c_), and(cPacked_, not(BR)))
-                    sstore(or(nodes_, grandParent_), or(grandParentPacked_, BR))
-                    key_ := grandParent_
-                }
-                let root_ := or(nodes_, mload(0x00))
-                sstore(root_, and(sload(root_), not(BR)))
-            }
-
-            function removeFixup(nodes_, key_) {
-                let BR := _BITMASK_RED
-                for {} iszero(eq(key_, mload(0x00))) {} {
-                    let packed_ := sload(or(nodes_, key_))
-                    if and(BR, packed_) { break }
-
-                    let parent_ := getKey(packed_, _BITPOS_PARENT)
-                    let parentPacked_ := sload(or(nodes_, parent_))
-
-                    let R := mul(eq(key_, getKey(parentPacked_, 0)), _BITPOS_RIGHT)
-                    let L := xor(R, _BITPOS_RIGHT)
-
-                    let cursor_ := getKey(parentPacked_, R)
-                    let cursorPacked_ := sload(or(nodes_, cursor_))
-
-                    if and(BR, cursorPacked_) {
-                        sstore(or(nodes_, cursor_), and(cursorPacked_, not(BR)))
-                        sstore(or(nodes_, parent_), or(parentPacked_, BR))
-                        rotate(nodes_, parent_, L, R)
-                        cursor_ := getKey(sload(or(nodes_, parent_)), R)
-                        cursorPacked_ := sload(or(nodes_, cursor_))
-                    }
-
-                    let cursorLeft_ := getKey(cursorPacked_, L)
-                    let cursorLeftPacked_ := sload(or(nodes_, cursorLeft_))
-                    let cursorRight_ := getKey(cursorPacked_, R)
-                    let cursorRightPacked_ := sload(or(nodes_, cursorRight_))
-
-                    if iszero(and(BR, or(cursorLeftPacked_, cursorRightPacked_))) {
-                        sstore(or(nodes_, cursor_), or(cursorPacked_, BR))
-                        key_ := parent_
-                        continue
-                    }
-
-                    if iszero(and(BR, cursorRightPacked_)) {
-                        sstore(or(nodes_, cursorLeft_), and(cursorLeftPacked_, not(BR)))
-                        sstore(or(nodes_, cursor_), or(cursorPacked_, BR))
-                        rotate(nodes_, cursor_, R, L)
-                        cursor_ := getKey(sload(or(nodes_, parent_)), R)
-                        cursorPacked_ := sload(or(nodes_, cursor_))
-                        cursorRight_ := getKey(cursorPacked_, R)
-                        cursorRightPacked_ := sload(or(nodes_, cursorRight_))
-                    }
-
-                    parentPacked_ := sload(or(nodes_, parent_))
-                    // forgefmt: disable-next-item
-                    sstore(or(nodes_, cursor_), xor(cursorPacked_, and(BR, xor(cursorPacked_, parentPacked_))))
-                    sstore(or(nodes_, parent_), and(parentPacked_, not(BR)))
-                    sstore(or(nodes_, cursorRight_), and(cursorRightPacked_, not(BR)))
-                    rotate(nodes_, parent_, L, R)
-                    break
-                }
-                sstore(or(nodes_, key_), and(sload(or(nodes_, key_)), not(BR)))
-            }
-
-            function replaceParent(nodes_, parent_, a_, b_) {
-                if iszero(parent_) {
-                    mstore(0x00, a_)
-                    leave
-                }
-                let s_ := or(nodes_, parent_)
-                let p_ := sload(s_)
-                let t_ := iszero(eq(b_, getKey(p_, _BITPOS_LEFT)))
-                sstore(s_, setKey(p_, mul(t_, _BITPOS_RIGHT), a_))
-            }
-
-            // In `remove`, the parent of the null value (index 0) may be temporarily set
-            // to a non-zero value. This is an optimization that unifies the removal cases.
-            function remove(nodes_, key_) -> err_ {
-                if gt(key_, shr(128, mload(0x20))) {
-                    err_ := ERROR_POINTER_OUT_OF_BOUNDS
-                    leave
-                }
-                if iszero(key_) {
-                    err_ := ERROR_VALUE_DOES_NOT_EXISTS
-                    leave
-                }
-
-                let cursor_ := key_
-                {
-                    let packed_ := sload(or(nodes_, key_))
-                    let left_ := getKey(packed_, _BITPOS_LEFT)
-                    let right_ := getKey(packed_, _BITPOS_RIGHT)
-                    if mul(left_, right_) {
-                        for { cursor_ := right_ } 1 {} {
-                            let cursorLeft_ := getKey(sload(or(nodes_, cursor_)), _BITPOS_LEFT)
-                            if iszero(cursorLeft_) { break }
-                            cursor_ := cursorLeft_
-                        }
-                    }
-                }
-
-                let cursorPacked_ := sload(or(nodes_, cursor_))
-                let probe_ := getKey(cursorPacked_, _BITPOS_LEFT)
-                probe_ := getKey(cursorPacked_, mul(iszero(probe_), _BITPOS_RIGHT))
-
-                let yParent_ := getKey(cursorPacked_, _BITPOS_PARENT)
-                let probeSlot_ := or(nodes_, probe_)
-                sstore(probeSlot_, setKey(sload(probeSlot_), _BITPOS_PARENT, yParent_))
-                replaceParent(nodes_, yParent_, probe_, cursor_)
-
-                if iszero(eq(cursor_, key_)) {
-                    let packed_ := sload(or(nodes_, key_))
-                    replaceParent(nodes_, getKey(packed_, _BITPOS_PARENT), cursor_, key_)
-
-                    let leftSlot_ := or(nodes_, getKey(packed_, _BITPOS_LEFT))
-                    sstore(leftSlot_, setKey(sload(leftSlot_), _BITPOS_PARENT, cursor_))
-
-                    let rightSlot_ := or(nodes_, getKey(packed_, _BITPOS_RIGHT))
-                    sstore(rightSlot_, setKey(sload(rightSlot_), _BITPOS_PARENT, cursor_))
-
-                    // Copy `left`, `right`, `red` from `key_` to `cursor_`.
-                    // forgefmt: disable-next-item
-                    sstore(or(nodes_, cursor_), xor(cursorPacked_,
-                        and(xor(packed_, cursorPacked_), sub(shl(_BITPOS_PACKED_VALUE, 1), 1))))
-
-                    let t_ := cursor_
-                    cursor_ := key_
-                    key_ := t_
-                }
-
-                if iszero(and(_BITMASK_RED, cursorPacked_)) {
-                    removeFixup(nodes_, probe_)
-                }
-
-                // Remove last workflow:
-
-                let last_ := shr(128, mload(0x20))
-                let lastPacked_ := sload(or(nodes_, last_))
-                let lastValue_ := shr(_BITPOS_PACKED_VALUE, lastPacked_)
-                let lastFullValue_ := 0
-                if iszero(lastValue_) {
-                    lastValue_ := sload(or(_BIT_FULL_VALUE_SLOT, or(nodes_, last_)))
-                    lastFullValue_ := lastValue_
-                }
-
-                let cursorValue_ := shr(_BITPOS_PACKED_VALUE, sload(or(nodes_, cursor_)))
-                let cursorFullValue_ := 0
-                if iszero(cursorValue_) {
-                    cursorValue_ := sload(or(_BIT_FULL_VALUE_SLOT, or(nodes_, cursor_)))
-                    cursorFullValue_ := cursorValue_
-                }
-
-                if iszero(eq(lastValue_, cursorValue_)) {
-                    sstore(or(nodes_, cursor_), lastPacked_)
-                    if iszero(eq(lastFullValue_, cursorFullValue_)) {
-                        sstore(or(_BIT_FULL_VALUE_SLOT, or(nodes_, cursor_)), lastFullValue_)
-                    }
-                    for { let lastParent_ := getKey(lastPacked_, _BITPOS_PARENT) } 1 {} {
-                        if iszero(lastParent_) {
-                            mstore(0x00, cursor_)
-                            break
-                        }
-                        let s_ := or(nodes_, lastParent_)
-                        let p_ := sload(s_)
-                        let t_ := iszero(eq(last_, getKey(p_, _BITPOS_LEFT)))
-                        sstore(s_, setKey(p_, mul(t_, _BITPOS_RIGHT), cursor_))
-                        break
-                    }
-                    let lastRight_ := getKey(lastPacked_, _BITPOS_RIGHT)
-                    if lastRight_ {
-                        let s_ := or(nodes_, lastRight_)
-                        sstore(s_, setKey(sload(s_), _BITPOS_PARENT, cursor_))
-                    }
-                    let lastLeft_ := getKey(lastPacked_, _BITPOS_LEFT)
-                    if lastLeft_ {
-                        let s_ := or(nodes_, lastLeft_)
-                        sstore(s_, setKey(sload(s_), _BITPOS_PARENT, cursor_))
-                    }
-                }
-                sstore(or(nodes_, last_), 0)
-                if lastFullValue_ { sstore(or(_BIT_FULL_VALUE_SLOT, or(nodes_, last_)), 0) }
-
-                mstore(0x20, shl(128, sub(last_, 1)))
-            }
-
-            mstore(0x00, codesize()) // Zeroize the first 0x10 bytes.
-            mstore(0x10, sload(nodes))
-
-            for {} 1 {} {
-                if iszero(mode) {
-                    err := insert(nodes, cursor, key, x)
-                    break
-                }
-                err := remove(nodes, key)
-                break
-            }
-
-            sstore(nodes, mload(0x10))
         }
+        _sstore(nodes, (root << 128) | totalNodes);
     }
 
     /// @dev Returns the pointer to the `nodes` for the tree.
     function _nodes(Tree storage tree) private pure returns (uint256 nodes) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x20, tree.slot)
-            mstore(0x00, _NODES_SLOT_SEED)
-            nodes := shl(_NODES_SLOT_SHIFT, keccak256(0x00, 0x40))
-        }
+        nodes = uint256(keccak256(abi.encode(_NODES_SLOT_SEED, _slot(tree)))) << _NODES_SLOT_SHIFT;
     }
 
     /// @dev Finds `x` in `tree`. The `key` will be zero if `x` is not found.
@@ -693,36 +360,378 @@ library RedBlackTreeLib {
         view
         returns (uint256 nodes, uint256 cursor, uint256 key)
     {
-        if (x == uint256(0)) _revert(0xc94f1877); // `ValueIsEmpty()`.
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x20, tree.slot)
-            mstore(0x00, _NODES_SLOT_SEED)
-            nodes := shl(_NODES_SLOT_SHIFT, keccak256(0x00, 0x40))
-            // Layout scratch space so that `mload(0x00) == 0`, `mload(0x01) == _BITPOS_RIGHT`.
-            mstore(0x01, _BITPOS_RIGHT) // `_BITPOS_RIGHT` is 31.
-            for { let probe := shr(128, sload(nodes)) } probe {} {
-                cursor := probe
-                let nodePacked := sload(or(nodes, probe))
-                let nodeValue := shr(_BITPOS_PACKED_VALUE, nodePacked)
-                if iszero(nodeValue) {
-                    nodeValue := sload(or(or(nodes, probe), _BIT_FULL_VALUE_SLOT))
-                }
-                if eq(nodeValue, x) {
-                    key := cursor
-                    break
-                }
-                probe := and(shr(mload(gt(x, nodeValue)), nodePacked), _BITMASK_KEY)
+        if (x == uint256(0)) revert ValueIsEmpty();
+        nodes = _nodes(tree);
+        for (uint256 probe = _sload(nodes) >> 128; probe != uint256(0);) {
+            cursor = probe;
+            uint256 nodePacked = _sload(nodes | probe);
+            uint256 nodeValue = nodePacked >> _BITPOS_PACKED_VALUE;
+            if (nodeValue == uint256(0)) {
+                nodeValue = _sload(nodes | probe | _BIT_FULL_VALUE_SLOT);
             }
+            if (nodeValue == x) {
+                key = cursor;
+                break;
+            }
+            probe = (x > nodeValue ? nodePacked >> _BITPOS_RIGHT : nodePacked) & _BITMASK_KEY;
         }
     }
 
     /// @dev Helper to revert `err` efficiently.
+    /// `err` is one of the four error codes that `_update` returns.
     function _revert(uint256 err) private pure {
+        if (err == ERROR_VALUE_ALREADY_EXISTS) revert ValueAlreadyExists();
+        if (err == ERROR_VALUE_DOES_NOT_EXISTS) revert ValueDoesNotExist();
+        if (err == ERROR_POINTER_OUT_OF_BOUNDS) revert PointerOutOfBounds();
+        revert TreeIsFull();
+    }
+
+    /// @dev Appends the values of the subtree at the non-null node `current` to `result` in
+    /// ascending order, from index `i`. Returns the index after the last value appended.
+    function _visit(uint256 nodes, uint256 current, uint256[] memory result, uint256 i)
+        private
+        view
+        returns (uint256)
+    {
+        do {
+            current = nodes | current; // Current node's storage slot.
+            uint256 packed = _sload(current);
+            uint256 left = packed & _BITMASK_KEY;
+            if (left != uint256(0)) i = _visit(nodes, left, result, i); // Visit left child.
+            uint256 v = packed >> _BITPOS_PACKED_VALUE; // Current value.
+            if (v == uint256(0)) v = _sload(current | _BIT_FULL_VALUE_SLOT);
+            result[i] = v; // Append the value to `result`.
+            ++i;
+            current = (packed >> _BITPOS_RIGHT) & _BITMASK_KEY; // Visit right child.
+        } while (current != uint256(0));
+        return i;
+    }
+
+    /// @dev Returns the index at bit position `bitpos` of `packed`.
+    /// @custom:solar-inline
+    function _getKey(uint256 packed, uint256 bitpos) private pure returns (uint256) {
+        return _BITMASK_KEY & (packed >> bitpos);
+    }
+
+    /// @dev Returns `packed` with the index at bit position `bitpos` set to `key`.
+    /// @custom:solar-inline
+    function _setKey(uint256 packed, uint256 bitpos, uint256 key) private pure returns (uint256) {
+        return (~(_BITMASK_KEY << bitpos) & packed) | (key << bitpos);
+    }
+
+    /// @dev Sets the parent index of the node in slot `s` to `parent`.
+    /// @custom:solar-inline
+    function _setParent(uint256 s, uint256 parent) private {
+        _sstore(s, _setKey(_sload(s), _BITPOS_PARENT, parent));
+    }
+
+    /// @dev Points the `L` child link of the node in slot `s` to `cursor` if it holds `key`,
+    /// and its `R` child link otherwise.
+    /// @custom:solar-inline
+    function _relink(uint256 s, uint256 key, uint256 cursor, uint256 L, uint256 R) private {
+        uint256 packed = _sload(s);
+        _sstore(s, _setKey(packed, key == _getKey(packed, L) ? L : R, cursor));
+    }
+
+    /// @dev Rotates the subtree at node `key` towards `L`, where `R` is the other side.
+    /// Returns the new root index.
+    /// @custom:solar-inline
+    function _rotate(uint256 nodes, uint256 key, uint256 L, uint256 R, uint256 root)
+        private
+        returns (uint256)
+    {
+        uint256 packed = _sload(nodes | key);
+        uint256 cursor = _getKey(packed, R);
+        uint256 parent = _getKey(packed, _BITPOS_PARENT);
+        uint256 cursorPacked = _sload(nodes | cursor);
+        uint256 cursorLeft = _getKey(cursorPacked, L);
+
+        if (cursorLeft != uint256(0)) _setParent(nodes | cursorLeft, key);
+
+        if (parent == uint256(0)) {
+            root = cursor;
+        } else {
+            _relink(nodes | parent, key, cursor, L, R);
+        }
+        packed = _setKey(packed, R, cursorLeft);
+        _sstore(nodes | key, _setKey(packed, _BITPOS_PARENT, cursor));
+        cursorPacked = _setKey(cursorPacked, _BITPOS_PARENT, parent);
+        _sstore(nodes | cursor, _setKey(cursorPacked, L, key));
+        return root;
+    }
+
+    /// @dev Inserts `x` as the new node `key` under node `cursor`.
+    /// Returns the new root index.
+    function _insert(uint256 nodes, uint256 cursor, uint256 key, uint256 x, uint256 root)
+        private
+        returns (uint256)
+    {
+        uint256 packed = _BITMASK_RED | (cursor << _BITPOS_PARENT);
+        uint256 nodePointer = nodes | key;
+
+        if (x <= _BITMASK_PACKED_VALUE) {
+            packed = (x << _BITPOS_PACKED_VALUE) | packed;
+        } else {
+            _sstore(nodePointer | _BIT_FULL_VALUE_SLOT, x);
+        }
+        _sstore(nodePointer, packed);
+
+        if (cursor == uint256(0)) {
+            root = key;
+        } else {
+            uint256 s = nodes | cursor;
+            uint256 cPacked = _sload(s);
+            uint256 cValue = cPacked >> _BITPOS_PACKED_VALUE;
+            if (cValue == uint256(0)) cValue = _sload(s | _BIT_FULL_VALUE_SLOT);
+            _sstore(s, _setKey(cPacked, x < cValue ? _BITPOS_LEFT : _BITPOS_RIGHT, key));
+        }
+
+        // Insert fixup workflow:
+
+        return _insertFixup(nodes, key, root);
+    }
+
+    /// @dev Restores the red-black properties after an insertion, from node `key` up.
+    /// Returns the new root index.
+    function _insertFixup(uint256 nodes, uint256 key, uint256 root) private returns (uint256) {
+        while (key != root) {
+            uint256 parent = _getKey(_sload(nodes | key), _BITPOS_PARENT);
+            uint256 parentPacked = _sload(nodes | parent);
+            if (_BITMASK_RED & parentPacked == uint256(0)) break;
+
+            uint256 grandParent = _getKey(parentPacked, _BITPOS_PARENT);
+            uint256 grandParentPacked = _sload(nodes | grandParent);
+
+            uint256 R = parent == _getKey(grandParentPacked, 0) ? _BITPOS_RIGHT : 0;
+
+            uint256 c = _getKey(grandParentPacked, R);
+            uint256 cPacked = _sload(nodes | c);
+            if (_BITMASK_RED & cPacked == uint256(0)) {
+                if (key == _getKey(parentPacked, R)) {
+                    key = parent;
+                    root = _rotate(nodes, key, R ^ _BITPOS_RIGHT, R, root);
+                    parent = _getKey(_sload(nodes | key), _BITPOS_PARENT);
+                    parentPacked = _sload(nodes | parent);
+                }
+                _sstore(nodes | parent, parentPacked & ~_BITMASK_RED);
+                {
+                    uint256 s = nodes | grandParent;
+                    _sstore(s, _sload(s) | _BITMASK_RED);
+                }
+                root = _rotate(nodes, grandParent, R, R ^ _BITPOS_RIGHT, root);
+                break;
+            }
+            _sstore(nodes | parent, parentPacked & ~_BITMASK_RED);
+            _sstore(nodes | c, cPacked & ~_BITMASK_RED);
+            _sstore(nodes | grandParent, grandParentPacked | _BITMASK_RED);
+            key = grandParent;
+        }
+        uint256 rootSlot = nodes | root;
+        _sstore(rootSlot, _sload(rootSlot) & ~_BITMASK_RED);
+        return root;
+    }
+
+    /// @dev Restores the red-black properties after a removal, from node `key` up.
+    /// Returns the new root index.
+    function _removeFixup(uint256 nodes, uint256 key, uint256 root) private returns (uint256) {
+        while (key != root) {
+            uint256 parent;
+            {
+                uint256 packed = _sload(nodes | key);
+                if (_BITMASK_RED & packed != uint256(0)) break;
+                parent = _getKey(packed, _BITPOS_PARENT);
+            }
+            uint256 R;
+            uint256 cursor;
+            uint256 cursorPacked;
+            {
+                uint256 parentPacked = _sload(nodes | parent);
+
+                R = key == _getKey(parentPacked, 0) ? _BITPOS_RIGHT : 0;
+
+                cursor = _getKey(parentPacked, R);
+                cursorPacked = _sload(nodes | cursor);
+
+                if (_BITMASK_RED & cursorPacked != uint256(0)) {
+                    _sstore(nodes | cursor, cursorPacked & ~_BITMASK_RED);
+                    _sstore(nodes | parent, parentPacked | _BITMASK_RED);
+                    root = _rotate(nodes, parent, R ^ _BITPOS_RIGHT, R, root);
+                    cursor = _getKey(_sload(nodes | parent), R);
+                    cursorPacked = _sload(nodes | cursor);
+                }
+            }
+
+            uint256 cursorLeft = _getKey(cursorPacked, R ^ _BITPOS_RIGHT);
+            uint256 cursorLeftPacked = _sload(nodes | cursorLeft);
+            uint256 cursorRight = _getKey(cursorPacked, R);
+            uint256 cursorRightPacked = _sload(nodes | cursorRight);
+
+            if (_BITMASK_RED & (cursorLeftPacked | cursorRightPacked) == uint256(0)) {
+                _sstore(nodes | cursor, cursorPacked | _BITMASK_RED);
+                key = parent;
+                continue;
+            }
+
+            if (_BITMASK_RED & cursorRightPacked == uint256(0)) {
+                _sstore(nodes | cursorLeft, cursorLeftPacked & ~_BITMASK_RED);
+                _sstore(nodes | cursor, cursorPacked | _BITMASK_RED);
+                root = _rotate(nodes, cursor, R, R ^ _BITPOS_RIGHT, root);
+                cursor = _getKey(_sload(nodes | parent), R);
+                cursorPacked = _sload(nodes | cursor);
+                cursorRight = _getKey(cursorPacked, R);
+                cursorRightPacked = _sload(nodes | cursorRight);
+            }
+
+            {
+                uint256 parentPacked = _sload(nodes | parent);
+                _sstore(
+                    nodes | cursor, cursorPacked ^ (_BITMASK_RED & (cursorPacked ^ parentPacked))
+                );
+                _sstore(nodes | parent, parentPacked & ~_BITMASK_RED);
+            }
+            _sstore(nodes | cursorRight, cursorRightPacked & ~_BITMASK_RED);
+            root = _rotate(nodes, parent, R ^ _BITPOS_RIGHT, R, root);
+            break;
+        }
+        uint256 s = nodes | key;
+        _sstore(s, _sload(s) & ~_BITMASK_RED);
+        return root;
+    }
+
+    /// @dev Points the child link of node `parent` that holds `b` to `a`, or makes `a` the
+    /// root if `parent` is null. Returns the new root index.
+    /// @custom:solar-inline
+    function _replaceParent(uint256 nodes, uint256 parent, uint256 a, uint256 b, uint256 root)
+        private
+        returns (uint256)
+    {
+        if (parent == uint256(0)) return a;
+        uint256 s = nodes | parent;
+        uint256 p = _sload(s);
+        uint256 t = b != _getKey(p, _BITPOS_LEFT) ? _BITPOS_RIGHT : 0;
+        _sstore(s, _setKey(p, t, a));
+        return root;
+    }
+
+    /// @dev Removes node `key` of the `totalNodes` nodes. Returns the new root index.
+    /// In `_remove`, the parent of the null value (index 0) may be temporarily set
+    /// to a non-zero value. This is an optimization that unifies the removal cases.
+    function _remove(uint256 nodes, uint256 key, uint256 root, uint256 totalNodes)
+        private
+        returns (uint256)
+    {
+        uint256 cursor = key;
+        {
+            uint256 packed = _sload(nodes | key);
+            uint256 left = _getKey(packed, _BITPOS_LEFT);
+            uint256 right = _getKey(packed, _BITPOS_RIGHT);
+            if (left != uint256(0) && right != uint256(0)) {
+                for (cursor = right;;) {
+                    uint256 cursorLeft = _getKey(_sload(nodes | cursor), _BITPOS_LEFT);
+                    if (cursorLeft == uint256(0)) break;
+                    cursor = cursorLeft;
+                }
+            }
+        }
+
+        uint256 cursorPacked = _sload(nodes | cursor);
+        uint256 probe = _getKey(cursorPacked, _BITPOS_LEFT);
+        probe = _getKey(cursorPacked, probe == uint256(0) ? _BITPOS_RIGHT : 0);
+
+        {
+            uint256 yParent = _getKey(cursorPacked, _BITPOS_PARENT);
+            _setParent(nodes | probe, yParent);
+            root = _replaceParent(nodes, yParent, probe, cursor, root);
+        }
+
+        if (cursor != key) {
+            uint256 packed = _sload(nodes | key);
+            root = _replaceParent(nodes, _getKey(packed, _BITPOS_PARENT), cursor, key, root);
+
+            _setParent(nodes | _getKey(packed, _BITPOS_LEFT), cursor);
+            _setParent(nodes | _getKey(packed, _BITPOS_RIGHT), cursor);
+
+            // Copy `left`, `right`, `red` from `key` to `cursor`.
+            _sstore(
+                nodes | cursor,
+                cursorPacked ^ ((packed ^ cursorPacked) & ((1 << _BITPOS_PACKED_VALUE) - 1))
+            );
+
+            cursor = key; // The removed node's slot, now unlinked.
+        }
+
+        if (_BITMASK_RED & cursorPacked == uint256(0)) root = _removeFixup(nodes, probe, root);
+
+        // Remove last workflow:
+
+        return _removeLast(nodes, cursor, totalNodes, root);
+    }
+
+    /// @dev Moves the last node, at index `lastKey`, into the unlinked slot of node `cursor`.
+    /// Returns the new root index.
+    function _removeLast(uint256 nodes, uint256 cursor, uint256 lastKey, uint256 root)
+        private
+        returns (uint256)
+    {
+        uint256 lastPacked = _sload(nodes | lastKey);
+        uint256 lastValue = lastPacked >> _BITPOS_PACKED_VALUE;
+        uint256 lastFullValue = 0;
+        if (lastValue == uint256(0)) {
+            lastValue = _sload(_BIT_FULL_VALUE_SLOT | nodes | lastKey);
+            lastFullValue = lastValue;
+        }
+
+        uint256 cursorValue = _sload(nodes | cursor) >> _BITPOS_PACKED_VALUE;
+        uint256 cursorFullValue = 0;
+        if (cursorValue == uint256(0)) {
+            cursorValue = _sload(_BIT_FULL_VALUE_SLOT | nodes | cursor);
+            cursorFullValue = cursorValue;
+        }
+
+        if (lastValue != cursorValue) {
+            _sstore(nodes | cursor, lastPacked);
+            if (lastFullValue != cursorFullValue) {
+                _sstore(_BIT_FULL_VALUE_SLOT | nodes | cursor, lastFullValue);
+            }
+            uint256 lastParent = _getKey(lastPacked, _BITPOS_PARENT);
+            root = _replaceParent(nodes, lastParent, cursor, lastKey, root);
+            uint256 lastRight = _getKey(lastPacked, _BITPOS_RIGHT);
+            if (lastRight != uint256(0)) _setParent(nodes | lastRight, cursor);
+            uint256 lastLeft = _getKey(lastPacked, _BITPOS_LEFT);
+            if (lastLeft != uint256(0)) _setParent(nodes | lastLeft, cursor);
+        }
+        _sstore(nodes | lastKey, 0);
+        if (lastFullValue != uint256(0)) _sstore(_BIT_FULL_VALUE_SLOT | nodes | lastKey, 0);
+        return root;
+    }
+
+    /// @dev The storage slot of `tree`.
+    /// Solidity does not expose a storage pointer's slot number.
+    /// @custom:solar-trusted
+    function _slot(Tree storage tree) private pure returns (uint256 s) {
         /// @solidity memory-safe-assembly
         assembly {
-            mstore(0x00, err)
-            revert(0x1c, 0x04)
+            s := tree.slot
+        }
+    }
+
+    /// @dev Returns the word in storage slot `s`.
+    /// Solidity cannot name a slot it did not allocate.
+    /// @custom:solar-trusted
+    function _sload(uint256 s) private view returns (uint256 result) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            result := sload(s)
+        }
+    }
+
+    /// @dev Stores `w` in storage slot `s`.
+    /// Solidity cannot name a slot it did not allocate.
+    /// @custom:solar-trusted
+    function _sstore(uint256 s, uint256 w) private {
+        /// @solidity memory-safe-assembly
+        assembly {
+            sstore(s, w)
         }
     }
 }
