@@ -112,6 +112,7 @@ abstract contract ERC6551 is UUPSUpgradeable, Receiver, ERC1271 {
     }
 
     /// @dev Returns the owner of the contract.
+    /// @custom:solar-inline
     function owner() public view virtual returns (address result) {
         uint256 cachedChainId = _cachedChainId;
         (uint256 chainId, uint256 tokenContract, uint256 tokenId) = _erc6551Footer();
@@ -124,6 +125,7 @@ abstract contract ERC6551 is UUPSUpgradeable, Receiver, ERC1271 {
 
     /// @dev Returns if `signer` is an authorized signer.
     /// `extraData` can be anything (e.g. an address, a pointer to a struct / string in memory).
+    /// @custom:solar-inline
     function _isValidSigner(address signer, bytes32 extraData, bytes calldata context)
         internal
         view
@@ -173,6 +175,7 @@ abstract contract ERC6551 is UUPSUpgradeable, Receiver, ERC1271 {
 
     /// @dev Mutates the state. This function is required to be called in every
     /// public / external function that may modify storage or emit events.
+    /// @custom:solar-inline
     function _updateState() internal virtual {
         uint256 s = _ERC6551_STATE_SLOT;
         _erc6551Sstore(s, uint256(keccak256(abi.encode(_erc6551Sload(s), msg.data))));
@@ -256,6 +259,7 @@ abstract contract ERC6551 is UUPSUpgradeable, Receiver, ERC1271 {
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     /// @dev Returns whether there is an ownership cycle.
+    /// @custom:solar-inline
     function _hasOwnershipCycle() internal view virtual returns (bool result) {
         uint256 cachedChainId = _cachedChainId;
         (uint256 chainId, uint256 tokenContract, uint256 tokenId) = _erc6551Footer();
@@ -357,6 +361,7 @@ abstract contract ERC6551 is UUPSUpgradeable, Receiver, ERC1271 {
 
     /// @dev Calls `target` with `data` and `value`, and returns its return data.
     /// Reverts and bubbles up error if the call fails.
+    /// @custom:solar-inline
     function _erc6551Call(address target, uint256 value, bytes calldata data)
         private
         returns (bytes memory result)

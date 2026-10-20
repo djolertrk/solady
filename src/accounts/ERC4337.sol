@@ -199,6 +199,7 @@ abstract contract ERC4337 is Ownable, UUPSUpgradeable, Receiver, ERC1271 {
     }
 
     /// @dev Execute a sequence of calls from this account.
+    /// @custom:solar-inline
     function executeBatch(Call[] calldata calls)
         public
         payable
@@ -325,6 +326,7 @@ abstract contract ERC4337 is Ownable, UUPSUpgradeable, Receiver, ERC1271 {
 
     /// @dev Requires that the caller is the owner or the account itself.
     /// This override affects the `onlyOwner` modifier.
+    /// @custom:solar-inline
     function _checkOwner() internal view virtual override(Ownable) {
         if (msg.sender != owner()) if (msg.sender != address(this)) revert Unauthorized();
     }

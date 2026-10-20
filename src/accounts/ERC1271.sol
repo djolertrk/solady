@@ -49,8 +49,10 @@ abstract contract ERC1271 is EIP712 {
         // If `hash` is `0x7739...7739`, returns `bytes4(0x77390001)`.
         // The returned number MAY be increased in future ERC7739 versions.
         if (signature.length == uint256(0)) {
-            // Forces the compiler to optimize for smaller bytecode size.
-            if (uint256(hash) == ~signature.length / 0xffff * 0x7739) return 0x77390001;
+            // `0x7739...7739`, compared whole rather than computed from the length.
+            if (hash == 0x7739773977397739773977397739773977397739773977397739773977397739) {
+                return 0x77390001;
+            }
         }
         bool success = _erc1271IsValidSignature(hash, _erc1271UnwrapSignature(signature));
         // `success ? bytes4(keccak256("isValidSignature(bytes32,bytes)")) : 0xffffffff`.
@@ -74,6 +76,7 @@ abstract contract ERC1271 is EIP712 {
 
     /// @dev Returns whether the `hash` and `signature` are valid.
     /// Override if you need non-ECDSA logic.
+    /// @custom:solar-inline
     function _erc1271IsValidSignatureNowCalldata(bytes32 hash, bytes calldata signature)
         internal
         view
@@ -84,6 +87,7 @@ abstract contract ERC1271 is EIP712 {
     }
 
     /// @dev Unwraps and returns the signature.
+    /// @custom:solar-inline
     function _erc1271UnwrapSignature(bytes calldata signature)
         internal
         view
@@ -214,22 +218,15 @@ abstract contract ERC1271 is EIP712 {
         virtual
         returns (bool result)
     {
-        // The `TypedDataSign` fields after `contents`, as `abi.encode` lays them out.
-        bytes memory domainFields;
-        // Forces the compiler to pop the variables after the scope, avoiding stack-too-deep.
-        {
-            (
-                ,
-                string memory name,
-                string memory version,
-                uint256 chainId,
-                address verifyingContract,
-                bytes32 salt,
-            ) = eip712Domain();
-            domainFields = abi.encode(
-                keccak256(bytes(name)), keccak256(bytes(version)), chainId, verifyingContract, salt
-            );
-        }
+        // The account's domain, whose fields the `TypedDataSign` workflow hashes.
+        (
+            ,
+            string memory name,
+            string memory version,
+            uint256 chainId,
+            address verifyingContract,
+            bytes32 salt,
+        ) = eip712Domain();
         uint256 n = signature.length;
         // `c` is `contentsDescription.length`, which is stored in the last 2 bytes of the signature.
         // A signature shorter than `0x42` bytes takes the `PersonalSign` workflow whatever `c` is.
@@ -250,7 +247,14 @@ abstract contract ERC1271 is EIP712 {
             hash = _hashTypedData(keccak256(abi.encode(_PERSONAL_SIGN_TYPEHASH, hash)));
         } else {
             // Else, use the `TypedDataSign` workflow.
-            hash = _erc1271TypedDataSignHash(signature[n - l:n - 2], domainFields);
+            hash = _erc1271TypedDataSignHash(
+                signature[n - l:n - 2],
+                keccak256(bytes(name)),
+                keccak256(bytes(version)),
+                chainId,
+                verifyingContract,
+                salt
+            );
             signature = signature[:n - l]; // Truncate the signature.
         }
         result = _erc1271IsValidSignatureNowCalldata(hash, signature);
@@ -299,21 +303,30 @@ abstract contract ERC1271 is EIP712 {
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     /// @dev The final hash of the `TypedDataSign` workflow for `appended`, the signature's
-    /// `APP_DOMAIN_SEPARATOR ‖ contents ‖ contentsDescription`, and `domainFields`, the
-    /// account's name hash, version hash, chain id, verifying contract and salt words.
-    function _erc1271TypedDataSignHash(bytes calldata appended, bytes memory domainFields)
-        private
-        pure
-        returns (bytes32)
-    {
+    /// `APP_DOMAIN_SEPARATOR ‖ contents ‖ contentsDescription`, and the account's name hash,
+    /// version hash, chain id, verifying contract and salt.
+    function _erc1271TypedDataSignHash(
+        bytes calldata appended,
+        bytes32 nameHash,
+        bytes32 versionHash,
+        uint256 chainId,
+        address verifyingContract,
+        bytes32 salt
+    ) private pure returns (bytes32) {
         // `APP_DOMAIN_SEPARATOR ‖ contents`, at `o`.
         uint256 o = _erc1271CalldataOffset(appended);
         (bytes32 typedDataSignTypehash, bool invalid) =
             _erc1271TypedDataSignTypehash(appended[0x40:]);
         // `hashStruct(typedDataSign)`.
         bytes32 structHash = keccak256(
-            abi.encodePacked(
-                typedDataSignTypehash, _erc1271CalldataWord(_erc1271Add(o, 0x20)), domainFields
+            abi.encode(
+                typedDataSignTypehash,
+                _erc1271CalldataWord(_erc1271Add(o, 0x20)),
+                nameHash,
+                versionHash,
+                chainId,
+                verifyingContract,
+                salt
             )
         );
         // Compute the final hash, corrupted with one more zero byte if `contentsName` is invalid.
