@@ -103,6 +103,9 @@ LIBRARIES = [
     "accounts/ERC4337",
     "accounts/ERC6551",
     "accounts/ERC6551Proxy",
+    "SemVerLib",
+    "Base58",
+    "LibRLP",
 ]
 
 
