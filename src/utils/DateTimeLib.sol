@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.4;
+pragma solidity ^0.8.20;
 
 /// @notice Library for date time operations.
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/utils/DateTimeLib.sol)
@@ -17,6 +17,12 @@ pragma solidity ^0.8.4;
 /// weekday   | 1..7                 | The day of the week (1-indexed). |
 /// --------------------------------------------------------------------+
 /// All timestamps of days are rounded down to 00:00:00 UTC.
+///
+/// The checked port computes as the assembly does, including outside the supported
+/// ranges: each step that wraps there goes through the raw `_add`, `_sub` and `_mul`
+/// helpers, so a date converts to its epoch day and back for every word, and every
+/// step that cannot wrap is checked Solidity.
+/// @custom:solar-safe memory arithmetic
 library DateTimeLib {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                         CONSTANTS                          */
@@ -67,14 +73,11 @@ library DateTimeLib {
         pure
         returns (uint256 epochDay)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            year := sub(year, lt(month, 3))
-            let doy := add(shr(11, add(mul(62719, mod(add(month, 9), 12)), 769)), day)
-            let yoe := mod(year, 400)
-            let doe := sub(add(add(mul(yoe, 365), shr(2, yoe)), doy), div(yoe, 100))
-            epochDay := sub(add(mul(div(year, 400), 146097), doe), 719469)
-        }
+        year = _sub(year, month < 3 ? 1 : 0);
+        uint256 doy = _add((62719 * (_add(month, 9) % 12) + 769) >> 11, day);
+        uint256 yoe = year % 400;
+        uint256 doe = _sub(_add(yoe * 365 + (yoe >> 2), doy), yoe / 100);
+        epochDay = _sub(_add(_mul(year / 400, 146097), doe), 719469);
     }
 
     /// @dev Returns (`year`,`month`,`day`) from the number of days since 1970-01-01.
@@ -85,18 +88,15 @@ library DateTimeLib {
         pure
         returns (uint256 year, uint256 month, uint256 day)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            epochDay := add(epochDay, 719468)
-            let doe := mod(epochDay, 146097)
-            let yoe :=
-                div(sub(sub(add(doe, div(doe, 36524)), div(doe, 1460)), eq(doe, 146096)), 365)
-            let doy := sub(doe, sub(add(mul(365, yoe), shr(2, yoe)), div(yoe, 100)))
-            let mp := div(add(mul(5, doy), 2), 153)
-            day := add(sub(doy, shr(11, add(mul(mp, 62719), 769))), 1)
-            month := byte(mp, shl(160, 0x030405060708090a0b0c0102))
-            year := add(add(yoe, mul(div(epochDay, 146097), 400)), lt(month, 3))
-        }
+        epochDay = _add(epochDay, 719468);
+        uint256 doe = epochDay % 146097;
+        uint256 yoe = (doe + doe / 36524 - doe / 1460 - (doe == 146096 ? 1 : 0)) / 365;
+        uint256 doy = doe - (365 * yoe + (yoe >> 2) - yoe / 100);
+        uint256 mp = (5 * doy + 2) / 153;
+        day = doy - ((mp * 62719 + 769) >> 11) + 1;
+        // `[3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 1, 2][mp]`.
+        month = (0x030405060708090a0b0c0102 >> ((11 - mp) << 3)) & 0xff;
+        year = yoe + epochDay / 146097 * 400 + (month < 3 ? 1 : 0);
     }
 
     /// @dev Returns the unix timestamp from (`year`,`month`,`day`).
@@ -107,9 +107,7 @@ library DateTimeLib {
         pure
         returns (uint256 result)
     {
-        unchecked {
-            result = dateToEpochDay(year, month, day) * 86400;
-        }
+        result = _mul(dateToEpochDay(year, month, day), 86400);
     }
 
     /// @dev Returns (`year`,`month`,`day`) from the given unix timestamp.
@@ -135,9 +133,13 @@ library DateTimeLib {
         uint256 minute,
         uint256 second
     ) internal pure returns (uint256 result) {
-        unchecked {
-            result = dateToEpochDay(year, month, day) * 86400 + hour * 3600 + minute * 60 + second;
-        }
+        result = _add(
+            _add(
+                _add(_mul(dateToEpochDay(year, month, day), 86400), _mul(hour, 3600)),
+                _mul(minute, 60)
+            ),
+            second
+        );
     }
 
     /// @dev Returns (`year`,`month`,`day`,`hour`,`minute`,`second`)
@@ -156,44 +158,34 @@ library DateTimeLib {
             uint256 second
         )
     {
-        unchecked {
-            (year, month, day) = epochDayToDate(timestamp / 86400);
-            uint256 secs = timestamp % 86400;
-            hour = secs / 3600;
-            secs = secs % 3600;
-            minute = secs / 60;
-            second = secs % 60;
-        }
+        (year, month, day) = epochDayToDate(timestamp / 86400);
+        uint256 secs = timestamp % 86400;
+        hour = secs / 3600;
+        secs = secs % 3600;
+        minute = secs / 60;
+        second = secs % 60;
     }
 
     /// @dev Returns if the `year` is leap.
     function isLeapYear(uint256 year) internal pure returns (bool leap) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            leap := iszero(and(add(mul(iszero(mod(year, 25)), 12), 3), year))
-        }
+        leap = year & (year % 25 == 0 ? 15 : 3) == 0;
     }
 
     /// @dev Returns number of days in given `month` of `year`.
     function daysInMonth(uint256 year, uint256 month) internal pure returns (uint256 result) {
         bool flag = isLeapYear(year);
-        /// @solidity memory-safe-assembly
-        assembly {
-            // `daysInMonths = [31,28,31,30,31,30,31,31,30,31,30,31]`.
-            // `result = daysInMonths[month - 1] + isLeapYear(year)`.
-            result := add(
-                byte(month, shl(152, 0x1f1c1f1e1f1e1f1f1e1f1e1f)),
-                and(eq(month, 2), flag)
-            )
+        // `daysInMonths = [31,28,31,30,31,30,31,31,30,31,30,31]`.
+        // `result = daysInMonths[month - 1] + isLeapYear(year)`, zero for another month.
+        if (month != 0 && month <= 12) {
+            result = (0x1f1c1f1e1f1e1f1f1e1f1e1f >> ((12 - month) << 3)) & 0xff;
+            if (month == 2 && flag) ++result;
         }
     }
 
     /// @dev Returns the weekday from the unix timestamp.
     /// Monday: 1, Tuesday: 2, ....., Sunday: 7.
     function weekday(uint256 timestamp) internal pure returns (uint256 result) {
-        unchecked {
-            result = ((timestamp / 86400 + 3) % 7) + 1;
-        }
+        result = ((timestamp / 86400 + 3) % 7) + 1;
     }
 
     /// @dev Returns if (`year`,`month`,`day`) is a supported date.
@@ -206,13 +198,8 @@ library DateTimeLib {
         returns (bool result)
     {
         uint256 md = daysInMonth(year, month);
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := and(
-                lt(sub(year, 1970), sub(MAX_SUPPORTED_YEAR, 1969)),
-                and(lt(sub(month, 1), 12), lt(sub(day, 1), md))
-            )
-        }
+        result = year >= 1970 && year <= MAX_SUPPORTED_YEAR && month >= 1 && month <= 12 && day >= 1
+            && day <= md;
     }
 
     /// @dev Returns if (`year`,`month`,`day`,`hour`,`minute`,`second`) is a supported date time.
@@ -231,25 +218,18 @@ library DateTimeLib {
         uint256 second
     ) internal pure returns (bool result) {
         if (isSupportedDate(year, month, day)) {
-            /// @solidity memory-safe-assembly
-            assembly {
-                result := and(lt(hour, 24), and(lt(minute, 60), lt(second, 60)))
-            }
+            result = hour < 24 && minute < 60 && second < 60;
         }
     }
 
     /// @dev Returns if `epochDay` is a supported unix epoch day.
     function isSupportedEpochDay(uint256 epochDay) internal pure returns (bool result) {
-        unchecked {
-            result = epochDay < MAX_SUPPORTED_EPOCH_DAY + 1;
-        }
+        result = epochDay <= MAX_SUPPORTED_EPOCH_DAY;
     }
 
     /// @dev Returns if `timestamp` is a supported unix timestamp.
     function isSupportedTimestamp(uint256 timestamp) internal pure returns (bool result) {
-        unchecked {
-            result = timestamp < MAX_SUPPORTED_TIMESTAMP + 1;
-        }
+        result = timestamp <= MAX_SUPPORTED_TIMESTAMP;
     }
 
     /// @dev Returns the unix timestamp of the given `n`th weekday `wd`, in `month` of `year`.
@@ -263,22 +243,16 @@ library DateTimeLib {
     {
         uint256 d = dateToEpochDay(year, month, 1);
         uint256 md = daysInMonth(year, month);
-        /// @solidity memory-safe-assembly
-        assembly {
-            let diff := sub(wd, add(mod(add(d, 3), 7), 1))
-            let date := add(mul(sub(n, 1), 7), add(mul(gt(diff, 6), 7), diff))
-            result := mul(mul(86400, add(date, d)), and(lt(date, md), iszero(iszero(n))))
-        }
+        // The days from the 1st to the first `wd`, wrapped into `0..6`.
+        uint256 diff = _sub(wd, _add(d, 3) % 7 + 1);
+        uint256 date = _add(_mul(_sub(n, 1), 7), _add(diff > 6 ? 7 : 0, diff));
+        if (date < md && n != 0) result = _mul(86400, _add(date, d));
     }
 
     /// @dev Returns the unix timestamp of the most recent Monday.
     function mondayTimestamp(uint256 timestamp) internal pure returns (uint256 result) {
-        uint256 t = timestamp;
-        /// @solidity memory-safe-assembly
-        assembly {
-            let day := div(t, 86400)
-            result := mul(mul(sub(day, mod(add(day, 3), 7)), 86400), gt(t, 345599))
-        }
+        uint256 day = timestamp / 86400;
+        if (timestamp > 345599) result = (day - (day + 3) % 7) * 86400;
     }
 
     /// @dev Returns whether the unix timestamp falls on a Saturday or Sunday.
@@ -474,6 +448,7 @@ library DateTimeLib {
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     /// @dev Unchecked arithmetic for computing the total number of months.
+    /// @custom:solar-trusted
     function _totalMonths(uint256 numYears, uint256 numMonths)
         private
         pure
@@ -485,6 +460,7 @@ library DateTimeLib {
     }
 
     /// @dev Unchecked arithmetic for adding two numbers.
+    /// @custom:solar-trusted
     function _add(uint256 a, uint256 b) private pure returns (uint256 c) {
         unchecked {
             c = a + b;
@@ -492,9 +468,18 @@ library DateTimeLib {
     }
 
     /// @dev Unchecked arithmetic for subtracting two numbers.
+    /// @custom:solar-trusted
     function _sub(uint256 a, uint256 b) private pure returns (uint256 c) {
         unchecked {
             c = a - b;
+        }
+    }
+
+    /// @dev Unchecked arithmetic for multiplying two numbers.
+    /// @custom:solar-trusted
+    function _mul(uint256 a, uint256 b) private pure returns (uint256 c) {
+        unchecked {
+            c = a * b;
         }
     }
 
