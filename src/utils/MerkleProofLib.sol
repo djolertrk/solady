@@ -13,10 +13,11 @@ pragma solidity ^0.8.20;
 /// proof element was used turns any read past either into `false`. The port returns `false`
 /// as soon as a read would pass the written queue or the proof, which gives the same result
 /// without reading memory nothing wrote. The queue is a new array, where the assembly uses
-/// free memory without reserving it. One deliberate difference: a calldata flag is read as a
-/// `bool`, so a flag word other than zero or one reverts where the assembly treats it as
-/// true. `emptyProof`, `emptyLeaves` and `emptyFlags` stay trusted assembly, since no Solidity
-/// expression is an empty calldata array.
+/// free memory without reserving it. A calldata flag is read as a word, so any nonzero word
+/// counts as true, as in the assembly: Solidity reads a calldata `bool` only after checking
+/// it, so the trusted `_flagWords` views the flags as words. `emptyProof`, `emptyLeaves` and
+/// `emptyFlags` stay trusted assembly, since no Solidity expression is an empty calldata
+/// array.
 /// @custom:solar-safe memory arithmetic
 library MerkleProofLib {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -88,7 +89,6 @@ library MerkleProofLib {
     /// - Any non-zero word in the `flags` array is treated as true.
     /// - The calldata offset of `proof` must be non-zero
     ///   (i.e. `proof` is from a regular Solidity function with a 4-byte selector).
-    /// - A flag word other than zero or one reverts.
     function verifyMultiProofCalldata(
         bytes32[] calldata proof,
         bytes32 root,
@@ -101,7 +101,8 @@ library MerkleProofLib {
         for (uint256 i; i < leaves.length; ++i) {
             hashes[i] = leaves[i];
         }
-        (bool complete, bytes32 computed) = _rebuildCalldata(hashes, leaves.length, proof, flags);
+        (bool complete, bytes32 computed) =
+            _rebuildCalldata(hashes, leaves.length, proof, _flagWords(flags));
         return complete && computed == root;
     }
 
@@ -184,7 +185,7 @@ library MerkleProofLib {
         bytes32[] memory hashes,
         uint256 back,
         bytes32[] calldata proof,
-        bool[] calldata flags
+        uint256[] calldata flags
     ) private pure returns (bool complete, bytes32 computed) {
         uint256 front;
         uint256 used;
@@ -194,7 +195,7 @@ library MerkleProofLib {
             bytes32 a = hashes[front];
             ++front;
             bytes32 b;
-            if (flags[i]) {
+            if (flags[i] != 0) {
                 if (front >= back) return (false, 0);
                 b = hashes[front];
                 ++front;
@@ -208,5 +209,16 @@ library MerkleProofLib {
             ++back;
         }
         return (used == proof.length, hashes[back - 1]);
+    }
+
+    /// @dev `flags` viewed as words, so a flag word other than zero or one counts as true,
+    /// as in the assembly. Solidity reads a calldata `bool` only after checking it is clean.
+    /// @custom:solar-trusted
+    function _flagWords(bool[] calldata flags) private pure returns (uint256[] calldata words) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            words.offset := flags.offset
+            words.length := flags.length
+        }
     }
 }
