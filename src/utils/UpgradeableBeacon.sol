@@ -21,6 +21,14 @@ pragma solidity ^0.8.4;
 /// This optimized bytecode is compiled via Yul and is not verifiable via Etherscan
 /// at the time of writing. For best gas efficiency, deploy the Yul version.
 /// The Solidity version is provided as an interface / reference.
+///
+/// The checked port keeps the implementation and the owner in upstream's slots. Solidity
+/// cannot name those slots, so two trusted helpers read and write them; the checks, reverts
+/// and events are plain Solidity. The owner check compares the caller with the whole stored
+/// word, as upstream does, and {OwnershipTransferred} logs the previous word as an address,
+/// which it is, as only `_setOwner` writes it. Private functions carry the contract's name, so
+/// that the contract combines with other mixins.
+/// @custom:solar-safe memory arithmetic
 contract UpgradeableBeacon {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                       CUSTOM ERRORS                        */
@@ -102,46 +110,33 @@ contract UpgradeableBeacon {
 
     /// @dev Sets the implementation directly without authorization guard.
     function _setImplementation(address newImplementation) internal virtual {
-        /// @solidity memory-safe-assembly
-        assembly {
-            newImplementation := shr(96, shl(96, newImplementation)) // Clean the upper 96 bits.
-            if iszero(extcodesize(newImplementation)) {
-                mstore(0x00, 0x6d3e283b) // `NewImplementationHasNoCode()`.
-                revert(0x1c, 0x04)
-            }
-            sstore(_UPGRADEABLE_BEACON_IMPLEMENTATION_SLOT, newImplementation) // Store the implementation.
-            // Emit the {Upgraded} event.
-            log2(codesize(), 0x00, _UPGRADED_EVENT_SIGNATURE, newImplementation)
-        }
+        if (newImplementation.code.length == 0) revert NewImplementationHasNoCode();
+        // Store the implementation.
+        _upgradeableBeaconSstore(
+            _UPGRADEABLE_BEACON_IMPLEMENTATION_SLOT, uint256(uint160(newImplementation))
+        );
+        // Emit the {Upgraded} event.
+        emit Upgraded(newImplementation);
     }
 
     /// @dev Sets the owner directly without authorization guard.
     function _setOwner(address newOwner) internal virtual {
-        /// @solidity memory-safe-assembly
-        assembly {
-            newOwner := shr(96, shl(96, newOwner)) // Clean the upper 96 bits.
-            let oldOwner := sload(_UPGRADEABLE_BEACON_OWNER_SLOT)
-            sstore(_UPGRADEABLE_BEACON_OWNER_SLOT, newOwner) // Store the owner.
-            // Emit the {OwnershipTransferred} event.
-            log3(codesize(), 0x00, _OWNERSHIP_TRANSFERRED_EVENT_SIGNATURE, oldOwner, newOwner)
-        }
+        uint256 oldOwner = _upgradeableBeaconSload(_UPGRADEABLE_BEACON_OWNER_SLOT);
+        // Store the owner.
+        _upgradeableBeaconSstore(_UPGRADEABLE_BEACON_OWNER_SLOT, uint256(uint160(newOwner)));
+        // Emit the {OwnershipTransferred} event.
+        emit OwnershipTransferred(address(uint160(oldOwner)), newOwner);
     }
 
     /// @dev Returns the implementation stored in the beacon.
     /// See: https://eips.ethereum.org/EIPS/eip-1967#beacon-contract-address
     function implementation() public view returns (address result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := sload(_UPGRADEABLE_BEACON_IMPLEMENTATION_SLOT)
-        }
+        result = address(uint160(_upgradeableBeaconSload(_UPGRADEABLE_BEACON_IMPLEMENTATION_SLOT)));
     }
 
     /// @dev Returns the owner of the beacon.
     function owner() public view returns (address result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := sload(_UPGRADEABLE_BEACON_OWNER_SLOT)
-        }
+        result = address(uint160(_upgradeableBeaconSload(_UPGRADEABLE_BEACON_OWNER_SLOT)));
     }
 
     /// @dev Allows the owner to upgrade the implementation.
@@ -151,13 +146,7 @@ contract UpgradeableBeacon {
 
     /// @dev Allows the owner to transfer the ownership to `newOwner`.
     function transferOwnership(address newOwner) public virtual onlyOwner {
-        /// @solidity memory-safe-assembly
-        assembly {
-            if iszero(shl(96, newOwner)) {
-                mstore(0x00, 0x7448fbae) // `NewOwnerIsZeroAddress()`.
-                revert(0x1c, 0x04)
-            }
-        }
+        if (newOwner == address(0)) revert NewOwnerIsZeroAddress();
         _setOwner(newOwner);
     }
 
@@ -168,14 +157,9 @@ contract UpgradeableBeacon {
 
     /// @dev Throws if the sender is not the owner.
     function _checkOwner() internal view virtual {
-        /// @solidity memory-safe-assembly
-        assembly {
-            // If the caller is not the stored owner, revert.
-            if iszero(eq(caller(), sload(_UPGRADEABLE_BEACON_OWNER_SLOT))) {
-                mstore(0x00, 0x82b42900) // `Unauthorized()`.
-                revert(0x1c, 0x04)
-            }
-        }
+        uint256 storedOwner = _upgradeableBeaconSload(_UPGRADEABLE_BEACON_OWNER_SLOT);
+        // If the caller is not the stored owner, revert.
+        if (uint256(uint160(msg.sender)) != storedOwner) revert Unauthorized();
     }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -186,5 +170,27 @@ contract UpgradeableBeacon {
     modifier onlyOwner() virtual {
         _checkOwner();
         _;
+    }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      PRIVATE HELPERS                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev The word in storage slot `slot`. Solidity cannot name a slot it did not allocate.
+    /// @custom:solar-trusted
+    function _upgradeableBeaconSload(uint256 slot) private view returns (uint256 value) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            value := sload(slot)
+        }
+    }
+
+    /// @dev Stores `value` in storage slot `slot`.
+    /// @custom:solar-trusted
+    function _upgradeableBeaconSstore(uint256 slot, uint256 value) private {
+        /// @solidity memory-safe-assembly
+        assembly {
+            sstore(slot, value)
+        }
     }
 }
