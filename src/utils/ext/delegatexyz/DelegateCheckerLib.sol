@@ -3,6 +3,18 @@ pragma solidity ^0.8.4;
 
 /// @notice Library for efficient querying of the delegate registries.
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/utils/ext/delegate/DelegateCheckerLib.sol)
+///
+/// The checked port encodes each V2 query with `abi.encodeWithSelector`, and makes the V1
+/// fallback query from the same buffer with the V1 selector and fewer words, as the assembly
+/// does. The trusted `_staticCallWord` calls with the calldata and gas the assembly passes
+/// and copies only the first word of the returndata, as the assembly does. A boolean query is
+/// valid when its call succeeds and returns a word that is 1; an amount is the first word a
+/// successful call returns, with any bytes it does not return read as zeros, as the assembly
+/// reads them. One deliberate difference: the assembly of the two `checkDelegateForAll`
+/// functions reads a reverting call's first 31 bytes of revert data, after a stale scratch
+/// byte, as its answer, so a registry reverting with 1 there can pass; the port never counts
+/// a reverting call as valid.
+/// @custom:solar-safe memory arithmetic
 library DelegateCheckerLib {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                         CONSTANTS                          */
@@ -30,22 +42,13 @@ library DelegateCheckerLib {
     ///     v1.checkDelegateForAll(to, from)
     /// ```
     function checkDelegateForAll(address to, address from) internal view returns (bool isValid) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let m := mload(0x40)
-            // `0x60` is already 0.
-            mstore(0x40, from)
-            mstore(0x2c, shl(96, to))
-            mstore(0x0c, 0xe839bd53000000000000000000000000) // `checkDelegateForAll(address,address,bytes32)`.
-            isValid := eq(mload(staticcall(gas(), DELEGATE_REGISTRY_V2, 0x1c, 0x64, 0x01, 0x20)), 1)
-            if iszero(isValid) {
-                mstore(0x01, 0x9c395bc200) // `checkDelegateForAll(address,address)`.
-                isValid := eq(
-                    mload(staticcall(gas(), DELEGATE_REGISTRY_V1, 0x1c, 0x44, 0x01, 0x20)),
-                    1
-                )
-            }
-            mstore(0x40, m) // Restore the free memory pointer.
+        // `checkDelegateForAll(address,address,bytes32)`.
+        bytes memory data = abi.encodeWithSelector(0xe839bd53, to, from, bytes32(0));
+        isValid = _isOne(DELEGATE_REGISTRY_V2, data, data.length);
+        if (!isValid) {
+            // `checkDelegateForAll(address,address)`, on the leading words.
+            _setSelector(data, 0x9c395bc2);
+            isValid = _isOne(DELEGATE_REGISTRY_V1, data, 0x44);
         }
     }
 
@@ -59,23 +62,13 @@ library DelegateCheckerLib {
         view
         returns (bool isValid)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let m := mload(0x40)
-            mstore(0x60, rights)
-            mstore(0x40, from)
-            mstore(0x2c, shl(96, to))
-            mstore(0x0c, 0xe839bd53000000000000000000000000) // `checkDelegateForAll(address,address,bytes32)`.
-            isValid := eq(mload(staticcall(gas(), DELEGATE_REGISTRY_V2, 0x1c, 0x64, 0x01, 0x20)), 1)
-            if iszero(or(rights, isValid)) {
-                mstore(0x01, 0x9c395bc200) // `checkDelegateForAll(address,address)`.
-                isValid := eq(
-                    mload(staticcall(gas(), DELEGATE_REGISTRY_V1, 0x1c, 0x44, 0x01, 0x20)),
-                    1
-                )
-            }
-            mstore(0x40, m) // Restore the free memory pointer.
-            mstore(0x60, 0) // Restore the zero pointer.
+        // `checkDelegateForAll(address,address,bytes32)`.
+        bytes memory data = abi.encodeWithSelector(0xe839bd53, to, from, rights);
+        isValid = _isOne(DELEGATE_REGISTRY_V2, data, data.length);
+        if (!isValid && rights == 0) {
+            // `checkDelegateForAll(address,address)`, on the leading words.
+            _setSelector(data, 0x9c395bc2);
+            isValid = _isOne(DELEGATE_REGISTRY_V1, data, 0x44);
         }
     }
 
@@ -90,22 +83,13 @@ library DelegateCheckerLib {
         view
         returns (bool isValid)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let m := mload(0x40)
-            mstore(add(0x80, m), 0)
-            mstore(add(0x60, m), contract_)
-            mstore(add(0x4c, m), shl(96, from))
-            mstore(add(0x2c, m), shl(96, to))
-            // `checkDelegateForContract(address,address,address,bytes32)`.
-            mstore(add(0x0c, m), 0x8988eea9000000000000000000000000)
-            isValid := staticcall(gas(), DELEGATE_REGISTRY_V2, add(m, 0x1c), 0x84, m, 0x20)
-            isValid := and(eq(mload(m), 1), isValid)
-            if iszero(isValid) {
-                mstore(m, 0x90c9a2d0) // `checkDelegateForContract(address,address,address)`.
-                isValid := staticcall(gas(), DELEGATE_REGISTRY_V1, add(m, 0x1c), 0x64, m, 0x20)
-                isValid := and(eq(mload(m), 1), isValid)
-            }
+        // `checkDelegateForContract(address,address,address,bytes32)`.
+        bytes memory data = abi.encodeWithSelector(0x8988eea9, to, from, contract_, bytes32(0));
+        isValid = _isOne(DELEGATE_REGISTRY_V2, data, data.length);
+        if (!isValid) {
+            // `checkDelegateForContract(address,address,address)`, on the leading words.
+            _setSelector(data, 0x90c9a2d0);
+            isValid = _isOne(DELEGATE_REGISTRY_V1, data, 0x64);
         }
     }
 
@@ -120,22 +104,13 @@ library DelegateCheckerLib {
         view
         returns (bool isValid)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let m := mload(0x40)
-            mstore(add(0x80, m), rights)
-            mstore(add(0x60, m), contract_)
-            mstore(add(0x4c, m), shl(96, from))
-            mstore(add(0x2c, m), shl(96, to))
-            // `checkDelegateForContract(address,address,address,bytes32)`.
-            mstore(add(0x0c, m), 0x8988eea9000000000000000000000000)
-            isValid := staticcall(gas(), DELEGATE_REGISTRY_V2, add(m, 0x1c), 0x84, m, 0x20)
-            isValid := and(eq(mload(m), 1), isValid)
-            if iszero(or(rights, isValid)) {
-                mstore(m, 0x90c9a2d0) // `checkDelegateForContract(address,address,address)`.
-                isValid := staticcall(gas(), DELEGATE_REGISTRY_V1, add(m, 0x1c), 0x64, m, 0x20)
-                isValid := and(eq(mload(m), 1), isValid)
-            }
+        // `checkDelegateForContract(address,address,address,bytes32)`.
+        bytes memory data = abi.encodeWithSelector(0x8988eea9, to, from, contract_, rights);
+        isValid = _isOne(DELEGATE_REGISTRY_V2, data, data.length);
+        if (!isValid && rights == 0) {
+            // `checkDelegateForContract(address,address,address)`, on the leading words.
+            _setSelector(data, 0x90c9a2d0);
+            isValid = _isOne(DELEGATE_REGISTRY_V1, data, 0x64);
         }
     }
 
@@ -150,23 +125,13 @@ library DelegateCheckerLib {
         view
         returns (bool isValid)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let m := mload(0x40)
-            mstore(add(0xa0, m), 0)
-            mstore(add(0x80, m), id)
-            mstore(add(0x60, m), contract_)
-            mstore(add(0x4c, m), shl(96, from))
-            mstore(add(0x2c, m), shl(96, to))
-            // `checkDelegateForERC721(address,address,address,uint256,bytes32)`.
-            mstore(add(0x0c, m), 0xb9f36874000000000000000000000000)
-            isValid := staticcall(gas(), DELEGATE_REGISTRY_V2, add(m, 0x1c), 0xa4, m, 0x20)
-            isValid := and(eq(mload(m), 1), isValid)
-            if iszero(isValid) {
-                mstore(m, 0xaba69cf8) // `checkDelegateForToken(address,address,address,uint256)`.
-                isValid := staticcall(gas(), DELEGATE_REGISTRY_V1, add(m, 0x1c), 0x84, m, 0x20)
-                isValid := and(eq(mload(m), 1), isValid)
-            }
+        // `checkDelegateForERC721(address,address,address,uint256,bytes32)`.
+        bytes memory data = abi.encodeWithSelector(0xb9f36874, to, from, contract_, id, bytes32(0));
+        isValid = _isOne(DELEGATE_REGISTRY_V2, data, data.length);
+        if (!isValid) {
+            // `checkDelegateForToken(address,address,address,uint256)`, on the leading words.
+            _setSelector(data, 0xaba69cf8);
+            isValid = _isOne(DELEGATE_REGISTRY_V1, data, 0x84);
         }
     }
 
@@ -183,23 +148,13 @@ library DelegateCheckerLib {
         uint256 id,
         bytes32 rights
     ) internal view returns (bool isValid) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let m := mload(0x40)
-            mstore(add(0xa0, m), rights)
-            mstore(add(0x80, m), id)
-            mstore(add(0x60, m), contract_)
-            mstore(add(0x4c, m), shl(96, from))
-            mstore(add(0x2c, m), shl(96, to))
-            // `checkDelegateForERC721(address,address,address,uint256,bytes32)`.
-            mstore(add(0x0c, m), 0xb9f36874000000000000000000000000)
-            isValid := staticcall(gas(), DELEGATE_REGISTRY_V2, add(m, 0x1c), 0xa4, m, 0x20)
-            isValid := and(eq(mload(m), 1), isValid)
-            if iszero(or(rights, isValid)) {
-                mstore(m, 0xaba69cf8) // `checkDelegateForToken(address,address,address,uint256)`.
-                isValid := staticcall(gas(), DELEGATE_REGISTRY_V1, add(m, 0x1c), 0x84, m, 0x20)
-                isValid := and(eq(mload(m), 1), isValid)
-            }
+        // `checkDelegateForERC721(address,address,address,uint256,bytes32)`.
+        bytes memory data = abi.encodeWithSelector(0xb9f36874, to, from, contract_, id, rights);
+        isValid = _isOne(DELEGATE_REGISTRY_V2, data, data.length);
+        if (!isValid && rights == 0) {
+            // `checkDelegateForToken(address,address,address,uint256)`, on the leading words.
+            _setSelector(data, 0xaba69cf8);
+            isValid = _isOne(DELEGATE_REGISTRY_V1, data, 0x84);
         }
     }
 
@@ -217,23 +172,13 @@ library DelegateCheckerLib {
         view
         returns (uint256 amount)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let m := mload(0x40)
-            let o := add(0x80, m)
-            mstore(o, 0)
-            mstore(add(0x60, m), contract_)
-            mstore(add(0x4c, m), shl(96, from))
-            mstore(add(0x2c, m), shl(96, to))
-            // `checkDelegateForERC20(address,address,address,bytes32)`.
-            mstore(add(0x0c, m), 0xba63c817000000000000000000000000)
-            amount := staticcall(gas(), DELEGATE_REGISTRY_V2, add(m, 0x1c), 0x84, o, 0x20)
-            amount := mul(mload(o), amount)
-            if not(amount) {
-                mstore(m, 0x90c9a2d0) // `checkDelegateForContract(address,address,address)`.
-                let t := staticcall(gas(), DELEGATE_REGISTRY_V1, add(m, 0x1c), 0x64, m, 0x20)
-                amount := or(sub(0, and(eq(mload(m), 1), t)), amount)
-            }
+        // `checkDelegateForERC20(address,address,address,bytes32)`.
+        bytes memory data = abi.encodeWithSelector(0xba63c817, to, from, contract_, bytes32(0));
+        amount = _word(DELEGATE_REGISTRY_V2, data);
+        if (amount != type(uint256).max) {
+            // `checkDelegateForContract(address,address,address)`, on the leading words.
+            _setSelector(data, 0x90c9a2d0);
+            if (_isOne(DELEGATE_REGISTRY_V1, data, 0x64)) amount = type(uint256).max;
         }
     }
 
@@ -251,23 +196,13 @@ library DelegateCheckerLib {
         view
         returns (uint256 amount)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let m := mload(0x40)
-            mstore(0x00, 0)
-            mstore(add(0x80, m), rights)
-            mstore(add(0x60, m), contract_)
-            mstore(add(0x4c, m), shl(96, from))
-            mstore(add(0x2c, m), shl(96, to))
-            // `checkDelegateForERC20(address,address,address,bytes32)`.
-            mstore(add(0x0c, m), 0xba63c817000000000000000000000000)
-            amount := staticcall(gas(), DELEGATE_REGISTRY_V2, add(m, 0x1c), 0x84, 0x00, 0x20)
-            amount := mul(mload(0x00), amount)
-            if iszero(or(rights, iszero(not(amount)))) {
-                mstore(m, 0x90c9a2d0) // `checkDelegateForContract(address,address,address)`.
-                let t := staticcall(gas(), DELEGATE_REGISTRY_V1, add(m, 0x1c), 0x64, m, 0x20)
-                amount := or(sub(0, and(eq(mload(m), 1), t)), amount)
-            }
+        // `checkDelegateForERC20(address,address,address,bytes32)`.
+        bytes memory data = abi.encodeWithSelector(0xba63c817, to, from, contract_, rights);
+        amount = _word(DELEGATE_REGISTRY_V2, data);
+        if (rights == 0 && amount != type(uint256).max) {
+            // `checkDelegateForContract(address,address,address)`, on the leading words.
+            _setSelector(data, 0x90c9a2d0);
+            if (_isOne(DELEGATE_REGISTRY_V1, data, 0x64)) amount = type(uint256).max;
         }
     }
 
@@ -285,24 +220,13 @@ library DelegateCheckerLib {
         view
         returns (uint256 amount)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let m := mload(0x40)
-            let o := add(0xa0, m)
-            mstore(o, 0)
-            mstore(add(0x80, m), id)
-            mstore(add(0x60, m), contract_)
-            mstore(add(0x4c, m), shl(96, from))
-            mstore(add(0x2c, m), shl(96, to))
-            // `checkDelegateForERC1155(address,address,address,uint256,bytes32)`.
-            mstore(add(0x0c, m), 0xb8705875000000000000000000000000)
-            amount := staticcall(gas(), DELEGATE_REGISTRY_V2, add(m, 0x1c), 0xa4, o, 0x20)
-            amount := mul(mload(o), amount)
-            if not(amount) {
-                mstore(m, 0x90c9a2d0) // `checkDelegateForContract(address,address,address)`.
-                let t := staticcall(gas(), DELEGATE_REGISTRY_V1, add(m, 0x1c), 0x64, m, 0x20)
-                amount := or(sub(0, and(eq(mload(m), 1), t)), amount)
-            }
+        // `checkDelegateForERC1155(address,address,address,uint256,bytes32)`.
+        bytes memory data = abi.encodeWithSelector(0xb8705875, to, from, contract_, id, bytes32(0));
+        amount = _word(DELEGATE_REGISTRY_V2, data);
+        if (amount != type(uint256).max) {
+            // `checkDelegateForContract(address,address,address)`, on the leading words.
+            _setSelector(data, 0x90c9a2d0);
+            if (_isOne(DELEGATE_REGISTRY_V1, data, 0x64)) amount = type(uint256).max;
         }
     }
 
@@ -322,24 +246,65 @@ library DelegateCheckerLib {
         uint256 id,
         bytes32 rights
     ) internal view returns (uint256 amount) {
+        // `checkDelegateForERC1155(address,address,address,uint256,bytes32)`.
+        bytes memory data = abi.encodeWithSelector(0xb8705875, to, from, contract_, id, rights);
+        amount = _word(DELEGATE_REGISTRY_V2, data);
+        if (rights == 0 && amount != type(uint256).max) {
+            // `checkDelegateForContract(address,address,address)`, on the leading words.
+            _setSelector(data, 0x90c9a2d0);
+            if (_isOne(DELEGATE_REGISTRY_V1, data, 0x64)) amount = type(uint256).max;
+        }
+    }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      PRIVATE HELPERS                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev Whether a static call to `registry` with the first `length` bytes of `data`
+    /// succeeds and returns a first word of 1. A word of fewer than 32 returned bytes ends in a
+    /// zero byte, so it is not 1.
+    /// @custom:solar-inline
+    function _isOne(address registry, bytes memory data, uint256 length)
+        private
+        view
+        returns (bool)
+    {
+        (bool success, bytes32 word) = _staticCallWord(registry, gasleft(), data, length);
+        return success && uint256(word) == 1;
+    }
+
+    /// @dev The first word that a static call to `registry` with `data` returns, with any bytes
+    /// it does not return read as zeros, or zero if the call fails.
+    /// @custom:solar-inline
+    function _word(address registry, bytes memory data) private view returns (uint256) {
+        (bool success, bytes32 word) = _staticCallWord(registry, gasleft(), data, data.length);
+        return success ? uint256(word) : 0;
+    }
+
+    /// @dev Sets the function selector of `data` to `s`.
+    /// @custom:solar-inline
+    function _setSelector(bytes memory data, bytes4 s) private pure {
+        for (uint256 k; k < 4; ++k) {
+            data[k] = s[k];
+        }
+    }
+
+    /// @dev Static-calls `target` with the first `length` bytes of `payload` and `gasLimit`
+    /// gas, and returns the first word of the returndata, right padded with zeros, which is all
+    /// of it that is copied. Solidity sends a whole buffer and copies the whole returndata.
+    /// @custom:solar-trusted
+    /// @custom:solar-inline
+    function _staticCallWord(address target, uint256 gasLimit, bytes memory payload, uint256 length)
+        private
+        view
+        returns (bool success, bytes32 word)
+    {
+        if (length > payload.length) revert();
         /// @solidity memory-safe-assembly
         assembly {
-            let m := mload(0x40)
             mstore(0x00, 0)
-            mstore(add(0xa0, m), rights)
-            mstore(add(0x80, m), id)
-            mstore(add(0x60, m), contract_)
-            mstore(add(0x4c, m), shl(96, from))
-            mstore(add(0x2c, m), shl(96, to))
-            // `checkDelegateForERC1155(address,address,address,uint256,bytes32)`.
-            mstore(add(0x0c, m), 0xb8705875000000000000000000000000)
-            amount := staticcall(gas(), DELEGATE_REGISTRY_V2, add(m, 0x1c), 0xa4, 0x00, 0x20)
-            amount := mul(mload(0x00), amount)
-            if iszero(or(rights, iszero(not(amount)))) {
-                mstore(m, 0x90c9a2d0) // `checkDelegateForContract(address,address,address)`.
-                let t := staticcall(gas(), DELEGATE_REGISTRY_V1, add(m, 0x1c), 0x64, m, 0x20)
-                amount := or(sub(0, and(eq(mload(m), 1), t)), amount)
-            }
+            success := staticcall(gasLimit, target, add(payload, 0x20), length, 0x00, 0x20)
+            word := mload(0x00)
         }
     }
 }
