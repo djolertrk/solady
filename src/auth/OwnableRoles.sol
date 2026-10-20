@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.4;
+pragma solidity ^0.8.20;
 
 import {Ownable} from "./Ownable.sol";
+import {LibBit} from "../utils/LibBit.sol";
 
 /// @notice Simple single owner and multiroles authorization mixin.
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/auth/OwnableRoles.sol)
@@ -13,6 +14,12 @@ import {Ownable} from "./Ownable.sol";
 /// While the ownable portion follows
 /// [EIP-173](https://eips.ethereum.org/EIPS/eip-173) for compatibility,
 /// the nomenclature for the 2-step ownership handover may be unique to this codebase.
+///
+/// The checked port keeps each user's roles in the assembly's slot, derived in
+/// Solidity from the same seed, and reads the owner's word where Ownable keeps it.
+/// Solidity cannot name those slots, so two trusted helpers read and write a slot;
+/// the rest is checked Solidity.
+/// @custom:solar-safe memory arithmetic
 abstract contract OwnableRoles is Ownable {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                           EVENTS                           */
@@ -47,39 +54,20 @@ abstract contract OwnableRoles is Ownable {
 
     /// @dev Overwrite the roles directly without authorization guard.
     function _setRoles(address user, uint256 roles) internal virtual {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x0c, _ROLE_SLOT_SEED)
-            mstore(0x00, user)
-            // Store the new value.
-            sstore(keccak256(0x0c, 0x20), roles)
-            // Emit the {RolesUpdated} event.
-            log3(0, 0, _ROLES_UPDATED_EVENT_SIGNATURE, shr(96, mload(0x0c)), roles)
-        }
+        _storeAt(_roleSlot(user), roles);
+        emit RolesUpdated(user, roles);
     }
 
     /// @dev Updates the roles directly without authorization guard.
     /// If `on` is true, each set bit of `roles` will be turned on,
     /// otherwise, each set bit of `roles` will be turned off.
     function _updateRoles(address user, uint256 roles, bool on) internal virtual {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x0c, _ROLE_SLOT_SEED)
-            mstore(0x00, user)
-            let roleSlot := keccak256(0x0c, 0x20)
-            // Load the current value.
-            let current := sload(roleSlot)
-            // Compute the updated roles if `on` is true.
-            let updated := or(current, roles)
-            // Compute the updated roles if `on` is false.
-            // Use `and` to compute the intersection of `current` and `roles`,
-            // `xor` it with `current` to flip the bits in the intersection.
-            if iszero(on) { updated := xor(current, and(current, roles)) }
-            // Then, store the new value.
-            sstore(roleSlot, updated)
-            // Emit the {RolesUpdated} event.
-            log3(0, 0, _ROLES_UPDATED_EVENT_SIGNATURE, shr(96, mload(0x0c)), updated)
-        }
+        uint256 roleSlot = _roleSlot(user);
+        uint256 current = _loadAt(roleSlot);
+        // Turn on each bit of `roles`, or flip the bits it shares with `current` off.
+        uint256 updated = on ? current | roles : current ^ (current & roles);
+        _storeAt(roleSlot, updated);
+        emit RolesUpdated(user, updated);
     }
 
     /// @dev Grants the roles directly without authorization guard.
@@ -96,39 +84,16 @@ abstract contract OwnableRoles is Ownable {
 
     /// @dev Throws if the sender does not have any of the `roles`.
     function _checkRoles(uint256 roles) internal view virtual {
-        /// @solidity memory-safe-assembly
-        assembly {
-            // Compute the role slot.
-            mstore(0x0c, _ROLE_SLOT_SEED)
-            mstore(0x00, caller())
-            // Load the stored value, and if the `and` intersection
-            // of the value and `roles` is zero, revert.
-            if iszero(and(sload(keccak256(0x0c, 0x20)), roles)) {
-                mstore(0x00, 0x82b42900) // `Unauthorized()`.
-                revert(0x1c, 0x04)
-            }
-        }
+        if (_loadAt(_roleSlot(msg.sender)) & roles == 0) revert Unauthorized();
     }
 
     /// @dev Throws if the sender is not the owner,
     /// and does not have any of the `roles`.
     /// Checks for ownership first, then lazily checks for roles.
     function _checkOwnerOrRoles(uint256 roles) internal view virtual {
-        /// @solidity memory-safe-assembly
-        assembly {
-            // If the caller is not the stored owner.
-            // Note: `_ROLE_SLOT_SEED` is equal to `_OWNER_SLOT_NOT`.
-            if iszero(eq(caller(), sload(not(_ROLE_SLOT_SEED)))) {
-                // Compute the role slot.
-                mstore(0x0c, _ROLE_SLOT_SEED)
-                mstore(0x00, caller())
-                // Load the stored value, and if the `and` intersection
-                // of the value and `roles` is zero, revert.
-                if iszero(and(sload(keccak256(0x0c, 0x20)), roles)) {
-                    mstore(0x00, 0x82b42900) // `Unauthorized()`.
-                    revert(0x1c, 0x04)
-                }
-            }
+        // The stored owner word, which a renouncement leaves unmatched by any caller.
+        if (uint256(uint160(msg.sender)) != _loadAt(uint256(_OWNER_SLOT))) {
+            if (_loadAt(_roleSlot(msg.sender)) & roles == 0) revert Unauthorized();
         }
     }
 
@@ -136,20 +101,9 @@ abstract contract OwnableRoles is Ownable {
     /// and is not the owner.
     /// Checks for roles first, then lazily checks for ownership.
     function _checkRolesOrOwner(uint256 roles) internal view virtual {
-        /// @solidity memory-safe-assembly
-        assembly {
-            // Compute the role slot.
-            mstore(0x0c, _ROLE_SLOT_SEED)
-            mstore(0x00, caller())
-            // Load the stored value, and if the `and` intersection
-            // of the value and `roles` is zero, revert.
-            if iszero(and(sload(keccak256(0x0c, 0x20)), roles)) {
-                // If the caller is not the stored owner.
-                // Note: `_ROLE_SLOT_SEED` is equal to `_OWNER_SLOT_NOT`.
-                if iszero(eq(caller(), sload(not(_ROLE_SLOT_SEED)))) {
-                    mstore(0x00, 0x82b42900) // `Unauthorized()`.
-                    revert(0x1c, 0x04)
-                }
+        if (_loadAt(_roleSlot(msg.sender)) & roles == 0) {
+            if (uint256(uint160(msg.sender)) != _loadAt(uint256(_OWNER_SLOT))) {
+                revert Unauthorized();
             }
         }
     }
@@ -159,13 +113,8 @@ abstract contract OwnableRoles is Ownable {
     /// Not recommended to be called on-chain.
     /// Made internal to conserve bytecode. Wrap it in a public function if needed.
     function _rolesFromOrdinals(uint8[] memory ordinals) internal pure returns (uint256 roles) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            for { let i := shl(5, mload(ordinals)) } i { i := sub(i, 0x20) } {
-                // We don't need to mask the values of `ordinals`, as Solidity
-                // cleans dirty upper bits when storing variables into memory.
-                roles := or(shl(mload(add(ordinals, i)), 1), roles)
-            }
+        for (uint256 i = ordinals.length; i != 0;) {
+            roles |= uint256(1) << ordinals[--i];
         }
     }
 
@@ -174,27 +123,10 @@ abstract contract OwnableRoles is Ownable {
     /// Not recommended to be called on-chain.
     /// Made internal to conserve bytecode. Wrap it in a public function if needed.
     function _ordinalsFromRoles(uint256 roles) internal pure returns (uint8[] memory ordinals) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            // Grab the pointer to the free memory.
-            ordinals := mload(0x40)
-            let ptr := add(ordinals, 0x20)
-            let o := 0
-            // The absence of lookup tables, De Bruijn, etc., here is intentional for
-            // smaller bytecode, as this function is not meant to be called on-chain.
-            for { let t := roles } 1 {} {
-                mstore(ptr, o)
-                // `shr` 5 is equivalent to multiplying by 0x20.
-                // Push back into the ordinals array if the bit is set.
-                ptr := add(ptr, shl(5, and(t, 1)))
-                o := add(o, 1)
-                t := shr(o, roles)
-                if iszero(t) { break }
-            }
-            // Store the length of `ordinals`.
-            mstore(ordinals, shr(5, sub(ptr, add(ordinals, 0x20))))
-            // Allocate the memory.
-            mstore(0x40, ptr)
+        ordinals = new uint8[](LibBit.popCount(roles));
+        uint256 n;
+        for (uint256 o; roles >> o != 0; ++o) {
+            if ((roles >> o) & 1 != 0) ordinals[n++] = uint8(o);
         }
     }
 
@@ -226,14 +158,7 @@ abstract contract OwnableRoles is Ownable {
 
     /// @dev Returns the roles of `user`.
     function rolesOf(address user) public view virtual returns (uint256 roles) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            // Compute the role slot.
-            mstore(0x0c, _ROLE_SLOT_SEED)
-            mstore(0x00, user)
-            // Load the stored value.
-            roles := sload(keccak256(0x0c, 0x20))
-        }
+        roles = _loadAt(_roleSlot(user));
     }
 
     /// @dev Returns whether `user` has any of `roles`.
@@ -532,4 +457,31 @@ abstract contract OwnableRoles is Ownable {
     uint256 internal constant _ROLE_253 = 1 << 253;
     uint256 internal constant _ROLE_254 = 1 << 254;
     uint256 internal constant _ROLE_255 = 1 << 255;
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      PRIVATE HELPERS                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev The role slot of `user`: the hash of its address over `_ROLE_SLOT_SEED`.
+    function _roleSlot(address user) private pure returns (uint256) {
+        return uint256(keccak256(abi.encode(uint256(uint160(user)) << 96 | _ROLE_SLOT_SEED)));
+    }
+
+    /// @dev The word in storage slot `slot`. Solidity cannot name a slot it did not allocate.
+    /// @custom:solar-trusted
+    function _loadAt(uint256 slot) private view returns (uint256 value) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            value := sload(slot)
+        }
+    }
+
+    /// @dev Stores `value` in storage slot `slot`.
+    /// @custom:solar-trusted
+    function _storeAt(uint256 slot, uint256 value) private {
+        /// @solidity memory-safe-assembly
+        assembly {
+            sstore(slot, value)
+        }
+    }
 }
