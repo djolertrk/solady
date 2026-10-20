@@ -14,6 +14,16 @@ pragma solidity ^0.8.4;
 /// - This library is NOT equivalent to OpenZeppelin or Murky.
 ///   Equivalence is NOT required if you are just using this for pure Solidity testing.
 ///   May be relevant for differential testing between Solidity vs external libraries.
+///
+/// The checked port builds and reads the tree with checked indexing, and hashes each pair as
+/// `keccak256(abi.encode(min, max))`, the words the assembly hashes in scratch space.
+/// `nodeProof` counts a node's depth before it allocates the proof. `multiProofForLeaves`
+/// checks the leaf indices first, then runs the assembly's circular queue twice in one array
+/// sized to the leaf indices, first to size the proof and the flags, then to fill them; the
+/// assembly runs the first pass before it checks the indices. A sibling past the end of
+/// `tree`, which only a tree of even length has, reverts with `Panic(0x32)` where the assembly
+/// reads the word after `tree`. No helper is trusted.
+/// @custom:solar-safe memory arithmetic
 library MerkleTreeLib {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                       CUSTOM ERRORS                        */
@@ -36,57 +46,31 @@ library MerkleTreeLib {
     /// @dev Builds and return a complete Merkle tree.
     /// To make it a full Merkle tree, use `build(pad(leaves))`.
     function build(bytes32[] memory leaves) internal pure returns (bytes32[] memory tree) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            tree := mload(0x40) // `nodes`.
-            let l := mload(leaves)
-            if iszero(l) {
-                mstore(0x00, 0xe7171dc4) // `MerkleTreeLeavesEmpty()`.
-                revert(0x1c, 0x04)
-            }
-            let n := sub(add(l, l), 1)
-            mstore(tree, n) // `.length`.
-            let nodes := add(tree, 0x20)
-            let f := add(nodes, shl(5, n))
-            mstore(0x40, f) // Allocate memory.
-            let e := add(0x20, shl(5, l))
-            for { let i := 0x20 } 1 {} {
-                mstore(sub(f, i), mload(add(leaves, i)))
-                i := add(i, 0x20)
-                if eq(i, e) { break }
-            }
-            if iszero(lt(l, 2)) {
-                for { let i := shl(5, sub(l, 2)) } 1 {} {
-                    let left := mload(add(nodes, add(add(i, i), 0x20)))
-                    let right := mload(add(nodes, add(add(i, i), 0x40)))
-                    let c := shl(5, lt(left, right))
-                    mstore(c, right)
-                    mstore(xor(c, 0x20), left)
-                    mstore(add(nodes, i), keccak256(0x00, 0x40))
-                    if iszero(i) { break }
-                    i := sub(i, 0x20)
-                }
-            }
+        uint256 l = leaves.length;
+        if (l == 0) revert MerkleTreeLeavesEmpty();
+        uint256 n = l + l - 1;
+        tree = new bytes32[](n);
+        // The leaves, in reverse order, end the tree.
+        uint256 k = n;
+        for (uint256 i; i < l; ++i) {
+            --k;
+            tree[k] = leaves[i];
+        }
+        // Each internal node, from the last, hashes its two children, `k - 2` and `k - 1`.
+        for (k = n; k > 1; k -= 2) {
+            tree[(k >> 1) - 1] = _hashPair(tree[k - 2], tree[k - 1]);
         }
     }
 
     /// @dev Returns the root.
     function root(bytes32[] memory tree) internal pure returns (bytes32 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := mload(add(0x20, tree))
-            if iszero(mload(tree)) {
-                mstore(0x00, 0x7a856a38) // `MerkleTreeOutOfBoundsAccess()`.
-                revert(0x1c, 0x04)
-            }
-        }
+        if (tree.length == 0) revert MerkleTreeOutOfBoundsAccess();
+        result = tree[0];
     }
 
     /// @dev Returns the number of leaves.
     function numLeaves(bytes32[] memory tree) internal pure returns (uint256) {
-        unchecked {
-            return tree.length - (tree.length >> 1);
-        }
+        return tree.length - (tree.length >> 1);
     }
 
     /// @dev Returns the number of internal nodes.
@@ -96,15 +80,9 @@ library MerkleTreeLib {
 
     /// @dev Returns the leaf at `leafIndex`.
     function leaf(bytes32[] memory tree, uint256 leafIndex) internal pure returns (bytes32 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let n := mload(tree)
-            if iszero(lt(leafIndex, sub(n, shr(1, n)))) {
-                mstore(0x00, 0x7a856a38) // `MerkleTreeOutOfBoundsAccess()`.
-                revert(0x1c, 0x04)
-            }
-            result := mload(add(tree, shl(5, sub(n, leafIndex))))
-        }
+        uint256 n = tree.length;
+        if (leafIndex >= n - (n >> 1)) revert MerkleTreeOutOfBoundsAccess();
+        result = tree[n - 1 - leafIndex];
     }
 
     /// @dev Returns the leaves at `leafIndices`.
@@ -113,24 +91,13 @@ library MerkleTreeLib {
         pure
         returns (bytes32[] memory result)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := mload(0x40)
-            let l := mload(leafIndices)
-            mstore(result, l) // `.length`.
-            let d := sub(leafIndices, result)
-            let n := mload(tree)
-            let o := add(result, 0x20)
-            for { let i := 0 } iszero(eq(i, l)) { i := add(i, 1) } {
-                let j := add(o, shl(5, i))
-                let leafIndex := mload(add(j, d))
-                if iszero(lt(leafIndex, sub(n, shr(1, n)))) {
-                    mstore(0x00, 0x7a856a38) // `MerkleTreeOutOfBoundsAccess()`.
-                    revert(0x1c, 0x04)
-                }
-                mstore(j, mload(add(tree, shl(5, sub(n, leafIndex)))))
-            }
-            mstore(0x40, add(o, shl(5, l))) // Allocate memory.
+        uint256 n = tree.length;
+        uint256 l = leafIndices.length;
+        result = new bytes32[](l);
+        for (uint256 i; i < l; ++i) {
+            uint256 leafIndex = leafIndices[i];
+            if (leafIndex >= n - (n >> 1)) revert MerkleTreeOutOfBoundsAccess();
+            result[i] = tree[n - 1 - leafIndex];
         }
     }
 
@@ -140,13 +107,9 @@ library MerkleTreeLib {
         pure
         returns (bytes32[] memory result)
     {
-        uint256 nodeIndex;
-        /// @solidity memory-safe-assembly
-        assembly {
-            let n := mload(tree)
-            nodeIndex := sub(n, add(1, leafIndex))
-            if iszero(lt(leafIndex, sub(n, shr(1, n)))) { nodeIndex := not(0) }
-        }
+        uint256 n = tree.length;
+        uint256 nodeIndex = type(uint256).max;
+        if (leafIndex < n - (n >> 1)) nodeIndex = n - 1 - leafIndex;
         result = nodeProof(tree, nodeIndex);
     }
 
@@ -157,20 +120,17 @@ library MerkleTreeLib {
         pure
         returns (bytes32[] memory result)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := mload(0x40)
-            if iszero(lt(nodeIndex, mload(tree))) {
-                mstore(0x00, 0x7a856a38) // `MerkleTreeOutOfBoundsAccess()`.
-                revert(0x1c, 0x04)
-            }
-            let o := add(result, 0x20)
-            for { let i := nodeIndex } i { i := shr(1, sub(i, 1)) } {
-                mstore(o, mload(add(tree, shl(5, add(i, shl(1, and(1, i)))))))
-                o := add(o, 0x20)
-            }
-            mstore(0x40, o) // Allocate memory.
-            mstore(result, shr(5, sub(o, add(result, 0x20)))) // Store length.
+        if (nodeIndex >= tree.length) revert MerkleTreeOutOfBoundsAccess();
+        uint256 depth;
+        for (uint256 i = nodeIndex; i != 0; i = (i - 1) >> 1) {
+            ++depth;
+        }
+        result = new bytes32[](depth);
+        uint256 o;
+        // Each sibling on the way up: the next node for an odd one, the previous for an even.
+        for (uint256 i = nodeIndex; i != 0; i = (i - 1) >> 1) {
+            result[o] = tree[(i & 1) == 0 ? i - 1 : i + 1];
+            ++o;
         }
     }
 
@@ -181,67 +141,22 @@ library MerkleTreeLib {
         pure
         returns (bytes32[] memory proof, bool[] memory flags)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            function gen(leafIndices_, t_, proof_, flags_) -> _flagsLen, _proofLen {
-                let q_ := mload(0x40) // Circular buffer.
-                let c_ := mload(leafIndices_) // Capacity of circular buffer.
-                let e_ := c_ // End index of circular buffer.
-                let b_ := 0 // Start index of circular buffer.
-                for {
-                    let n_ := mload(t_) // Num nodes.
-                    let l_ := sub(n_, shr(1, n_)) // Num leaves.
-                    let p_ := not(0)
-                    let i_ := 0
-                } 1 {} {
-                    let j_ := mload(add(add(leafIndices_, 0x20), shl(5, i_))) // Leaf index.
-                    if flags_ {
-                        if iszero(lt(j_, l_)) {
-                            mstore(0x00, 0x7a856a38) // `MerkleTreeOutOfBoundsAccess()`.
-                            revert(0x1c, 0x04)
-                        }
-                        if iszero(sgt(j_, p_)) {
-                            mstore(0x00, 0xe9729976) // `MerkleTreeInvalidLeafIndices()`.
-                            revert(0x1c, 0x04)
-                        }
-                        p_ := j_
-                    }
-                    mstore(add(q_, shl(5, i_)), sub(n_, add(1, j_)))
-                    i_ := add(i_, 1)
-                    if eq(i_, e_) { break }
-                }
-                for {} 1 {} {
-                    if iszero(lt(b_, e_)) { break }
-                    let j_ := mload(add(q_, shl(5, mod(b_, c_)))) // Current.
-                    if iszero(j_) { break }
-                    b_ := add(b_, 1)
-                    let s_ := add(j_, shl(1, and(j_, 1))) // Sibling (+1).
-                    _flagsLen := add(_flagsLen, 0x20)
-                    let f_ := and(eq(s_, add(1, mload(add(q_, shl(5, mod(b_, c_)))))), lt(b_, e_))
-                    b_ := add(b_, f_)
-                    _proofLen := add(_proofLen, shl(5, iszero(f_)))
-                    if flags_ {
-                        mstore(add(flags_, _flagsLen), f_)
-                        mstore(mul(iszero(f_), add(proof_, _proofLen)), mload(add(t_, shl(5, s_))))
-                    }
-                    mstore(add(q_, shl(5, mod(e_, c_))), shr(1, sub(j_, 1)))
-                    e_ := add(e_, 1)
-                }
-                _proofLen := shr(5, _proofLen)
-                _flagsLen := shr(5, _flagsLen)
-            }
-            if iszero(mload(leafIndices)) {
-                mstore(0x00, 0xe9729976) // `MerkleTreeInvalidLeafIndices()`.
-                revert(0x1c, 0x04)
-            }
-            let flagsLen, proofLen := gen(leafIndices, tree, 0x00, 0x00)
-            proof := mload(0x40)
-            mstore(proof, proofLen)
-            flags := add(add(proof, 0x20), shl(5, proofLen))
-            mstore(flags, flagsLen)
-            mstore(0x40, add(add(flags, 0x20), shl(5, flagsLen))) // Allocate memory.
-            flagsLen, proofLen := gen(leafIndices, tree, proof, flags)
+        uint256 c = leafIndices.length;
+        if (c == 0) revert MerkleTreeInvalidLeafIndices();
+        uint256 n = tree.length;
+        uint256 l = n - (n >> 1); // Num leaves.
+        uint256 p;
+        for (uint256 i; i < c; ++i) {
+            uint256 j = leafIndices[i]; // Leaf index.
+            if (j >= l) revert MerkleTreeOutOfBoundsAccess();
+            if (i != 0 && j <= p) revert MerkleTreeInvalidLeafIndices();
+            p = j;
         }
+        uint256[] memory q = new uint256[](c); // Circular buffer.
+        (uint256 flagsLen, uint256 proofLen) = _gen(leafIndices, tree, q, proof, flags, false);
+        proof = new bytes32[](proofLen);
+        flags = new bool[](flagsLen);
+        _gen(leafIndices, tree, q, proof, flags, true);
     }
 
     /// @dev Returns a copy of leaves, with the length padded to a power of 2.
@@ -250,36 +165,76 @@ library MerkleTreeLib {
         pure
         returns (bytes32[] memory result)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := mload(0x40)
-            let l := mload(leaves)
-            let p := sub(l, 1)
-            if iszero(lt(p, 0xffffffff)) {
-                mstore(0x00, 0xe7171dc4) // `MerkleTreeLeavesEmpty()`.
-                revert(0x1c, mul(iszero(l), 0x04)) // If `p > 2**32 - 1`, revert with empty.
-            }
-            p := or(shr(1, p), p)
-            p := or(shr(2, p), p)
-            p := or(shr(4, p), p)
-            p := or(shr(8, p), p)
-            p := add(1, or(shr(16, p), p)) // Supports up to `2**32 - 1`.
-            mstore(result, p) // Store length.
-            mstore(0x40, add(result, add(0x20, shl(5, p)))) // Allocate memory.
-            let d := sub(result, leaves)
-            let copyEnd := add(add(leaves, 0x20), shl(5, l))
-            let end := add(add(leaves, 0x20), shl(5, p))
-            mstore(0x00, defaultFill)
-            for { let i := add(leaves, 0x20) } 1 {} {
-                mstore(add(i, d), mload(mul(i, lt(i, copyEnd))))
-                i := add(i, 0x20)
-                if eq(i, end) { break }
-            }
+        uint256 l = leaves.length;
+        if (l == 0) revert MerkleTreeLeavesEmpty();
+        // If `p > 2**32 - 1`, revert with empty.
+        if (l - 1 >= 0xffffffff) revert();
+        uint256 p = l - 1;
+        p = (p >> 1) | p;
+        p = (p >> 2) | p;
+        p = (p >> 4) | p;
+        p = (p >> 8) | p;
+        p = ((p >> 16) | p) + 1; // Supports up to `2**32 - 1`.
+        result = new bytes32[](p);
+        for (uint256 i; i < l; ++i) {
+            result[i] = leaves[i];
+        }
+        for (uint256 i = l; i < p; ++i) {
+            result[i] = defaultFill;
         }
     }
 
     /// @dev Equivalent to `pad(leaves, bytes32(0))`.
     function pad(bytes32[] memory leaves) internal pure returns (bytes32[] memory result) {
         result = pad(leaves, bytes32(0));
+    }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      PRIVATE HELPERS                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev The hash of `a` and `b`, the smaller first.
+    /// @custom:solar-inline
+    function _hashPair(bytes32 a, bytes32 b) private pure returns (bytes32) {
+        if (b < a) (a, b) = (b, a);
+        return keccak256(abi.encode(a, b));
+    }
+
+    /// @dev The assembly's `gen`: runs the circular buffer `q` of node indices, from the
+    /// leaves' up to the root, and counts the flags and the proof elements, which with
+    /// `fill` it writes into `proof` and `flags`. A node takes its sibling from the queue
+    /// when it is next, with the flag true, and from `tree` otherwise.
+    /// @custom:solar-inline
+    function _gen(
+        uint256[] memory leafIndices,
+        bytes32[] memory tree,
+        uint256[] memory q,
+        bytes32[] memory proof,
+        bool[] memory flags,
+        bool fill
+    ) private pure returns (uint256 flagsLen, uint256 proofLen) {
+        uint256 c = q.length; // Capacity of circular buffer.
+        uint256 n = tree.length; // Num nodes.
+        for (uint256 i; i < c; ++i) {
+            q[i] = n - 1 - leafIndices[i];
+        }
+        uint256 b; // Start index of circular buffer.
+        uint256 e = c; // End index of circular buffer.
+        while (b < e) {
+            uint256 j = q[b % c]; // Current.
+            if (j == 0) break;
+            ++b;
+            uint256 s = (j & 1) == 0 ? j - 1 : j + 1; // Sibling.
+            ++flagsLen;
+            bool f = b < e && q[b % c] == s;
+            if (f) ++b;
+            else ++proofLen;
+            if (fill) {
+                flags[flagsLen - 1] = f;
+                if (!f) proof[proofLen - 1] = tree[s];
+            }
+            q[e % c] = (j - 1) >> 1;
+            ++e;
+        }
     }
 }
