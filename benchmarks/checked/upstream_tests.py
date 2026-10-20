@@ -44,6 +44,7 @@ LIBRARIES = [
     "LibMap",
     "tokens/ERC20",
     "tokens/WETH",
+    "auth/Ownable",
 ]
 
 

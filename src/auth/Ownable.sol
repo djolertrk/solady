@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.4;
+pragma solidity ^0.8.20;
 
 /// @notice Simple single owner authorization mixin.
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/auth/Ownable.sol)
@@ -11,6 +11,13 @@ pragma solidity ^0.8.4;
 /// While the ownable portion follows
 /// [EIP-173](https://eips.ethereum.org/EIPS/eip-173) for compatibility,
 /// the nomenclature for the 2-step ownership handover may be unique to this codebase.
+///
+/// The checked port keeps the owner and the handovers in the assembly's slots and
+/// words, so it is storage-compatible with it: a guarded renouncement stores the
+/// top bit, and `OwnershipTransferred` logs the previous word as it was stored.
+/// Solidity cannot name those slots or log such a word, so three trusted helpers
+/// read and write a slot and emit that event; the rest is checked Solidity.
+/// @custom:solar-safe memory arithmetic
 abstract contract Ownable {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                       CUSTOM ERRORS                        */
@@ -92,71 +99,28 @@ abstract contract Ownable {
     /// For performance reasons, this function will not check if there
     /// is an existing owner.
     function _initializeOwner(address newOwner) internal virtual {
+        uint256 word = uint256(uint160(newOwner));
         if (_guardInitializeOwner()) {
-            /// @solidity memory-safe-assembly
-            assembly {
-                let ownerSlot := _OWNER_SLOT
-                if sload(ownerSlot) {
-                    mstore(0x00, 0x0dc149f0) // `AlreadyInitialized()`.
-                    revert(0x1c, 0x04)
-                }
-                // Clean the upper 96 bits.
-                newOwner := shr(96, shl(96, newOwner))
-                // Store the new value.
-                sstore(ownerSlot, or(newOwner, shl(255, iszero(newOwner))))
-                // Emit the {OwnershipTransferred} event.
-                log3(0, 0, _OWNERSHIP_TRANSFERRED_EVENT_SIGNATURE, 0, newOwner)
-            }
-        } else {
-            /// @solidity memory-safe-assembly
-            assembly {
-                // Clean the upper 96 bits.
-                newOwner := shr(96, shl(96, newOwner))
-                // Store the new value.
-                sstore(_OWNER_SLOT, newOwner)
-                // Emit the {OwnershipTransferred} event.
-                log3(0, 0, _OWNERSHIP_TRANSFERRED_EVENT_SIGNATURE, 0, newOwner)
-            }
+            if (_sload(uint256(_OWNER_SLOT)) != 0) revert AlreadyInitialized();
+            // A zero owner keeps the slot nonzero, so it stays initialized.
+            if (word == 0) word = 1 << 255;
         }
+        _sstore(uint256(_OWNER_SLOT), word);
+        emit OwnershipTransferred(address(0), newOwner);
     }
 
     /// @dev Sets the owner directly without authorization guard.
     function _setOwner(address newOwner) internal virtual {
-        if (_guardInitializeOwner()) {
-            /// @solidity memory-safe-assembly
-            assembly {
-                let ownerSlot := _OWNER_SLOT
-                // Clean the upper 96 bits.
-                newOwner := shr(96, shl(96, newOwner))
-                // Emit the {OwnershipTransferred} event.
-                log3(0, 0, _OWNERSHIP_TRANSFERRED_EVENT_SIGNATURE, sload(ownerSlot), newOwner)
-                // Store the new value.
-                sstore(ownerSlot, or(newOwner, shl(255, iszero(newOwner))))
-            }
-        } else {
-            /// @solidity memory-safe-assembly
-            assembly {
-                let ownerSlot := _OWNER_SLOT
-                // Clean the upper 96 bits.
-                newOwner := shr(96, shl(96, newOwner))
-                // Emit the {OwnershipTransferred} event.
-                log3(0, 0, _OWNERSHIP_TRANSFERRED_EVENT_SIGNATURE, sload(ownerSlot), newOwner)
-                // Store the new value.
-                sstore(ownerSlot, newOwner)
-            }
-        }
+        uint256 word = uint256(uint160(newOwner));
+        if (_guardInitializeOwner() && word == 0) word = 1 << 255;
+        _logOwnershipTransferred(_sload(uint256(_OWNER_SLOT)), newOwner);
+        _sstore(uint256(_OWNER_SLOT), word);
     }
 
     /// @dev Throws if the sender is not the owner.
     function _checkOwner() internal view virtual {
-        /// @solidity memory-safe-assembly
-        assembly {
-            // If the caller is not the stored owner, revert.
-            if iszero(eq(caller(), sload(_OWNER_SLOT))) {
-                mstore(0x00, 0x82b42900) // `Unauthorized()`.
-                revert(0x1c, 0x04)
-            }
-        }
+        // A renounced owner's word has its top bit set, which no caller matches.
+        if (uint256(uint160(msg.sender)) != _sload(uint256(_OWNER_SLOT))) revert Unauthorized();
     }
 
     /// @dev Returns how long a two-step ownership handover is valid for in seconds.
@@ -172,13 +136,7 @@ abstract contract Ownable {
 
     /// @dev Allows the owner to transfer the ownership to `newOwner`.
     function transferOwnership(address newOwner) public payable virtual onlyOwner {
-        /// @solidity memory-safe-assembly
-        assembly {
-            if iszero(shl(96, newOwner)) {
-                mstore(0x00, 0x7448fbae) // `NewOwnerIsZeroAddress()`.
-                revert(0x1c, 0x04)
-            }
-        }
+        if (newOwner == address(0)) revert NewOwnerIsZeroAddress();
         _setOwner(newOwner);
     }
 
@@ -190,50 +148,24 @@ abstract contract Ownable {
     /// @dev Request a two-step ownership handover to the caller.
     /// The request will automatically expire in 48 hours (172800 seconds) by default.
     function requestOwnershipHandover() public payable virtual {
-        unchecked {
-            uint256 expires = block.timestamp + _ownershipHandoverValidFor();
-            /// @solidity memory-safe-assembly
-            assembly {
-                // Compute and set the handover slot to `expires`.
-                mstore(0x0c, _HANDOVER_SLOT_SEED)
-                mstore(0x00, caller())
-                sstore(keccak256(0x0c, 0x20), expires)
-                // Emit the {OwnershipHandoverRequested} event.
-                log2(0, 0, _OWNERSHIP_HANDOVER_REQUESTED_EVENT_SIGNATURE, caller())
-            }
-        }
+        uint256 expires = block.timestamp + _ownershipHandoverValidFor();
+        _sstore(_handoverSlot(msg.sender), expires);
+        emit OwnershipHandoverRequested(msg.sender);
     }
 
     /// @dev Cancels the two-step ownership handover to the caller, if any.
     function cancelOwnershipHandover() public payable virtual {
-        /// @solidity memory-safe-assembly
-        assembly {
-            // Compute and set the handover slot to 0.
-            mstore(0x0c, _HANDOVER_SLOT_SEED)
-            mstore(0x00, caller())
-            sstore(keccak256(0x0c, 0x20), 0)
-            // Emit the {OwnershipHandoverCanceled} event.
-            log2(0, 0, _OWNERSHIP_HANDOVER_CANCELED_EVENT_SIGNATURE, caller())
-        }
+        _sstore(_handoverSlot(msg.sender), 0);
+        emit OwnershipHandoverCanceled(msg.sender);
     }
 
     /// @dev Allows the owner to complete the two-step ownership handover to `pendingOwner`.
     /// Reverts if there is no existing ownership handover requested by `pendingOwner`.
     function completeOwnershipHandover(address pendingOwner) public payable virtual onlyOwner {
-        /// @solidity memory-safe-assembly
-        assembly {
-            // Compute and set the handover slot to 0.
-            mstore(0x0c, _HANDOVER_SLOT_SEED)
-            mstore(0x00, pendingOwner)
-            let handoverSlot := keccak256(0x0c, 0x20)
-            // If the handover does not exist, or has expired.
-            if gt(timestamp(), sload(handoverSlot)) {
-                mstore(0x00, 0x6f5e8818) // `NoHandoverRequest()`.
-                revert(0x1c, 0x04)
-            }
-            // Set the handover slot to 0.
-            sstore(handoverSlot, 0)
-        }
+        uint256 handoverSlot = _handoverSlot(pendingOwner);
+        // If the handover does not exist, or has expired.
+        if (block.timestamp > _sload(handoverSlot)) revert NoHandoverRequest();
+        _sstore(handoverSlot, 0);
         _setOwner(pendingOwner);
     }
 
@@ -243,10 +175,7 @@ abstract contract Ownable {
 
     /// @dev Returns the owner of the contract.
     function owner() public view virtual returns (address result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := sload(_OWNER_SLOT)
-        }
+        result = address(uint160(_sload(uint256(_OWNER_SLOT))));
     }
 
     /// @dev Returns the expiry timestamp for the two-step ownership handover to `pendingOwner`.
@@ -256,14 +185,7 @@ abstract contract Ownable {
         virtual
         returns (uint256 result)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            // Compute the handover slot.
-            mstore(0x0c, _HANDOVER_SLOT_SEED)
-            mstore(0x00, pendingOwner)
-            // Load the handover slot.
-            result := sload(keccak256(0x0c, 0x20))
-        }
+        result = _sload(_handoverSlot(pendingOwner));
     }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -274,5 +196,52 @@ abstract contract Ownable {
     modifier onlyOwner() virtual {
         _checkOwner();
         _;
+    }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      PRIVATE HELPERS                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev The handover slot of `pendingOwner`: the hash of its address over
+    /// `_HANDOVER_SLOT_SEED`.
+    function _handoverSlot(address pendingOwner) private pure returns (uint256) {
+        return
+            uint256(
+                keccak256(abi.encode(uint256(uint160(pendingOwner)) << 96 | _HANDOVER_SLOT_SEED))
+            );
+    }
+
+    /// @dev The word in storage slot `slot`. Solidity cannot name a slot it did not allocate.
+    /// @custom:solar-trusted
+    function _sload(uint256 slot) private view returns (uint256 value) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            value := sload(slot)
+        }
+    }
+
+    /// @dev Stores `value` in storage slot `slot`.
+    /// @custom:solar-trusted
+    function _sstore(uint256 slot, uint256 value) private {
+        /// @solidity memory-safe-assembly
+        assembly {
+            sstore(slot, value)
+        }
+    }
+
+    /// @dev Emits {OwnershipTransferred} with the owner slot's previous word as its first
+    /// topic, which a guarded renouncement left with its top bit set.
+    /// @custom:solar-trusted
+    function _logOwnershipTransferred(uint256 oldOwnerWord, address newOwner) private {
+        /// @solidity memory-safe-assembly
+        assembly {
+            log3(
+                0,
+                0,
+                _OWNERSHIP_TRANSFERRED_EVENT_SIGNATURE,
+                oldOwnerWord,
+                shr(96, shl(96, newOwner))
+            )
+        }
     }
 }
