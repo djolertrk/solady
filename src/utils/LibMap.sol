@@ -7,8 +7,9 @@ pragma solidity ^0.8.20;
 /// the bits where the stored value and the new one differ, over the same mapping
 /// slots. The generic `bitWidth` operations keep the assembly's results for a
 /// zero width, which divides by zero, and for widths of 256 and more, whose mask
-/// wraps to every bit. A search's index arithmetic is checked: it wraps in the
-/// assembly only for ranges of more values than any call can read.
+/// wraps to every bit. A search's index arithmetic wraps as the assembly's does,
+/// through the trusted `_add` and `_sub`: the midpoint stays between the bounds,
+/// and the offset from `start` wraps back for a zero start.
 /// @custom:solar-safe memory arithmetic
 library LibMap {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -227,23 +228,23 @@ library LibMap {
     ) internal view returns (bool found, uint256 index) {
         if (start >= end) end = start;
         uint256 t;
+        uint256 o = _sub(start, 1); // Offset to derive the actual index.
         uint256 l = 1; // Low.
         uint256 d = _rawDiv(256, bitWidth); // Bucket size.
         uint256 m = _mask(bitWidth); // Value mask.
         uint256 h = end - start; // High.
         while (true) {
-            index = (l & h) + ((l ^ h) >> 1);
+            index = _add(l & h, (l ^ h) >> 1);
             if (l > h) break;
-            // The one-based `index` counts from `start`.
-            uint256 at = start + (index - 1);
+            uint256 at = _add(index, o);
             t = (map[_rawDiv(at, d)] >> _offset(at, d, bitWidth)) & m;
             if (t == needle) break;
-            if (needle <= t) h = index - 1;
-            else l = index + 1;
+            if (needle <= t) h = _sub(index, 1);
+            else l = _add(index, 1);
         }
         bool none = index == 0 || bitWidth == 0;
         found = t == needle && !none;
-        index = none ? start : start + (index - 1);
+        index = _add(o, none ? 1 : index);
     }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -251,11 +252,13 @@ library LibMap {
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     /// @dev Returns `x / y`, returning 0 if `y` is zero.
+    /// @custom:solar-inline
     function _rawDiv(uint256 x, uint256 y) private pure returns (uint256 z) {
         if (y != 0) z = x / y;
     }
 
     /// @dev Returns `x % y`, returning 0 if `y` is zero.
+    /// @custom:solar-inline
     function _rawMod(uint256 x, uint256 y) private pure returns (uint256 z) {
         if (y != 0) z = x % y;
     }
@@ -273,5 +276,21 @@ library LibMap {
     /// @custom:solar-inline
     function _mask(uint256 bitWidth) private pure returns (uint256) {
         return ~(type(uint256).max << bitWidth);
+    }
+
+    /// @dev `a + b` modulo `2**256`.
+    /// @custom:solar-trusted
+    function _add(uint256 a, uint256 b) private pure returns (uint256 c) {
+        unchecked {
+            c = a + b;
+        }
+    }
+
+    /// @dev `a - b` modulo `2**256`.
+    /// @custom:solar-trusted
+    function _sub(uint256 a, uint256 b) private pure returns (uint256 c) {
+        unchecked {
+            c = a - b;
+        }
     }
 }
