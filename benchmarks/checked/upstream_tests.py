@@ -48,6 +48,7 @@ LIBRARIES = [
     "tokens/ERC20",
     "tokens/WETH",
     "tokens/ERC4626",
+    "tokens/ERC721",
     "auth/Ownable",
     "auth/OwnableRoles",
 ]
