@@ -60,6 +60,7 @@ LIBRARIES = [
     "tokens/ERC6909",
     "auth/Ownable",
     "auth/OwnableRoles",
+    "accounts/Receiver",
 ]
 
 
