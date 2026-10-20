@@ -6,6 +6,11 @@ import {EnumerableSetLib} from "./EnumerableSetLib.sol";
 /// @notice Library for managing enumerable maps in storage.
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/utils/EnumerableMapLib.sol)
 /// @author Modified from OpenZeppelin (https://github.com/OpenZeppelin/openzeppelin-contracts/blob/master/contracts/utils/structs/EnumerableMap.sol)
+/// @dev The checked port keeps upstream's storage layout: a map is a key set of the checked
+/// `EnumerableSetLib` beside a Solidity mapping of values. Its only assembly reverted with
+/// `EnumerableMapKeyNotFound()`, which the port raises as a custom error, so it needs no
+/// trusted helpers.
+/// @custom:solar-safe memory arithmetic
 library EnumerableMapLib {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                       CUSTOM ERRORS                        */
@@ -829,10 +834,6 @@ library EnumerableMapLib {
 
     /// @dev Reverts with `EnumerableMapKeyNotFound()`.
     function _revertNotFound() private pure {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x00, 0x88682bf3) // `EnumerableMapKeyNotFound()`.
-            revert(0x1c, 0x04)
-        }
+        revert EnumerableMapKeyNotFound();
     }
 }
