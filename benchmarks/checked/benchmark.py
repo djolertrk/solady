@@ -482,9 +482,7 @@ def prepare(
             row["library"] + "." + row["signature"] for row in harness_apis
         ],
         "isolated_harness": isolate,
-        "library_count": sum(
-            1 for p in safe if p != "Harness.sol" and not p.startswith(CORE_PREFIX)
-        ),
+        "library_count": sum(1 for p in safe if p != "Harness.sol"),
         "total_source_files": len(inventory),
     }
     (out / "api-coverage.json").write_text(json.dumps(audit, indent=2) + "\n")
