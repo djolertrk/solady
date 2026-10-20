@@ -29,14 +29,14 @@ from benchmark import (
     digest,
 )
 
-# MerkleProofLib's suite calls the `empty*` functions the port leaves out, and
-# EfficientHashLib's checks that `free` moves the free-memory pointer back.
+# EfficientHashLib's suite checks that `free` moves the free-memory pointer back.
 LIBRARIES = [
     "SafeCastLib",
     "LibBit",
     "Base64",
     "ECDSA",
     "SignatureCheckerLib",
+    "MerkleProofLib",
     "tokens/ERC20",
 ]
 

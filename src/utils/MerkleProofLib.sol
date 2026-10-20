@@ -159,4 +159,37 @@ library MerkleProofLib {
         }
         return (used == proof.length, hashes[back - 1]);
     }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                   EMPTY CALLDATA HELPERS                   */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev Returns an empty calldata bytes32 array.
+    /// Solidity cannot spell a calldata array of its own, so this keeps the
+    /// upstream assembly.
+    /// @custom:solar-trusted
+    function emptyProof() internal pure returns (bytes32[] calldata proof) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            proof.length := 0
+        }
+    }
+
+    /// @dev Returns an empty calldata bytes32 array.
+    /// @custom:solar-trusted
+    function emptyLeaves() internal pure returns (bytes32[] calldata leaves) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            leaves.length := 0
+        }
+    }
+
+    /// @dev Returns an empty calldata bool array.
+    /// @custom:solar-trusted
+    function emptyFlags() internal pure returns (bool[] calldata flags) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            flags.length := 0
+        }
+    }
 }
