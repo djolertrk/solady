@@ -29,6 +29,16 @@ pragma solidity ^0.8.4;
 ///
 /// Names are deliberately prefixed with "Timed", so that this contract
 /// can be used in conjunction with EnumerableRoles without collisions.
+///
+/// The checked port keeps each active time range in the assembly's slot and word, so it
+/// is storage-compatible with it. It derives the slot in Solidity as an
+/// `abi.encodePacked` hash; Solidity cannot name it, so two trusted helpers read and
+/// write a slot. The self-staticcalls to `owner()` and `MAX_TIMED_ROLE()` are plain
+/// low-level calls whose first returned word is compared, the timed roles in
+/// `encodedTimeRoles` are read a word at a time, and the event and errors are ordinary
+/// emits and reverts. The private helpers carry the contract's name, as upstream's do,
+/// so that it still combines with Ownable and EnumerableRoles.
+/// @custom:solar-safe memory arithmetic
 abstract contract TimedRoles {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                           EVENTS                           */
@@ -101,16 +111,11 @@ abstract contract TimedRoles {
         virtual
         returns (bool isActive, uint40 start, uint40 expires)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x18, holder)
-            mstore(0x04, _TIMED_ROLES_SLOT_SEED)
-            mstore(0x00, timedRole)
-            let p := sload(keccak256(0x00, 0x38))
-            start := shr(216, p)
-            expires := and(0xffffffffff, p)
-            isActive := iszero(or(lt(timestamp(), start), gt(timestamp(), expires)))
-        }
+        uint256 p = _timedRolesSload(_timedRolesRangeSlot(holder, timedRole));
+        start = uint40(p >> 216);
+        expires = uint40(p);
+        // Active unless before the start or after the expiry, tested without branches.
+        isActive = (block.timestamp < start ? 1 : 0) | (block.timestamp > expires ? 1 : 0) == 0;
     }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -123,46 +128,24 @@ abstract contract TimedRoles {
         virtual
     {
         _validateTimedRole(timedRole);
-        /// @solidity memory-safe-assembly
-        assembly {
-            let holder_ := shl(96, holder)
-            if iszero(holder_) {
-                mstore(0x00, 0x093a136f) // `TimedRoleHolderIsZeroAddress()`.
-                revert(0x1c, 0x04)
-            }
-            // Clean the upper bits.
-            start := and(0xffffffffff, start)
-            expires := and(0xffffffffff, expires)
-            // Validate the range.
-            if lt(expires, start) {
-                mstore(0x00, 0x3304dd8c) // `InvalidTimedRoleRange()`.
-                revert(0x1c, 0x04)
-            }
-            // Store the range.
-            mstore(0x18, holder)
-            mstore(0x04, _TIMED_ROLES_SLOT_SEED)
-            mstore(0x00, timedRole)
-            sstore(keccak256(0x00, 0x38), or(shl(216, start), expires))
-            // Emit the {TimedRoleSet} event.
-            mstore(0x00, start)
-            mstore(0x20, expires)
-            log3(0x00, 0x40, _TIMED_ROLE_SET_EVENT_SIGNATURE, shr(96, holder_), timedRole)
-        }
+        if (holder == address(0)) revert TimedRoleHolderIsZeroAddress();
+        // Validate the range.
+        if (expires < start) revert InvalidTimedRoleRange();
+        // Store the range.
+        _timedRolesSstore(
+            _timedRolesRangeSlot(holder, timedRole), uint256(start) << 216 | uint256(expires)
+        );
+        // Emit the {TimedRoleSet} event.
+        emit TimedRoleSet(holder, timedRole, start, expires);
     }
 
     /// @dev Requires the timedRole is not greater than `MAX_TIMED_ROLE()`.
     /// If `MAX_TIMED_ROLE()` is not implemented, this is an no-op.
     function _validateTimedRole(uint256 timedRole) internal view virtual {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x00, 0x32bc6439) // `MAX_TIMED_ROLE()`.
-            if and(
-                and(gt(timedRole, mload(0x00)), gt(returndatasize(), 0x1f)),
-                staticcall(gas(), address(), 0x1c, 0x04, 0x00, 0x20)
-            ) {
-                mstore(0x00, 0x802ee27f) // `InvalidTimedRole()`.
-                revert(0x1c, 0x04)
-            }
+        (bool success, bytes memory answer) =
+            address(this).staticcall(abi.encodeWithSelector(0x32bc6439)); // `MAX_TIMED_ROLE()`.
+        if (success && answer.length >= 0x20) {
+            if (timedRole > uint256(_timedRolesReadBytes32(answer, 0))) revert InvalidTimedRole();
         }
     }
 
@@ -184,19 +167,15 @@ abstract contract TimedRoles {
         virtual
         returns (bool result)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x18, holder)
-            mstore(0x04, _TIMED_ROLES_SLOT_SEED)
-            let end := add(encodedTimeRoles, shl(5, shr(5, mload(encodedTimeRoles))))
-            for {} lt(result, lt(encodedTimeRoles, end)) {} {
-                encodedTimeRoles := add(0x20, encodedTimeRoles)
-                mstore(0x00, mload(encodedTimeRoles))
-                let p := sload(keccak256(0x00, 0x38))
-                result := iszero(
-                    or(lt(timestamp(), shr(216, p)), gt(timestamp(), and(0xffffffffff, p)))
-                )
-            }
+        // Each whole word is a timed role; the bytes past the last whole word are ignored.
+        uint256 n = encodedTimeRoles.length >> 5;
+        for (uint256 i; i < n; ++i) {
+            uint256 timedRole = uint256(_timedRolesReadBytes32(encodedTimeRoles, i << 5));
+            uint256 p = _timedRolesSload(_timedRolesRangeSlot(holder, timedRole));
+            // Active unless before the start or after the expiry, tested without branches.
+            uint256 inactive =
+                (block.timestamp < p >> 216 ? 1 : 0) | (block.timestamp > uint40(p) ? 1 : 0);
+            if (inactive == 0) return true;
         }
     }
 
@@ -261,22 +240,59 @@ abstract contract TimedRoles {
     /// @dev Returns if the `msg.sender` is equal to `owner()` on this contract.
     /// If the contract does not have `owner()` implemented, returns false.
     function _timedRolesSenderIsContractOwner() private view returns (bool result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x00, 0x8da5cb5b) // `owner()`.
-            result := and(
-                and(eq(caller(), mload(0x00)), gt(returndatasize(), 0x1f)),
-                staticcall(gas(), address(), 0x1c, 0x04, 0x00, 0x20)
-            )
-        }
+        (bool success, bytes memory answer) =
+            address(this).staticcall(abi.encodeWithSelector(0x8da5cb5b)); // `owner()`.
+        result = success && answer.length >= 0x20
+            && uint256(_timedRolesReadBytes32(answer, 0)) == uint256(uint160(msg.sender));
     }
 
     /// @dev Reverts with `TimedRolesUnauthorized()`.
+    /// @custom:solar-terminates
     function _revertTimedRolesUnauthorized() private pure {
+        revert TimedRolesUnauthorized();
+    }
+
+    /// @dev The active time range slot of `timedRole` for `holder`: the hash of `timedRole`,
+    /// the seed's four bytes and the holder's twenty, which pack into one item.
+    /// @custom:solar-inline
+    function _timedRolesRangeSlot(address holder, uint256 timedRole)
+        private
+        pure
+        returns (uint256)
+    {
+        uint256 seedAndHolder = _TIMED_ROLES_SLOT_SEED << 160 | uint160(holder);
+        return uint256(keccak256(abi.encodePacked(timedRole, uint192(seedAndHolder))));
+    }
+
+    /// @dev The 32 bytes of `b` at `offset`.
+    /// @custom:solar-inline
+    function _timedRolesReadBytes32(bytes memory b, uint256 offset)
+        private
+        pure
+        returns (bytes32 result)
+    {
+        for (uint256 k; k < 32; ++k) {
+            result |= bytes32(b[offset + k]) >> (8 * k);
+        }
+    }
+
+    /// @dev Returns the word in storage slot `slot`. Solidity cannot name a slot it did not
+    /// allocate.
+    /// @custom:solar-trusted
+    function _timedRolesSload(uint256 slot) private view returns (uint256 value) {
         /// @solidity memory-safe-assembly
         assembly {
-            mstore(0x00, 0xb0c7b036) // `TimedRolesUnauthorized()`.
-            revert(0x1c, 0x04)
+            value := sload(slot)
+        }
+    }
+
+    /// @dev Stores `value` in storage slot `slot`. Solidity cannot name a slot it did not
+    /// allocate.
+    /// @custom:solar-trusted
+    function _timedRolesSstore(uint256 slot, uint256 value) private {
+        /// @solidity memory-safe-assembly
+        assembly {
+            sstore(slot, value)
         }
     }
 }
