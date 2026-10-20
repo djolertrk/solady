@@ -26,9 +26,9 @@ pragma solidity ^0.8.20;
 /// The checked port keeps upstream's storage slots, read and written through two
 /// trusted helpers, and derives them in Solidity: the slot hashes are
 /// `abi.encodePacked` words, and the ownership slot adds twice the id with
-/// wrap-around, through a trusted `_add`, as the assembly does. Every check keeps
+/// wrap-around, through a trusted `_erc721Add`, as the assembly does. Every check keeps
 /// its order and custom error, the events are ordinary emits, and the receiver
-/// check is a plain call whose revert data the trusted `_revertWith` bubbles up.
+/// check is a plain call whose revert data the trusted `_erc721RevertWith` bubbles up.
 /// A sender's balance is decremented with checked arithmetic, which only an
 /// override that breaks the balance invariant above can make revert.
 /// @custom:solar-safe memory arithmetic
@@ -154,7 +154,7 @@ abstract contract ERC721 {
     function balanceOf(address owner) public view virtual returns (uint256 result) {
         // Revert if the `owner` is the zero address.
         if (owner == address(0)) revert BalanceQueryForZeroAddress();
-        result = _sload(_balanceSlot(owner)) & _MAX_ACCOUNT_BALANCE;
+        result = _erc721Sload(_erc721BalanceSlot(owner)) & _MAX_ACCOUNT_BALANCE;
     }
 
     /// @dev Returns the account approved to manage token `id`.
@@ -162,9 +162,9 @@ abstract contract ERC721 {
     /// Requirements:
     /// - Token `id` must exist.
     function getApproved(uint256 id) public view virtual returns (address result) {
-        uint256 ownershipSlot = _ownershipSlot(id);
-        if (uint160(_sload(ownershipSlot)) == 0) revert TokenDoesNotExist();
-        result = address(uint160(_sload(_add(ownershipSlot, 1))));
+        uint256 ownershipSlot = _erc721OwnershipSlot(id);
+        if (uint160(_erc721Sload(ownershipSlot)) == 0) revert TokenDoesNotExist();
+        result = address(uint160(_erc721Sload(_erc721Add(ownershipSlot, 1))));
     }
 
     /// @dev Sets `account` as the approved account to manage token `id`.
@@ -186,7 +186,7 @@ abstract contract ERC721 {
         virtual
         returns (bool result)
     {
-        result = _sload(_operatorApprovalSlot(owner, operator)) != 0;
+        result = _erc721Sload(_erc721OperatorApprovalSlot(owner, operator)) != 0;
     }
 
     /// @dev Sets whether `operator` is approved to manage the tokens of the caller.
@@ -194,7 +194,7 @@ abstract contract ERC721 {
     /// Emits an {ApprovalForAll} event.
     function setApprovalForAll(address operator, bool isApproved) public virtual {
         // Update the `isApproved` for (`msg.sender`, `operator`).
-        _sstore(_operatorApprovalSlot(msg.sender, operator), isApproved ? 1 : 0);
+        _erc721Sstore(_erc721OperatorApprovalSlot(msg.sender, operator), isApproved ? 1 : 0);
         emit ApprovalForAll(msg.sender, operator, isApproved);
     }
 
@@ -210,7 +210,7 @@ abstract contract ERC721 {
     /// Emits a {Transfer} event.
     function transferFrom(address from, address to, uint256 id) public payable virtual {
         _beforeTokenTransfer(from, to, id);
-        _move(msg.sender, from, to, id);
+        _erc721Move(msg.sender, from, to, id);
         _afterTokenTransfer(from, to, id);
     }
 
@@ -255,13 +255,13 @@ abstract contract ERC721 {
 
     /// @dev Returns if token `id` exists.
     function _exists(uint256 id) internal view virtual returns (bool result) {
-        result = uint160(_sload(_ownershipSlot(id))) != 0;
+        result = uint160(_erc721Sload(_erc721OwnershipSlot(id))) != 0;
     }
 
     /// @dev Returns the owner of token `id`.
     /// Returns the zero address instead of reverting if the token does not exist.
     function _ownerOf(uint256 id) internal view virtual returns (address result) {
-        result = address(uint160(_sload(_ownershipSlot(id))));
+        result = address(uint160(_erc721Sload(_erc721OwnershipSlot(id))));
     }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -275,32 +275,32 @@ abstract contract ERC721 {
     /// Minting, transferring, burning the tokens of `owner` will not change the auxiliary data.
     /// Auxiliary data can be set for any address, even if it does not have any tokens.
     function _getAux(address owner) internal view virtual returns (uint224 result) {
-        result = uint224(_sload(_balanceSlot(owner)) >> 32);
+        result = uint224(_erc721Sload(_erc721BalanceSlot(owner)) >> 32);
     }
 
     /// @dev Set the auxiliary data for `owner` to `value`.
     /// Minting, transferring, burning the tokens of `owner` will not change the auxiliary data.
     /// Auxiliary data can be set for any address, even if it does not have any tokens.
     function _setAux(address owner, uint224 value) internal virtual {
-        uint256 balanceSlot = _balanceSlot(owner);
-        uint256 packed = _sload(balanceSlot);
-        _sstore(balanceSlot, (packed & _MAX_ACCOUNT_BALANCE) | (uint256(value) << 32));
+        uint256 balanceSlot = _erc721BalanceSlot(owner);
+        uint256 packed = _erc721Sload(balanceSlot);
+        _erc721Sstore(balanceSlot, (packed & _MAX_ACCOUNT_BALANCE) | (uint256(value) << 32));
     }
 
     /// @dev Returns the extra data for token `id`.
     /// Minting, transferring, burning a token will not change the extra data.
     /// The extra data can be set on a non-existent token.
     function _getExtraData(uint256 id) internal view virtual returns (uint96 result) {
-        result = uint96(_sload(_ownershipSlot(id)) >> 160);
+        result = uint96(_erc721Sload(_erc721OwnershipSlot(id)) >> 160);
     }
 
     /// @dev Sets the extra data for token `id` to `value`.
     /// Minting, transferring, burning a token will not change the extra data.
     /// The extra data can be set on a non-existent token.
     function _setExtraData(uint256 id, uint96 value) internal virtual {
-        uint256 ownershipSlot = _ownershipSlot(id);
-        uint256 packed = _sload(ownershipSlot);
-        _sstore(ownershipSlot, uint256(uint160(packed)) | (uint256(value) << 160));
+        uint256 ownershipSlot = _erc721OwnershipSlot(id);
+        uint256 packed = _erc721Sload(ownershipSlot);
+        _erc721Sstore(ownershipSlot, uint256(uint160(packed)) | (uint256(value) << 160));
     }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -317,14 +317,14 @@ abstract contract ERC721 {
     /// Emits a {Transfer} event.
     function _mint(address to, uint256 id) internal virtual {
         _beforeTokenTransfer(address(0), to, id);
-        uint256 ownershipSlot = _ownershipSlot(id);
-        uint256 ownershipPacked = _sload(ownershipSlot);
+        uint256 ownershipSlot = _erc721OwnershipSlot(id);
+        uint256 ownershipPacked = _erc721Sload(ownershipSlot);
         // Revert if the token already exists.
         if (uint160(ownershipPacked) != 0) revert TokenAlreadyExists();
         // Update with the owner.
-        _sstore(ownershipSlot, ownershipPacked | uint256(uint160(to)));
+        _erc721Sstore(ownershipSlot, ownershipPacked | uint256(uint160(to)));
         // Increment the balance of the owner.
-        _incrementBalance(to);
+        _erc721IncrementBalance(to);
         emit Transfer(address(0), to, id);
         _afterTokenTransfer(address(0), to, id);
     }
@@ -340,9 +340,9 @@ abstract contract ERC721 {
     function _mintAndSetExtraDataUnchecked(address to, uint256 id, uint96 value) internal virtual {
         _beforeTokenTransfer(address(0), to, id);
         // Update with the owner and extra data.
-        _sstore(_ownershipSlot(id), (uint256(value) << 160) | uint256(uint160(to)));
+        _erc721Sstore(_erc721OwnershipSlot(id), (uint256(value) << 160) | uint256(uint160(to)));
         // Increment the balance of the owner.
-        _incrementBalance(to);
+        _erc721IncrementBalance(to);
         emit Transfer(address(0), to, id);
         _afterTokenTransfer(address(0), to, id);
     }
@@ -388,27 +388,29 @@ abstract contract ERC721 {
     function _burn(address by, uint256 id) internal virtual {
         address owner = ownerOf(id);
         _beforeTokenTransfer(owner, address(0), id);
-        uint256 ownershipSlot = _ownershipSlot(id);
-        uint256 ownershipPacked = _sload(ownershipSlot);
+        uint256 ownershipSlot = _erc721OwnershipSlot(id);
+        uint256 ownershipPacked = _erc721Sload(ownershipSlot);
         // Reload the owner in case it is changed in `_beforeTokenTransfer`.
         owner = address(uint160(ownershipPacked));
         // Revert if the token does not exist.
         if (owner == address(0)) revert TokenDoesNotExist();
         // Load and check the token approval.
-        uint256 approvedSlot = _add(ownershipSlot, 1);
-        uint256 approvedAddress = _sload(approvedSlot);
+        uint256 approvedSlot = _erc721Add(ownershipSlot, 1);
+        uint256 approvedAddress = _erc721Sload(approvedSlot);
         // If `by` is not the zero address, do the authorization check.
         // Revert if the `by` is not the owner, nor approved.
         if (by != address(0) && by != owner && uint256(uint160(by)) != approvedAddress) {
-            if (_sload(_operatorApprovalSlot(owner, by)) == 0) revert NotOwnerNorApproved();
+            if (_erc721Sload(_erc721OperatorApprovalSlot(owner, by)) == 0) {
+                revert NotOwnerNorApproved();
+            }
         }
         // Delete the approved address if any.
-        if (approvedAddress != 0) _sstore(approvedSlot, 0);
+        if (approvedAddress != 0) _erc721Sstore(approvedSlot, 0);
         // Clear the owner.
-        _sstore(ownershipSlot, ownershipPacked ^ uint256(uint160(owner)));
+        _erc721Sstore(ownershipSlot, ownershipPacked ^ uint256(uint160(owner)));
         // Decrement the balance of `owner`.
-        uint256 balanceSlot = _balanceSlot(owner);
-        _sstore(balanceSlot, _sload(balanceSlot) - 1);
+        uint256 balanceSlot = _erc721BalanceSlot(owner);
+        _erc721Sstore(balanceSlot, _erc721Sload(balanceSlot) - 1);
         emit Transfer(owner, address(0), id);
         _afterTokenTransfer(owner, address(0), id);
     }
@@ -428,15 +430,15 @@ abstract contract ERC721 {
         returns (bool result)
     {
         result = true;
-        uint256 ownershipSlot = _ownershipSlot(id);
-        address owner = address(uint160(_sload(ownershipSlot)));
+        uint256 ownershipSlot = _erc721OwnershipSlot(id);
+        address owner = address(uint160(_erc721Sload(ownershipSlot)));
         // Revert if the token does not exist.
         if (owner == address(0)) revert TokenDoesNotExist();
         // Check if `account` is the `owner`.
         if (account != owner) {
             // Check if `account` is approved to manage the token.
-            if (_sload(_operatorApprovalSlot(owner, account)) == 0) {
-                result = uint256(uint160(account)) == _sload(_add(ownershipSlot, 1));
+            if (_erc721Sload(_erc721OperatorApprovalSlot(owner, account)) == 0) {
+                result = uint256(uint160(account)) == _erc721Sload(_erc721Add(ownershipSlot, 1));
             }
         }
     }
@@ -444,7 +446,7 @@ abstract contract ERC721 {
     /// @dev Returns the account approved to manage token `id`.
     /// Returns the zero address instead of reverting if the token does not exist.
     function _getApproved(uint256 id) internal view virtual returns (address result) {
-        result = address(uint160(_sload(_add(_ownershipSlot(id), 1))));
+        result = address(uint160(_erc721Sload(_erc721Add(_erc721OwnershipSlot(id), 1))));
     }
 
     /// @dev Equivalent to `_approve(address(0), account, id)`.
@@ -462,17 +464,19 @@ abstract contract ERC721 {
     /// Emits a {Approval} event.
     function _approve(address by, address account, uint256 id) internal virtual {
         // Load the owner of the token.
-        uint256 ownershipSlot = _ownershipSlot(id);
-        address owner = address(uint160(_sload(ownershipSlot)));
+        uint256 ownershipSlot = _erc721OwnershipSlot(id);
+        address owner = address(uint160(_erc721Sload(ownershipSlot)));
         // Revert if the token does not exist.
         if (owner == address(0)) revert TokenDoesNotExist();
         // If `by` is not the zero address, do the authorization check.
         // Revert if `by` is not the owner, nor approved.
         if (by != address(0) && by != owner) {
-            if (_sload(_operatorApprovalSlot(owner, by)) == 0) revert NotOwnerNorApproved();
+            if (_erc721Sload(_erc721OperatorApprovalSlot(owner, by)) == 0) {
+                revert NotOwnerNorApproved();
+            }
         }
         // Sets `account` as the approved account to manage `id`.
-        _sstore(_add(ownershipSlot, 1), uint256(uint160(account)));
+        _erc721Sstore(_erc721Add(ownershipSlot, 1), uint256(uint160(account)));
         emit Approval(owner, account, id);
     }
 
@@ -482,7 +486,7 @@ abstract contract ERC721 {
     /// Emits an {ApprovalForAll} event.
     function _setApprovalForAll(address by, address operator, bool isApproved) internal virtual {
         // Update the `isApproved` for (`by`, `operator`).
-        _sstore(_operatorApprovalSlot(by, operator), isApproved ? 1 : 0);
+        _erc721Sstore(_erc721OperatorApprovalSlot(by, operator), isApproved ? 1 : 0);
         emit ApprovalForAll(by, operator, isApproved);
     }
 
@@ -508,7 +512,7 @@ abstract contract ERC721 {
     /// Emits a {Transfer} event.
     function _transfer(address by, address from, address to, uint256 id) internal virtual {
         _beforeTokenTransfer(from, to, id);
-        _move(by, from, to, id);
+        _erc721Move(by, from, to, id);
         _afterTokenTransfer(from, to, id);
     }
 
@@ -591,7 +595,7 @@ abstract contract ERC721 {
         (bool success, bytes memory answer) =
             to.call(abi.encodeWithSelector(0x150b7a02, msg.sender, from, id, data));
         // Bubble up the revert if the call reverts.
-        if (!success && answer.length != 0) _revertWith(answer);
+        if (!success && answer.length != 0) _erc721RevertWith(answer);
         // Load the returndata and compare it.
         if (answer.length < 0x20 || abi.decode(answer, (bytes32)) != bytes32(bytes4(0x150b7a02))) {
             revert TransferToNonERC721ReceiverImplementer();
@@ -600,64 +604,72 @@ abstract contract ERC721 {
 
     /// @dev Moves token `id` from `from` to `to`, as `by` if it is not the zero address,
     /// between the transfer hooks of `transferFrom` and `_transfer`.
-    function _move(address by, address from, address to, uint256 id) private {
+    function _erc721Move(address by, address from, address to, uint256 id) private {
         // Load the ownership data.
-        uint256 ownershipSlot = _ownershipSlot(id);
-        uint256 ownershipPacked = _sload(ownershipSlot);
+        uint256 ownershipSlot = _erc721OwnershipSlot(id);
+        uint256 ownershipPacked = _erc721Sload(ownershipSlot);
         address owner = address(uint160(ownershipPacked));
         // Revert if the token does not exist, or if `from` is not the owner.
         if (owner == address(0)) revert TokenDoesNotExist();
         if (owner != from) revert TransferFromIncorrectOwner();
         // Load, check, and update the token approval.
-        uint256 approvedSlot = _add(ownershipSlot, 1);
-        uint256 approvedAddress = _sload(approvedSlot);
+        uint256 approvedSlot = _erc721Add(ownershipSlot, 1);
+        uint256 approvedAddress = _erc721Sload(approvedSlot);
         // If `by` is not the zero address, do the authorization check.
         // Revert if the `by` is not the owner, nor approved.
         if (by != address(0) && by != from && uint256(uint160(by)) != approvedAddress) {
-            if (_sload(_operatorApprovalSlot(from, by)) == 0) revert NotOwnerNorApproved();
+            if (_erc721Sload(_erc721OperatorApprovalSlot(from, by)) == 0) {
+                revert NotOwnerNorApproved();
+            }
         }
         // Delete the approved address if any.
-        if (approvedAddress != 0) _sstore(approvedSlot, 0);
+        if (approvedAddress != 0) _erc721Sstore(approvedSlot, 0);
         // Update with the new owner.
-        _sstore(ownershipSlot, ownershipPacked ^ uint256(uint160(from)) ^ uint256(uint160(to)));
+        _erc721Sstore(
+            ownershipSlot, ownershipPacked ^ uint256(uint160(from)) ^ uint256(uint160(to))
+        );
         // Decrement the balance of `from`.
-        uint256 fromBalanceSlot = _balanceSlot(from);
-        _sstore(fromBalanceSlot, _sload(fromBalanceSlot) - 1);
+        uint256 fromBalanceSlot = _erc721BalanceSlot(from);
+        _erc721Sstore(fromBalanceSlot, _erc721Sload(fromBalanceSlot) - 1);
         // Increment the balance of `to`.
-        _incrementBalance(to);
+        _erc721IncrementBalance(to);
         emit Transfer(from, to, id);
     }
 
     /// @dev Adds one token to the balance of `to`.
     /// Reverts if `to` is the zero address, or if the account balance overflows.
-    function _incrementBalance(address to) private {
-        uint256 balanceSlot = _balanceSlot(to);
-        uint256 balanceSlotPacked = _sload(balanceSlot);
+    function _erc721IncrementBalance(address to) private {
+        uint256 balanceSlot = _erc721BalanceSlot(to);
+        uint256 balanceSlotPacked = _erc721Sload(balanceSlot);
         if (to == address(0)) revert TransferToZeroAddress();
         if (balanceSlotPacked & _MAX_ACCOUNT_BALANCE == _MAX_ACCOUNT_BALANCE) {
             revert AccountBalanceOverflow();
         }
         // The balance bits are below their maximum, so the increment stays in them.
-        _sstore(balanceSlot, _add(balanceSlotPacked, 1));
+        _erc721Sstore(balanceSlot, _erc721Add(balanceSlotPacked, 1));
     }
 
     /// @dev The ownership data slot of `id`: the hash of `id` with its last four bytes
     /// replaced by the seed's first four, plus twice `id`, wrapping.
     /// @custom:solar-inline
-    function _ownershipSlot(uint256 id) private pure returns (uint256) {
+    function _erc721OwnershipSlot(uint256 id) private pure returns (uint256) {
         bytes32 h = keccak256(abi.encode((id >> 32 << 32) | (_ERC721_MASTER_SLOT_SEED >> 224)));
-        return _add(uint256(h), id << 1);
+        return _erc721Add(uint256(h), id << 1);
     }
 
     /// @dev The balance slot of `owner`.
     /// @custom:solar-inline
-    function _balanceSlot(address owner) private pure returns (uint256) {
+    function _erc721BalanceSlot(address owner) private pure returns (uint256) {
         return uint256(keccak256(abi.encodePacked(owner, uint64(_ERC721_MASTER_SLOT_SEED_MASKED))));
     }
 
     /// @dev The `operator` approval slot of `owner`.
     /// @custom:solar-inline
-    function _operatorApprovalSlot(address owner, address operator) private pure returns (uint256) {
+    function _erc721OperatorApprovalSlot(address owner, address operator)
+        private
+        pure
+        returns (uint256)
+    {
         return uint256(
             keccak256(abi.encodePacked(owner, uint64(_ERC721_MASTER_SLOT_SEED_MASKED), operator))
         );
@@ -665,7 +677,7 @@ abstract contract ERC721 {
 
     /// @dev Returns the word in storage slot `slot`.
     /// @custom:solar-trusted
-    function _sload(uint256 slot) private view returns (uint256 value) {
+    function _erc721Sload(uint256 slot) private view returns (uint256 value) {
         /// @solidity memory-safe-assembly
         assembly {
             value := sload(slot)
@@ -674,7 +686,7 @@ abstract contract ERC721 {
 
     /// @dev Stores `value` in storage slot `slot`.
     /// @custom:solar-trusted
-    function _sstore(uint256 slot, uint256 value) private {
+    function _erc721Sstore(uint256 slot, uint256 value) private {
         /// @solidity memory-safe-assembly
         assembly {
             sstore(slot, value)
@@ -683,7 +695,7 @@ abstract contract ERC721 {
 
     /// @dev `a + b` modulo `2**256`.
     /// @custom:solar-trusted
-    function _add(uint256 a, uint256 b) private pure returns (uint256 c) {
+    function _erc721Add(uint256 a, uint256 b) private pure returns (uint256 c) {
         unchecked {
             c = a + b;
         }
@@ -691,7 +703,7 @@ abstract contract ERC721 {
 
     /// @dev Reverts with `revertData`.
     /// @custom:solar-trusted
-    function _revertWith(bytes memory revertData) private pure {
+    function _erc721RevertWith(bytes memory revertData) private pure {
         /// @solidity memory-safe-assembly
         assembly {
             revert(add(revertData, 0x20), mload(revertData))

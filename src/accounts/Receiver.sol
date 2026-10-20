@@ -42,7 +42,7 @@ abstract contract Receiver {
             // 0xf23a6e61: `onERC1155Received(address,address,uint256,uint256,bytes)`.
             // 0xbc197c81: `onERC1155BatchReceived(address,address,uint256[],uint256[],bytes)`.
             if (s == 0x150b7a02 || s == 0xf23a6e61 || s == 0xbc197c81) {
-                _returnWord(bytes32(s)); // Return `msg.sig`.
+                _receiverReturnWord(bytes32(s)); // Return `msg.sig`.
             }
         }
         _afterReceiverFallbackBody();
@@ -67,7 +67,7 @@ abstract contract Receiver {
     /// @dev Ends the call, returning `word` as its whole return data. Solidity returns
     /// data only from a function that declares it.
     /// @custom:solar-trusted
-    function _returnWord(bytes32 word) private pure {
+    function _receiverReturnWord(bytes32 word) private pure {
         /// @solidity memory-safe-assembly
         assembly {
             mstore(0x00, word)

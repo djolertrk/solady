@@ -101,11 +101,11 @@ abstract contract Ownable {
     function _initializeOwner(address newOwner) internal virtual {
         uint256 word = uint256(uint160(newOwner));
         if (_guardInitializeOwner()) {
-            if (_sload(uint256(_OWNER_SLOT)) != 0) revert AlreadyInitialized();
+            if (_ownableSload(uint256(_OWNER_SLOT)) != 0) revert AlreadyInitialized();
             // A zero owner keeps the slot nonzero, so it stays initialized.
             if (word == 0) word = 1 << 255;
         }
-        _sstore(uint256(_OWNER_SLOT), word);
+        _ownableSstore(uint256(_OWNER_SLOT), word);
         emit OwnershipTransferred(address(0), newOwner);
     }
 
@@ -113,14 +113,16 @@ abstract contract Ownable {
     function _setOwner(address newOwner) internal virtual {
         uint256 word = uint256(uint160(newOwner));
         if (_guardInitializeOwner() && word == 0) word = 1 << 255;
-        _logOwnershipTransferred(_sload(uint256(_OWNER_SLOT)), newOwner);
-        _sstore(uint256(_OWNER_SLOT), word);
+        _ownableLogOwnershipTransferred(_ownableSload(uint256(_OWNER_SLOT)), newOwner);
+        _ownableSstore(uint256(_OWNER_SLOT), word);
     }
 
     /// @dev Throws if the sender is not the owner.
     function _checkOwner() internal view virtual {
         // A renounced owner's word has its top bit set, which no caller matches.
-        if (uint256(uint160(msg.sender)) != _sload(uint256(_OWNER_SLOT))) revert Unauthorized();
+        if (uint256(uint160(msg.sender)) != _ownableSload(uint256(_OWNER_SLOT))) {
+            revert Unauthorized();
+        }
     }
 
     /// @dev Returns how long a two-step ownership handover is valid for in seconds.
@@ -149,23 +151,23 @@ abstract contract Ownable {
     /// The request will automatically expire in 48 hours (172800 seconds) by default.
     function requestOwnershipHandover() public payable virtual {
         uint256 expires = block.timestamp + _ownershipHandoverValidFor();
-        _sstore(_handoverSlot(msg.sender), expires);
+        _ownableSstore(_ownableHandoverSlot(msg.sender), expires);
         emit OwnershipHandoverRequested(msg.sender);
     }
 
     /// @dev Cancels the two-step ownership handover to the caller, if any.
     function cancelOwnershipHandover() public payable virtual {
-        _sstore(_handoverSlot(msg.sender), 0);
+        _ownableSstore(_ownableHandoverSlot(msg.sender), 0);
         emit OwnershipHandoverCanceled(msg.sender);
     }
 
     /// @dev Allows the owner to complete the two-step ownership handover to `pendingOwner`.
     /// Reverts if there is no existing ownership handover requested by `pendingOwner`.
     function completeOwnershipHandover(address pendingOwner) public payable virtual onlyOwner {
-        uint256 handoverSlot = _handoverSlot(pendingOwner);
+        uint256 handoverSlot = _ownableHandoverSlot(pendingOwner);
         // If the handover does not exist, or has expired.
-        if (block.timestamp > _sload(handoverSlot)) revert NoHandoverRequest();
-        _sstore(handoverSlot, 0);
+        if (block.timestamp > _ownableSload(handoverSlot)) revert NoHandoverRequest();
+        _ownableSstore(handoverSlot, 0);
         _setOwner(pendingOwner);
     }
 
@@ -175,7 +177,7 @@ abstract contract Ownable {
 
     /// @dev Returns the owner of the contract.
     function owner() public view virtual returns (address result) {
-        result = address(uint160(_sload(uint256(_OWNER_SLOT))));
+        result = address(uint160(_ownableSload(uint256(_OWNER_SLOT))));
     }
 
     /// @dev Returns the expiry timestamp for the two-step ownership handover to `pendingOwner`.
@@ -185,7 +187,7 @@ abstract contract Ownable {
         virtual
         returns (uint256 result)
     {
-        result = _sload(_handoverSlot(pendingOwner));
+        result = _ownableSload(_ownableHandoverSlot(pendingOwner));
     }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -204,7 +206,7 @@ abstract contract Ownable {
 
     /// @dev The handover slot of `pendingOwner`: the hash of its address over
     /// `_HANDOVER_SLOT_SEED`.
-    function _handoverSlot(address pendingOwner) private pure returns (uint256) {
+    function _ownableHandoverSlot(address pendingOwner) private pure returns (uint256) {
         return
             uint256(
                 keccak256(abi.encode(uint256(uint160(pendingOwner)) << 96 | _HANDOVER_SLOT_SEED))
@@ -213,7 +215,7 @@ abstract contract Ownable {
 
     /// @dev The word in storage slot `slot`. Solidity cannot name a slot it did not allocate.
     /// @custom:solar-trusted
-    function _sload(uint256 slot) private view returns (uint256 value) {
+    function _ownableSload(uint256 slot) private view returns (uint256 value) {
         /// @solidity memory-safe-assembly
         assembly {
             value := sload(slot)
@@ -222,7 +224,7 @@ abstract contract Ownable {
 
     /// @dev Stores `value` in storage slot `slot`.
     /// @custom:solar-trusted
-    function _sstore(uint256 slot, uint256 value) private {
+    function _ownableSstore(uint256 slot, uint256 value) private {
         /// @solidity memory-safe-assembly
         assembly {
             sstore(slot, value)
@@ -232,7 +234,7 @@ abstract contract Ownable {
     /// @dev Emits {OwnershipTransferred} with the owner slot's previous word as its first
     /// topic, which a guarded renouncement left with its top bit set.
     /// @custom:solar-trusted
-    function _logOwnershipTransferred(uint256 oldOwnerWord, address newOwner) private {
+    function _ownableLogOwnershipTransferred(uint256 oldOwnerWord, address newOwner) private {
         /// @solidity memory-safe-assembly
         assembly {
             log3(

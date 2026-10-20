@@ -2,7 +2,6 @@
 pragma solidity ^0.8.20;
 
 import {Ownable} from "./Ownable.sol";
-import {LibBit} from "../utils/LibBit.sol";
 
 /// @notice Simple single owner and multiroles authorization mixin.
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/auth/OwnableRoles.sol)
@@ -54,7 +53,7 @@ abstract contract OwnableRoles is Ownable {
 
     /// @dev Overwrite the roles directly without authorization guard.
     function _setRoles(address user, uint256 roles) internal virtual {
-        _storeAt(_roleSlot(user), roles);
+        _ownableRolesStoreAt(_ownableRolesRoleSlot(user), roles);
         emit RolesUpdated(user, roles);
     }
 
@@ -62,11 +61,11 @@ abstract contract OwnableRoles is Ownable {
     /// If `on` is true, each set bit of `roles` will be turned on,
     /// otherwise, each set bit of `roles` will be turned off.
     function _updateRoles(address user, uint256 roles, bool on) internal virtual {
-        uint256 roleSlot = _roleSlot(user);
-        uint256 current = _loadAt(roleSlot);
+        uint256 roleSlot = _ownableRolesRoleSlot(user);
+        uint256 current = _ownableRolesLoadAt(roleSlot);
         // Turn on each bit of `roles`, or flip the bits it shares with `current` off.
         uint256 updated = on ? current | roles : current ^ (current & roles);
-        _storeAt(roleSlot, updated);
+        _ownableRolesStoreAt(roleSlot, updated);
         emit RolesUpdated(user, updated);
     }
 
@@ -84,7 +83,9 @@ abstract contract OwnableRoles is Ownable {
 
     /// @dev Throws if the sender does not have any of the `roles`.
     function _checkRoles(uint256 roles) internal view virtual {
-        if (_loadAt(_roleSlot(msg.sender)) & roles == 0) revert Unauthorized();
+        if (_ownableRolesLoadAt(_ownableRolesRoleSlot(msg.sender)) & roles == 0) {
+            revert Unauthorized();
+        }
     }
 
     /// @dev Throws if the sender is not the owner,
@@ -92,8 +93,10 @@ abstract contract OwnableRoles is Ownable {
     /// Checks for ownership first, then lazily checks for roles.
     function _checkOwnerOrRoles(uint256 roles) internal view virtual {
         // The stored owner word, which a renouncement leaves unmatched by any caller.
-        if (uint256(uint160(msg.sender)) != _loadAt(uint256(_OWNER_SLOT))) {
-            if (_loadAt(_roleSlot(msg.sender)) & roles == 0) revert Unauthorized();
+        if (uint256(uint160(msg.sender)) != _ownableRolesLoadAt(uint256(_OWNER_SLOT))) {
+            if (_ownableRolesLoadAt(_ownableRolesRoleSlot(msg.sender)) & roles == 0) {
+                revert Unauthorized();
+            }
         }
     }
 
@@ -101,8 +104,8 @@ abstract contract OwnableRoles is Ownable {
     /// and is not the owner.
     /// Checks for roles first, then lazily checks for ownership.
     function _checkRolesOrOwner(uint256 roles) internal view virtual {
-        if (_loadAt(_roleSlot(msg.sender)) & roles == 0) {
-            if (uint256(uint160(msg.sender)) != _loadAt(uint256(_OWNER_SLOT))) {
+        if (_ownableRolesLoadAt(_ownableRolesRoleSlot(msg.sender)) & roles == 0) {
+            if (uint256(uint160(msg.sender)) != _ownableRolesLoadAt(uint256(_OWNER_SLOT))) {
                 revert Unauthorized();
             }
         }
@@ -123,8 +126,13 @@ abstract contract OwnableRoles is Ownable {
     /// Not recommended to be called on-chain.
     /// Made internal to conserve bytecode. Wrap it in a public function if needed.
     function _ordinalsFromRoles(uint256 roles) internal pure returns (uint8[] memory ordinals) {
-        ordinals = new uint8[](LibBit.popCount(roles));
+        // Count the set bits, clearing the lowest each step, then list their positions.
         uint256 n;
+        for (uint256 t = roles; t != 0; t &= t - 1) {
+            ++n;
+        }
+        ordinals = new uint8[](n);
+        n = 0;
         for (uint256 o; roles >> o != 0; ++o) {
             if ((roles >> o) & 1 != 0) ordinals[n++] = uint8(o);
         }
@@ -158,7 +166,7 @@ abstract contract OwnableRoles is Ownable {
 
     /// @dev Returns the roles of `user`.
     function rolesOf(address user) public view virtual returns (uint256 roles) {
-        roles = _loadAt(_roleSlot(user));
+        roles = _ownableRolesLoadAt(_ownableRolesRoleSlot(user));
     }
 
     /// @dev Returns whether `user` has any of `roles`.
@@ -463,13 +471,13 @@ abstract contract OwnableRoles is Ownable {
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     /// @dev The role slot of `user`: the hash of its address over `_ROLE_SLOT_SEED`.
-    function _roleSlot(address user) private pure returns (uint256) {
+    function _ownableRolesRoleSlot(address user) private pure returns (uint256) {
         return uint256(keccak256(abi.encode(uint256(uint160(user)) << 96 | _ROLE_SLOT_SEED)));
     }
 
     /// @dev The word in storage slot `slot`. Solidity cannot name a slot it did not allocate.
     /// @custom:solar-trusted
-    function _loadAt(uint256 slot) private view returns (uint256 value) {
+    function _ownableRolesLoadAt(uint256 slot) private view returns (uint256 value) {
         /// @solidity memory-safe-assembly
         assembly {
             value := sload(slot)
@@ -478,7 +486,7 @@ abstract contract OwnableRoles is Ownable {
 
     /// @dev Stores `value` in storage slot `slot`.
     /// @custom:solar-trusted
-    function _storeAt(uint256 slot, uint256 value) private {
+    function _ownableRolesStoreAt(uint256 slot, uint256 value) private {
         /// @solidity memory-safe-assembly
         assembly {
             sstore(slot, value)

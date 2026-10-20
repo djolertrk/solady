@@ -20,7 +20,7 @@ pragma solidity ^0.8.20;
 /// trusted helpers, and derives them in Solidity as `abi.encode` and
 /// `abi.encodePacked` hashes. Every check keeps its order and custom error, and the
 /// events are ordinary emits. A credit adds with wrap-around through a trusted
-/// `_add` and reverts if it wrapped, as the assembly does.
+/// `_erc6909Add` and reverts if it wrapped, as the assembly does.
 /// @custom:solar-safe memory arithmetic
 abstract contract ERC6909 {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -112,7 +112,7 @@ abstract contract ERC6909 {
 
     /// @dev Returns the amount of token `id` owned by `owner`.
     function balanceOf(address owner, uint256 id) public view virtual returns (uint256 amount) {
-        amount = _sload(_balanceSlot(owner, id));
+        amount = _erc6909Sload(_erc6909BalanceSlot(owner, id));
     }
 
     /// @dev Returns the amount of token `id` that `spender` can spend on behalf of `owner`.
@@ -122,12 +122,12 @@ abstract contract ERC6909 {
         virtual
         returns (uint256 amount)
     {
-        amount = _sload(_allowanceSlot(owner, spender, id));
+        amount = _erc6909Sload(_erc6909AllowanceSlot(owner, spender, id));
     }
 
     /// @dev Checks if a `spender` is approved by `owner` to manage all of their tokens.
     function isOperator(address owner, address spender) public view virtual returns (bool status) {
-        status = _sload(_operatorSlot(owner, spender)) != 0;
+        status = _erc6909Sload(_erc6909OperatorSlot(owner, spender)) != 0;
     }
 
     /// @dev Transfers `amount` of token `id` from the caller to `to`.
@@ -143,8 +143,8 @@ abstract contract ERC6909 {
         returns (bool)
     {
         _beforeTokenTransfer(msg.sender, to, id, amount);
-        _debit(msg.sender, id, amount);
-        _credit(to, id, amount);
+        _erc6909Debit(msg.sender, id, amount);
+        _erc6909Credit(to, id, amount);
         emit Transfer(msg.sender, msg.sender, to, id, amount);
         _afterTokenTransfer(msg.sender, to, id, amount);
         return true;
@@ -171,11 +171,11 @@ abstract contract ERC6909 {
     {
         _beforeTokenTransfer(from, to, id, amount);
         // Check if the caller is an operator.
-        if (_sload(_operatorSlot(from, msg.sender)) == 0) {
-            _spendAllowance(from, msg.sender, id, amount);
+        if (_erc6909Sload(_erc6909OperatorSlot(from, msg.sender)) == 0) {
+            _erc6909SpendAllowance(from, msg.sender, id, amount);
         }
-        _debit(from, id, amount);
-        _credit(to, id, amount);
+        _erc6909Debit(from, id, amount);
+        _erc6909Credit(to, id, amount);
         emit Transfer(msg.sender, from, to, id, amount);
         _afterTokenTransfer(from, to, id, amount);
         return true;
@@ -190,7 +190,7 @@ abstract contract ERC6909 {
         virtual
         returns (bool)
     {
-        _sstore(_allowanceSlot(msg.sender, spender, id), amount);
+        _erc6909Sstore(_erc6909AllowanceSlot(msg.sender, spender, id), amount);
         emit Approval(msg.sender, spender, id, amount);
         return true;
     }
@@ -199,7 +199,7 @@ abstract contract ERC6909 {
     ///
     /// Emits {OperatorSet} event.
     function setOperator(address operator, bool approved) public payable virtual returns (bool) {
-        _sstore(_operatorSlot(msg.sender, operator), approved ? 1 : 0);
+        _erc6909Sstore(_erc6909OperatorSlot(msg.sender, operator), approved ? 1 : 0);
         emit OperatorSet(msg.sender, operator, approved);
         return true;
     }
@@ -219,7 +219,7 @@ abstract contract ERC6909 {
     /// Emits a {Transfer} event.
     function _mint(address to, uint256 id, uint256 amount) internal virtual {
         _beforeTokenTransfer(address(0), to, id, amount);
-        _credit(to, id, amount);
+        _erc6909Credit(to, id, amount);
         emit Transfer(msg.sender, address(0), to, id, amount);
         _afterTokenTransfer(address(0), to, id, amount);
     }
@@ -229,7 +229,7 @@ abstract contract ERC6909 {
     /// Emits a {Transfer} event.
     function _burn(address from, uint256 id, uint256 amount) internal virtual {
         _beforeTokenTransfer(from, address(0), id, amount);
-        _debit(from, id, amount);
+        _erc6909Debit(from, id, amount);
         emit Transfer(msg.sender, from, address(0), id, amount);
         _afterTokenTransfer(from, address(0), id, amount);
     }
@@ -255,10 +255,12 @@ abstract contract ERC6909 {
         _beforeTokenTransfer(from, to, id, amount);
         // If `by` is not the zero address, check if it is an operator.
         if (by != address(0)) {
-            if (_sload(_operatorSlot(from, by)) == 0) _spendAllowance(from, by, id, amount);
+            if (_erc6909Sload(_erc6909OperatorSlot(from, by)) == 0) {
+                _erc6909SpendAllowance(from, by, id, amount);
+            }
         }
-        _debit(from, id, amount);
-        _credit(to, id, amount);
+        _erc6909Debit(from, id, amount);
+        _erc6909Credit(to, id, amount);
         emit Transfer(by, from, to, id, amount);
         _afterTokenTransfer(from, to, id, amount);
     }
@@ -267,7 +269,7 @@ abstract contract ERC6909 {
     ///
     /// Emits a {Approval} event.
     function _approve(address owner, address spender, uint256 id, uint256 amount) internal virtual {
-        _sstore(_allowanceSlot(owner, spender, id), amount);
+        _erc6909Sstore(_erc6909AllowanceSlot(owner, spender, id), amount);
         emit Approval(owner, spender, id, amount);
     }
 
@@ -275,7 +277,7 @@ abstract contract ERC6909 {
     ///
     /// Emits {OperatorSet} event.
     function _setOperator(address owner, address operator, bool approved) internal virtual {
-        _sstore(_operatorSlot(owner, operator), approved ? 1 : 0);
+        _erc6909Sstore(_erc6909OperatorSlot(owner, operator), approved ? 1 : 0);
         emit OperatorSet(owner, operator, approved);
     }
 
@@ -301,67 +303,69 @@ abstract contract ERC6909 {
 
     /// @dev Deducts `amount` from the allowance of `spender` for the `id` tokens of `owner`,
     /// unless the allowance is the maximum uint256 value.
-    function _spendAllowance(address owner, address spender, uint256 id, uint256 amount) private {
-        uint256 allowanceSlot = _allowanceSlot(owner, spender, id);
-        uint256 allowance_ = _sload(allowanceSlot);
+    function _erc6909SpendAllowance(address owner, address spender, uint256 id, uint256 amount)
+        private
+    {
+        uint256 allowanceSlot = _erc6909AllowanceSlot(owner, spender, id);
+        uint256 allowance_ = _erc6909Sload(allowanceSlot);
         // If the allowance is not the maximum uint256 value.
         if (allowance_ != type(uint256).max) {
             // Revert if the amount to be transferred exceeds the allowance.
             if (amount > allowance_) revert InsufficientPermission();
             // Subtract and store the updated allowance.
-            _sstore(allowanceSlot, allowance_ - amount);
+            _erc6909Sstore(allowanceSlot, allowance_ - amount);
         }
     }
 
     /// @dev Subtracts `amount` of `id` from the balance of `from`.
-    function _debit(address from, uint256 id, uint256 amount) private {
-        uint256 fromBalanceSlot = _balanceSlot(from, id);
-        uint256 fromBalance = _sload(fromBalanceSlot);
+    function _erc6909Debit(address from, uint256 id, uint256 amount) private {
+        uint256 fromBalanceSlot = _erc6909BalanceSlot(from, id);
+        uint256 fromBalance = _erc6909Sload(fromBalanceSlot);
         // Revert if insufficient balance.
         if (amount > fromBalance) revert InsufficientBalance();
-        _sstore(fromBalanceSlot, fromBalance - amount);
+        _erc6909Sstore(fromBalanceSlot, fromBalance - amount);
     }
 
     /// @dev Adds `amount` of `id` to the balance of `to`.
-    function _credit(address to, uint256 id, uint256 amount) private {
-        uint256 toBalanceSlot = _balanceSlot(to, id);
-        uint256 toBalanceBefore = _sload(toBalanceSlot);
-        uint256 toBalanceAfter = _add(toBalanceBefore, amount);
+    function _erc6909Credit(address to, uint256 id, uint256 amount) private {
+        uint256 toBalanceSlot = _erc6909BalanceSlot(to, id);
+        uint256 toBalanceBefore = _erc6909Sload(toBalanceSlot);
+        uint256 toBalanceAfter = _erc6909Add(toBalanceBefore, amount);
         // Revert if the balance overflows.
         if (toBalanceAfter < toBalanceBefore) revert BalanceOverflow();
-        _sstore(toBalanceSlot, toBalanceAfter);
+        _erc6909Sstore(toBalanceSlot, toBalanceAfter);
     }
 
     /// @dev The balance slot of `owner` for `id`.
     /// @custom:solar-inline
-    function _balanceSlot(address owner, uint256 id) private pure returns (uint256) {
-        return uint256(keccak256(abi.encode(id, _ownerSlotSeed(owner))));
+    function _erc6909BalanceSlot(address owner, uint256 id) private pure returns (uint256) {
+        return uint256(keccak256(abi.encode(id, _erc6909OwnerSlotSeed(owner))));
     }
 
     /// @dev The `operator` approval slot of `owner`.
     /// @custom:solar-inline
-    function _operatorSlot(address owner, address operator) private pure returns (uint256) {
-        return uint256(keccak256(abi.encodePacked(operator, _ownerSlotSeed(owner))));
+    function _erc6909OperatorSlot(address owner, address operator) private pure returns (uint256) {
+        return uint256(keccak256(abi.encodePacked(operator, _erc6909OwnerSlotSeed(owner))));
     }
 
     /// @dev The allowance slot of (`owner`, `spender`, `id`).
     /// @custom:solar-inline
-    function _allowanceSlot(address owner, address spender, uint256 id)
+    function _erc6909AllowanceSlot(address owner, address spender, uint256 id)
         private
         pure
         returns (uint256)
     {
-        return uint256(keccak256(abi.encodePacked(id, spender, _ownerSlotSeed(owner))));
+        return uint256(keccak256(abi.encodePacked(id, spender, _erc6909OwnerSlotSeed(owner))));
     }
 
     /// @dev The `ownerSlotSeed` of `owner`.
-    function _ownerSlotSeed(address owner) private pure returns (uint256) {
+    function _erc6909OwnerSlotSeed(address owner) private pure returns (uint256) {
         return (uint256(uint160(owner)) << 96) | _ERC6909_MASTER_SLOT_SEED;
     }
 
     /// @dev Returns the word in storage slot `slot`.
     /// @custom:solar-trusted
-    function _sload(uint256 slot) private view returns (uint256 value) {
+    function _erc6909Sload(uint256 slot) private view returns (uint256 value) {
         /// @solidity memory-safe-assembly
         assembly {
             value := sload(slot)
@@ -370,7 +374,7 @@ abstract contract ERC6909 {
 
     /// @dev Stores `value` in storage slot `slot`.
     /// @custom:solar-trusted
-    function _sstore(uint256 slot, uint256 value) private {
+    function _erc6909Sstore(uint256 slot, uint256 value) private {
         /// @solidity memory-safe-assembly
         assembly {
             sstore(slot, value)
@@ -379,7 +383,7 @@ abstract contract ERC6909 {
 
     /// @dev `a + b` modulo `2**256`.
     /// @custom:solar-trusted
-    function _add(uint256 a, uint256 b) private pure returns (uint256 c) {
+    function _erc6909Add(uint256 a, uint256 b) private pure returns (uint256 c) {
         unchecked {
             c = a + b;
         }

@@ -24,8 +24,8 @@ pragma solidity ^0.8.20;
 /// `abi.encodePacked` hashes. Every check keeps its order and custom error, batches
 /// update balances from the last pair to the first, the events are ordinary emits,
 /// and the receiver checks are plain calls whose revert data the trusted
-/// `_revertWith` bubbles up. A credit adds with wrap-around through a trusted
-/// `_add` and reverts if it wrapped, as the assembly does.
+/// `_erc1155RevertWith` bubbles up. A credit adds with wrap-around through a trusted
+/// `_erc1155Add` and reverts if it wrapped, as the assembly does.
 /// @custom:solar-safe memory arithmetic
 abstract contract ERC1155 {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -128,7 +128,7 @@ abstract contract ERC1155 {
 
     /// @dev Returns the amount of `id` owned by `owner`.
     function balanceOf(address owner, uint256 id) public view virtual returns (uint256 result) {
-        result = _sload(_balanceSlot(owner, id));
+        result = _erc1155Sload(_erc1155BalanceSlot(owner, id));
     }
 
     /// @dev Returns whether `operator` is approved to manage the tokens of `owner`.
@@ -138,7 +138,7 @@ abstract contract ERC1155 {
         virtual
         returns (bool result)
     {
-        result = _sload(_operatorApprovalSlot(owner, operator)) != 0;
+        result = _erc1155Sload(_erc1155OperatorApprovalSlot(owner, operator)) != 0;
     }
 
     /// @dev Sets whether `operator` is approved to manage the tokens of the caller.
@@ -146,7 +146,7 @@ abstract contract ERC1155 {
     /// Emits a {ApprovalForAll} event.
     function setApprovalForAll(address operator, bool isApproved) public virtual {
         // Update the `isApproved` for (`msg.sender`, `operator`).
-        _sstore(_operatorApprovalSlot(msg.sender, operator), isApproved ? 1 : 0);
+        _erc1155Sstore(_erc1155OperatorApprovalSlot(msg.sender, operator), isApproved ? 1 : 0);
         emit ApprovalForAll(msg.sender, operator, isApproved);
     }
 
@@ -175,10 +175,12 @@ abstract contract ERC1155 {
         if (to == address(0)) revert TransferToZeroAddress();
         // If the caller is not `from`, do the authorization check.
         if (msg.sender != from) {
-            if (_sload(_operatorApprovalSlot(from, msg.sender)) == 0) revert NotOwnerNorApproved();
+            if (_erc1155Sload(_erc1155OperatorApprovalSlot(from, msg.sender)) == 0) {
+                revert NotOwnerNorApproved();
+            }
         }
-        _debit(from, id, amount);
-        _credit(to, id, amount);
+        _erc1155Debit(from, id, amount);
+        _erc1155Credit(to, id, amount);
         emit TransferSingle(msg.sender, from, to, id, amount);
         if (_useAfterTokenTransfer()) {
             _afterTokenTransfer(from, to, _single(id), _single(amount), data);
@@ -214,14 +216,16 @@ abstract contract ERC1155 {
         if (to == address(0)) revert TransferToZeroAddress();
         // If the caller is not `from`, do the authorization check.
         if (msg.sender != from) {
-            if (_sload(_operatorApprovalSlot(from, msg.sender)) == 0) revert NotOwnerNorApproved();
+            if (_erc1155Sload(_erc1155OperatorApprovalSlot(from, msg.sender)) == 0) {
+                revert NotOwnerNorApproved();
+            }
         }
         // Loop through all the `ids` and update the balances.
         for (uint256 i = ids.length; i != 0;) {
             --i;
             uint256 amount = amounts[i];
-            _debit(from, ids[i], amount);
-            _credit(to, ids[i], amount);
+            _erc1155Debit(from, ids[i], amount);
+            _erc1155Credit(to, ids[i], amount);
         }
         emit TransferBatch(msg.sender, from, to, ids, amounts);
         if (_useAfterTokenTransfer()) {
@@ -245,7 +249,7 @@ abstract contract ERC1155 {
         balances = new uint256[](ids.length);
         // Loop through all the `ids` and load the balances.
         for (uint256 i; i < ids.length; ++i) {
-            balances[i] = _sload(_balanceSlot(owners[i], ids[i]));
+            balances[i] = _erc1155Sload(_erc1155BalanceSlot(owners[i], ids[i]));
         }
     }
 
@@ -275,7 +279,7 @@ abstract contract ERC1155 {
         }
         // Revert if `to` is the zero address.
         if (to == address(0)) revert TransferToZeroAddress();
-        _credit(to, id, amount);
+        _erc1155Credit(to, id, amount);
         emit TransferSingle(msg.sender, address(0), to, id, amount);
         if (_useAfterTokenTransfer()) {
             _afterTokenTransfer(address(0), to, _single(id), _single(amount), data);
@@ -307,7 +311,7 @@ abstract contract ERC1155 {
         // Loop through all the `ids` and update the balances.
         for (uint256 i = ids.length; i != 0;) {
             --i;
-            _credit(to, ids[i], amounts[i]);
+            _erc1155Credit(to, ids[i], amounts[i]);
         }
         emit TransferBatch(msg.sender, address(0), to, ids, amounts);
         if (_useAfterTokenTransfer()) {
@@ -340,9 +344,11 @@ abstract contract ERC1155 {
         // If `by` is not the zero address, and not equal to `from`,
         // check if it is approved to manage all the tokens of `from`.
         if (by != address(0) && by != from) {
-            if (_sload(_operatorApprovalSlot(from, by)) == 0) revert NotOwnerNorApproved();
+            if (_erc1155Sload(_erc1155OperatorApprovalSlot(from, by)) == 0) {
+                revert NotOwnerNorApproved();
+            }
         }
-        _debit(from, id, amount);
+        _erc1155Debit(from, id, amount);
         emit TransferSingle(msg.sender, from, address(0), id, amount);
         if (_useAfterTokenTransfer()) {
             _afterTokenTransfer(from, address(0), _single(id), _single(amount), "");
@@ -377,12 +383,14 @@ abstract contract ERC1155 {
         // If `by` is not the zero address, and not equal to `from`,
         // check if it is approved to manage all the tokens of `from`.
         if (by != address(0) && by != from) {
-            if (_sload(_operatorApprovalSlot(from, by)) == 0) revert NotOwnerNorApproved();
+            if (_erc1155Sload(_erc1155OperatorApprovalSlot(from, by)) == 0) {
+                revert NotOwnerNorApproved();
+            }
         }
         // Loop through all the `ids` and update the balances.
         for (uint256 i = ids.length; i != 0;) {
             --i;
-            _debit(from, ids[i], amounts[i]);
+            _erc1155Debit(from, ids[i], amounts[i]);
         }
         emit TransferBatch(msg.sender, from, address(0), ids, amounts);
         if (_useAfterTokenTransfer()) {
@@ -400,7 +408,7 @@ abstract contract ERC1155 {
     /// Emits a {ApprovalForAll} event.
     function _setApprovalForAll(address by, address operator, bool isApproved) internal virtual {
         // Update the `isApproved` for (`by`, `operator`).
-        _sstore(_operatorApprovalSlot(by, operator), isApproved ? 1 : 0);
+        _erc1155Sstore(_erc1155OperatorApprovalSlot(by, operator), isApproved ? 1 : 0);
         emit ApprovalForAll(by, operator, isApproved);
     }
 
@@ -443,10 +451,12 @@ abstract contract ERC1155 {
         // If `by` is not the zero address, and not equal to `from`,
         // check if it is approved to manage all the tokens of `from`.
         if (by != address(0) && by != from) {
-            if (_sload(_operatorApprovalSlot(from, by)) == 0) revert NotOwnerNorApproved();
+            if (_erc1155Sload(_erc1155OperatorApprovalSlot(from, by)) == 0) {
+                revert NotOwnerNorApproved();
+            }
         }
-        _debit(from, id, amount);
-        _credit(to, id, amount);
+        _erc1155Debit(from, id, amount);
+        _erc1155Credit(to, id, amount);
         emit TransferSingle(msg.sender, from, to, id, amount);
         if (_useAfterTokenTransfer()) {
             _afterTokenTransfer(from, to, _single(id), _single(amount), data);
@@ -494,14 +504,16 @@ abstract contract ERC1155 {
         // If `by` is not the zero address, and not equal to `from`,
         // check if it is approved to manage all the tokens of `from`.
         if (by != address(0) && by != from) {
-            if (_sload(_operatorApprovalSlot(from, by)) == 0) revert NotOwnerNorApproved();
+            if (_erc1155Sload(_erc1155OperatorApprovalSlot(from, by)) == 0) {
+                revert NotOwnerNorApproved();
+            }
         }
         // Loop through all the `ids` and update the balances.
         for (uint256 i = ids.length; i != 0;) {
             --i;
             uint256 amount = amounts[i];
-            _debit(from, ids[i], amount);
-            _credit(to, ids[i], amount);
+            _erc1155Debit(from, ids[i], amount);
+            _erc1155Credit(to, ids[i], amount);
         }
         emit TransferBatch(msg.sender, from, to, ids, amounts);
         if (_useAfterTokenTransfer()) {
@@ -587,7 +599,7 @@ abstract contract ERC1155 {
         // `onERC1155Received(address,address,uint256,uint256,bytes)`.
         (bool success, bytes memory answer) =
             to.call(abi.encodeWithSelector(0xf23a6e61, msg.sender, from, id, amount, data));
-        _checkAnswer(success, answer, 0xf23a6e61);
+        _erc1155CheckAnswer(success, answer, 0xf23a6e61);
     }
 
     /// @dev Perform a call to invoke {IERC1155Receiver-onERC1155BatchReceived} on `to`.
@@ -602,7 +614,7 @@ abstract contract ERC1155 {
         // `onERC1155BatchReceived(address,address,uint256[],uint256[],bytes)`.
         (bool success, bytes memory answer) =
             to.call(abi.encodeWithSelector(0xbc197c81, msg.sender, from, ids, amounts, data));
-        _checkAnswer(success, answer, 0xbc197c81);
+        _erc1155CheckAnswer(success, answer, 0xbc197c81);
     }
 
     /// @dev Returns `x` in an array with a single element.
@@ -613,9 +625,9 @@ abstract contract ERC1155 {
 
     /// @dev Reverts unless a receiver's call answered with its `selector`, bubbling up the
     /// revert data of a call that reverted with some.
-    function _checkAnswer(bool success, bytes memory answer, bytes4 selector) private pure {
+    function _erc1155CheckAnswer(bool success, bytes memory answer, bytes4 selector) private pure {
         // Bubble up the revert if the call reverts.
-        if (!success && answer.length != 0) _revertWith(answer);
+        if (!success && answer.length != 0) _erc1155RevertWith(answer);
         // Load the returndata and compare it with the function selector.
         if (answer.length < 0x20 || abi.decode(answer, (bytes32)) != bytes32(selector)) {
             revert TransferToNonERC1155ReceiverImplementer();
@@ -623,42 +635,46 @@ abstract contract ERC1155 {
     }
 
     /// @dev Subtracts `amount` of `id` from the balance of `from`.
-    function _debit(address from, uint256 id, uint256 amount) private {
-        uint256 fromBalanceSlot = _balanceSlot(from, id);
-        uint256 fromBalance = _sload(fromBalanceSlot);
+    function _erc1155Debit(address from, uint256 id, uint256 amount) private {
+        uint256 fromBalanceSlot = _erc1155BalanceSlot(from, id);
+        uint256 fromBalance = _erc1155Sload(fromBalanceSlot);
         if (amount > fromBalance) revert InsufficientBalance();
-        _sstore(fromBalanceSlot, fromBalance - amount);
+        _erc1155Sstore(fromBalanceSlot, fromBalance - amount);
     }
 
     /// @dev Adds `amount` of `id` to the balance of `to`.
-    function _credit(address to, uint256 id, uint256 amount) private {
-        uint256 toBalanceSlot = _balanceSlot(to, id);
-        uint256 toBalanceBefore = _sload(toBalanceSlot);
-        uint256 toBalanceAfter = _add(toBalanceBefore, amount);
+    function _erc1155Credit(address to, uint256 id, uint256 amount) private {
+        uint256 toBalanceSlot = _erc1155BalanceSlot(to, id);
+        uint256 toBalanceBefore = _erc1155Sload(toBalanceSlot);
+        uint256 toBalanceAfter = _erc1155Add(toBalanceBefore, amount);
         if (toBalanceAfter < toBalanceBefore) revert AccountBalanceOverflow();
-        _sstore(toBalanceSlot, toBalanceAfter);
+        _erc1155Sstore(toBalanceSlot, toBalanceAfter);
     }
 
     /// @dev The balance slot of `owner` for `id`.
     /// @custom:solar-inline
-    function _balanceSlot(address owner, uint256 id) private pure returns (uint256) {
-        return uint256(keccak256(abi.encode(id, _ownerSlotSeed(owner))));
+    function _erc1155BalanceSlot(address owner, uint256 id) private pure returns (uint256) {
+        return uint256(keccak256(abi.encode(id, _erc1155OwnerSlotSeed(owner))));
     }
 
     /// @dev The `operator` approval slot of `owner`.
     /// @custom:solar-inline
-    function _operatorApprovalSlot(address owner, address operator) private pure returns (uint256) {
-        return uint256(keccak256(abi.encodePacked(operator, _ownerSlotSeed(owner))));
+    function _erc1155OperatorApprovalSlot(address owner, address operator)
+        private
+        pure
+        returns (uint256)
+    {
+        return uint256(keccak256(abi.encodePacked(operator, _erc1155OwnerSlotSeed(owner))));
     }
 
     /// @dev The `ownerSlotSeed` of `owner`.
-    function _ownerSlotSeed(address owner) private pure returns (uint256) {
+    function _erc1155OwnerSlotSeed(address owner) private pure returns (uint256) {
         return (uint256(uint160(owner)) << 96) | _ERC1155_MASTER_SLOT_SEED;
     }
 
     /// @dev Returns the word in storage slot `slot`.
     /// @custom:solar-trusted
-    function _sload(uint256 slot) private view returns (uint256 value) {
+    function _erc1155Sload(uint256 slot) private view returns (uint256 value) {
         /// @solidity memory-safe-assembly
         assembly {
             value := sload(slot)
@@ -667,7 +683,7 @@ abstract contract ERC1155 {
 
     /// @dev Stores `value` in storage slot `slot`.
     /// @custom:solar-trusted
-    function _sstore(uint256 slot, uint256 value) private {
+    function _erc1155Sstore(uint256 slot, uint256 value) private {
         /// @solidity memory-safe-assembly
         assembly {
             sstore(slot, value)
@@ -676,7 +692,7 @@ abstract contract ERC1155 {
 
     /// @dev `a + b` modulo `2**256`.
     /// @custom:solar-trusted
-    function _add(uint256 a, uint256 b) private pure returns (uint256 c) {
+    function _erc1155Add(uint256 a, uint256 b) private pure returns (uint256 c) {
         unchecked {
             c = a + b;
         }
@@ -684,7 +700,7 @@ abstract contract ERC1155 {
 
     /// @dev Reverts with `revertData`.
     /// @custom:solar-trusted
-    function _revertWith(bytes memory revertData) private pure {
+    function _erc1155RevertWith(bytes memory revertData) private pure {
         /// @solidity memory-safe-assembly
         assembly {
             revert(add(revertData, 0x20), mload(revertData))
