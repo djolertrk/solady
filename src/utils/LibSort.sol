@@ -698,7 +698,7 @@ library LibSort {
         uint256 n = keys.length;
         if (values.length != n) n = _outOfBounds();
         if (n < 2) return;
-        _sort(keys, values, 0, n);
+        _sortAll(keys, values, n);
         uint256 kept;
         uint256 sum = values[0];
         // The last kept key, which `keys[kept]` holds.
@@ -977,7 +977,7 @@ library LibSort {
         uint256 n = keys.length;
         if (values.length != n) n = _outOfBounds();
         if (n < 2) return;
-        _sort(keys, values, 0, n);
+        _sortAll(keys, values, n);
         uint256 kept;
         uint256 sum = values[0];
         // The last kept key, which `keys[kept]` holds.
@@ -1240,7 +1240,7 @@ library LibSort {
         uint256 n = keys.length;
         if (values.length != n) n = _outOfBounds();
         if (n < 2) return;
-        _sort(keys, values, 0, n);
+        _sortAll(keys, values, n);
         uint256 kept;
         uint256 sum = values[0];
         // The last kept key, which `keys[kept]` holds.
@@ -1517,7 +1517,7 @@ library LibSort {
         uint256 n = keys.length;
         if (values.length != n) n = _outOfBounds();
         if (n < 2) return;
-        _sort(keys, values, 0, n);
+        _sortAll(keys, values, n);
         uint256 kept;
         uint256 sum = values[0];
         // The last kept key, which `keys[kept]` holds.
@@ -1569,6 +1569,36 @@ library LibSort {
         _sort(a, 0, n);
     }
 
+    /// @dev Sorts the `n >= 2` keys with each value moved alongside, as
+    /// `_sortAll` sorts: keys already in order stay, keys in reverse order are
+    /// reversed with their values, and any others go through the quicksort.
+    function _sortAll(uint256[] memory keys, uint256[] memory values, uint256 n) private pure {
+        uint256 j = n - 1;
+        uint256 next = keys[j];
+        while (j != 0) {
+            uint256 x = keys[j - 1];
+            if (x > next) break;
+            next = x;
+            --j;
+        }
+        if (j == 0) return;
+        j = n - 1;
+        next = keys[j];
+        while (j != 0) {
+            uint256 x = keys[j - 1];
+            if (x < next) break;
+            next = x;
+            --j;
+        }
+        if (j == 0) {
+            for (uint256 i; i < n / 2; ++i) {
+                _swap(keys, values, i, n - 1 - i);
+            }
+            return;
+        }
+        _sort(keys, values, 0, n);
+    }
+
     /// @dev Sorts all of `a`, as the assembly does: an array already in order
     /// is left alone and one in reverse order is reversed, each found by one
     /// scan from the end, before the quicksort runs.
@@ -1589,6 +1619,37 @@ library LibSort {
         _sort(a, 0, n);
     }
 
+    /// @dev Sorts the `n >= 2` keys with each value moved alongside, as
+    /// `_sortAll` sorts: keys already in order stay, keys in reverse order are
+    /// reversed with their values, and any others go through the quicksort.
+    /// Keys order by their two's-complement words, as `_sort` orders them.
+    function _sortAll(int256[] memory keys, uint256[] memory values, uint256 n) private pure {
+        uint256 j = n - 1;
+        uint256 next = uint256(keys[j]);
+        while (j != 0) {
+            uint256 x = uint256(keys[j - 1]);
+            if (x > next) break;
+            next = x;
+            --j;
+        }
+        if (j == 0) return;
+        j = n - 1;
+        next = uint256(keys[j]);
+        while (j != 0) {
+            uint256 x = uint256(keys[j - 1]);
+            if (x < next) break;
+            next = x;
+            --j;
+        }
+        if (j == 0) {
+            for (uint256 i; i < n / 2; ++i) {
+                _swap(keys, values, i, n - 1 - i);
+            }
+            return;
+        }
+        _sort(keys, values, 0, n);
+    }
+
     /// @dev Sorts all of `a`, as the assembly does: an array already in order
     /// is left alone and one in reverse order is reversed, each found by one
     /// scan from the end, before the quicksort runs.
@@ -1596,10 +1657,22 @@ library LibSort {
         uint256 n = a.length;
         if (n < 2) return;
         uint256 j = n - 1;
-        while (j != 0 && a[j - 1] <= a[j]) --j;
+        address next = a[j];
+        while (j != 0) {
+            address x = a[j - 1];
+            if (x > next) break;
+            next = x;
+            --j;
+        }
         if (j == 0) return;
         j = n - 1;
-        while (j != 0 && a[j - 1] >= a[j]) --j;
+        next = a[j];
+        while (j != 0) {
+            address x = a[j - 1];
+            if (x < next) break;
+            next = x;
+            --j;
+        }
         if (j == 0) {
             for (uint256 i; i < n / 2; ++i) {
                 (a[i], a[n - 1 - i]) = (a[n - 1 - i], a[i]);
@@ -1607,6 +1680,36 @@ library LibSort {
             return;
         }
         _sort(a, 0, n);
+    }
+
+    /// @dev Sorts the `n >= 2` keys with each value moved alongside, as
+    /// `_sortAll` sorts: keys already in order stay, keys in reverse order are
+    /// reversed with their values, and any others go through the quicksort.
+    function _sortAll(address[] memory keys, uint256[] memory values, uint256 n) private pure {
+        uint256 j = n - 1;
+        address next = keys[j];
+        while (j != 0) {
+            address x = keys[j - 1];
+            if (x > next) break;
+            next = x;
+            --j;
+        }
+        if (j == 0) return;
+        j = n - 1;
+        next = keys[j];
+        while (j != 0) {
+            address x = keys[j - 1];
+            if (x < next) break;
+            next = x;
+            --j;
+        }
+        if (j == 0) {
+            for (uint256 i; i < n / 2; ++i) {
+                _swap(keys, values, i, n - 1 - i);
+            }
+            return;
+        }
+        _sort(keys, values, 0, n);
     }
 
     /// @dev Sorts all of `a`, as the assembly does: an array already in order
@@ -1627,6 +1730,36 @@ library LibSort {
             return;
         }
         _sort(a, 0, n);
+    }
+
+    /// @dev Sorts the `n >= 2` keys with each value moved alongside, as
+    /// `_sortAll` sorts: keys already in order stay, keys in reverse order are
+    /// reversed with their values, and any others go through the quicksort.
+    function _sortAll(bytes32[] memory keys, uint256[] memory values, uint256 n) private pure {
+        uint256 j = n - 1;
+        bytes32 next = keys[j];
+        while (j != 0) {
+            bytes32 x = keys[j - 1];
+            if (x > next) break;
+            next = x;
+            --j;
+        }
+        if (j == 0) return;
+        j = n - 1;
+        next = keys[j];
+        while (j != 0) {
+            bytes32 x = keys[j - 1];
+            if (x < next) break;
+            next = x;
+            --j;
+        }
+        if (j == 0) {
+            for (uint256 i; i < n / 2; ++i) {
+                _swap(keys, values, i, n - 1 - i);
+            }
+            return;
+        }
+        _sort(keys, values, 0, n);
     }
 
     /// @dev Raises the `Panic(0x32)` an out-of-range index raises.
