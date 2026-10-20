@@ -1,11 +1,26 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.4;
+pragma solidity ^0.8.5;
 
 import {EIP712} from "../utils/EIP712.sol";
 import {SignatureCheckerLib} from "../utils/SignatureCheckerLib.sol";
 
 /// @notice ERC1271 mixin with nested EIP-712 approach.
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/accounts/ERC1271.sol)
+///
+/// The checked port reads the signature with calldata slices and `abi.decode`, and builds the
+/// `TypedDataSign` type and the hashes with `abi.encodePacked` and `abi.encode`, keeping the
+/// assembly's byte layouts, its checks of `contentsName` (read a word at a time), the hash it
+/// corrupts with one more zero byte for an invalid name, and its fallbacks to `PersonalSign`.
+/// An ERC6492 wrapper whose inner signature lies within the signature unwraps to a slice of it.
+/// Otherwise the assembly reads words and makes a slice wherever the wrapper's offsets point,
+/// past the signature or the calldata, and it reads the magic suffix of a signature shorter
+/// than a word from before the signature; Solidity cannot read a slice's calldata offset nor
+/// slice past `msg.data`, so two trusted helpers do just that, and reads past the calldata
+/// give zeros, as `CALLDATALOAD` does. The RPC check makes a trusted static call that copies
+/// at most the word it reads, and halts with a trusted `invalid()`, which Solidity cannot
+/// spell. The helpers' names carry an `_erc1271` prefix, so that a contract can inherit this
+/// alongside other ports.
+/// @custom:solar-safe memory arithmetic
 abstract contract ERC1271 is EIP712 {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                         CONSTANTS                          */
@@ -31,19 +46,14 @@ abstract contract ERC1271 is EIP712 {
         // See: https://eips.ethereum.org/EIPS/eip-7739.
         // If `hash` is `0x7739...7739`, returns `bytes4(0x77390001)`.
         // The returned number MAY be increased in future ERC7739 versions.
-        unchecked {
-            if (signature.length == uint256(0)) {
-                // Forces the compiler to optimize for smaller bytecode size.
-                if (uint256(hash) == ~signature.length / 0xffff * 0x7739) return 0x77390001;
-            }
+        if (signature.length == uint256(0)) {
+            // Forces the compiler to optimize for smaller bytecode size.
+            if (uint256(hash) == ~signature.length / 0xffff * 0x7739) return 0x77390001;
         }
         bool success = _erc1271IsValidSignature(hash, _erc1271UnwrapSignature(signature));
-        /// @solidity memory-safe-assembly
-        assembly {
-            // `success ? bytes4(keccak256("isValidSignature(bytes32,bytes)")) : 0xffffffff`.
-            // We use `0xffffffff` for invalid, in convention with the reference implementation.
-            result := shl(224, or(0x1626ba7e, sub(0, iszero(success))))
-        }
+        // `success ? bytes4(keccak256("isValidSignature(bytes32,bytes)")) : 0xffffffff`.
+        // We use `0xffffffff` for invalid, in convention with the reference implementation.
+        result = success ? bytes4(0x1626ba7e) : bytes4(0xffffffff);
     }
 
     /// @dev Returns the ERC1271 signer.
@@ -79,18 +89,40 @@ abstract contract ERC1271 is EIP712 {
         returns (bytes calldata result)
     {
         result = signature;
-        /// @solidity memory-safe-assembly
-        assembly {
-            // Unwraps the ERC6492 wrapper if it exists.
-            // See: https://eips.ethereum.org/EIPS/eip-6492
-            if eq(
-                calldataload(add(result.offset, sub(result.length, 0x20))),
-                mul(0x6492, div(not(shr(address(), address())), 0xffff)) // `0x6492...6492`.
-            ) {
-                let o := add(result.offset, calldataload(add(result.offset, 0x40)))
-                result.length := calldataload(o)
-                result.offset := add(o, 0x20)
+        // Unwraps the ERC6492 wrapper if it exists.
+        // See: https://eips.ethereum.org/EIPS/eip-6492
+        uint256 n = result.length;
+        // The word that ends the signature. A signature shorter than a word ends a word that
+        // starts before it, and one that would start before the calldata reads as zero.
+        bytes32 suffix;
+        if (n >= 0x20) {
+            suffix = bytes32(result[n - 0x20:n]);
+        } else {
+            uint256 end = _erc1271CalldataOffset(result) + n;
+            if (end >= 0x20) suffix = _erc1271CalldataWord(end - 0x20);
+        }
+        // `0x6492...6492`.
+        if (suffix == 0x6492649264926492649264926492649264926492649264926492649264926492) {
+            // The wrapper's third head word is the offset of the inner signature, and the word
+            // there its length. When they lie within the signature, it is a slice of it.
+            if (n >= 0x60) {
+                uint256 o = uint256(bytes32(result[0x40:0x60]));
+                if (o < n - 0x1f) {
+                    uint256 start = o + 0x20;
+                    uint256 length = uint256(bytes32(result[o:start]));
+                    if (length <= n - start) return result[start:start + length];
+                }
             }
+            // Otherwise, follow them as the assembly does, wherever they point.
+            uint256 offset = _erc1271CalldataOffset(result);
+            uint256 p = _erc1271AddMod(offset, uint256(_erc1271CalldataWord(offset + 0x40)));
+            uint256 innerStart = _erc1271AddMod(p, 0x20);
+            uint256 innerLength = uint256(_erc1271CalldataWord(p));
+            if (innerStart <= msg.data.length && innerLength <= msg.data.length - innerStart) {
+                return msg.data[innerStart:innerStart + innerLength];
+            }
+            // A slice that runs past the calldata, which reads as zeros there.
+            result = _erc1271CalldataSlice(innerStart, innerLength);
         }
     }
 
@@ -202,6 +234,8 @@ abstract contract ERC1271 is EIP712 {
         returns (bool result)
     {
         uint256 t = uint256(uint160(address(this)));
+        // The `TypedDataSign` fields after `contents`, as `abi.encode` lays them out.
+        bytes memory domainFields;
         // Forces the compiler to pop the variables after the scope, avoiding stack-too-deep.
         if (t != uint256(0)) {
             (
@@ -212,81 +246,29 @@ abstract contract ERC1271 is EIP712 {
                 address verifyingContract,
                 bytes32 salt,
             ) = eip712Domain();
-            /// @solidity memory-safe-assembly
-            assembly {
-                t := mload(0x40) // Grab the free memory pointer.
-                // Skip 2 words for the `typedDataSignTypehash` and `contents` struct hash.
-                mstore(add(t, 0x40), keccak256(add(name, 0x20), mload(name)))
-                mstore(add(t, 0x60), keccak256(add(version, 0x20), mload(version)))
-                mstore(add(t, 0x80), chainId)
-                mstore(add(t, 0xa0), shr(96, shl(96, verifyingContract)))
-                mstore(add(t, 0xc0), salt)
-                mstore(0x40, add(t, 0xe0)) // Allocate the memory.
-            }
+            domainFields = abi.encode(
+                keccak256(bytes(name)), keccak256(bytes(version)), chainId, verifyingContract, salt
+            );
         }
-        /// @solidity memory-safe-assembly
-        assembly {
-            let m := mload(0x40) // Cache the free memory pointer.
-            // `c` is `contentsDescription.length`, which is stored in the last 2 bytes of the signature.
-            let c := shr(240, calldataload(add(signature.offset, sub(signature.length, 2))))
-            for {} 1 {} {
-                let l := add(0x42, c) // Total length of appended data (32 + 32 + c + 2).
-                let o := add(signature.offset, sub(signature.length, l)) // Offset of appended data.
-                mstore(0x00, 0x1901) // Store the "\x19\x01" prefix.
-                calldatacopy(0x20, o, 0x40) // Copy the `APP_DOMAIN_SEPARATOR` and `contents` struct hash.
-                // Use the `PersonalSign` workflow if the reconstructed hash doesn't match,
-                // or if the appended data is invalid, i.e.
-                // `appendedData.length > signature.length || contentsDescription.length == 0`.
-                if or(xor(keccak256(0x1e, 0x42), hash), or(lt(signature.length, l), iszero(c))) {
-                    t := 0 // Set `t` to 0, denoting that we need to `hash = _hashTypedData(hash)`.
-                    mstore(t, _PERSONAL_SIGN_TYPEHASH)
-                    mstore(0x20, hash) // Store the `prefixed`.
-                    hash := keccak256(t, 0x40) // Compute the `PersonalSign` struct hash.
-                    break
-                }
-                // Else, use the `TypedDataSign` workflow.
-                // `TypedDataSign({ContentsName} contents,string name,...){ContentsType}`.
-                mstore(m, "TypedDataSign(") // Store the start of `TypedDataSign`'s type encoding.
-                let p := add(m, 0x0e) // Advance 14 bytes to skip "TypedDataSign(".
-                calldatacopy(p, add(o, 0x40), c) // Copy `contentsName`, optimistically.
-                mstore(add(p, c), 40) // Store a '(' after the end.
-                if iszero(eq(byte(0, mload(sub(add(p, c), 1))), 41)) {
-                    let e := 0 // Length of `contentsName` in explicit mode.
-                    for { let q := sub(add(p, c), 1) } 1 {} {
-                        e := add(e, 1) // Scan backwards until we encounter a ')'.
-                        if iszero(gt(lt(e, c), eq(byte(0, mload(sub(q, e))), 41))) {
-                            break
-                        }
-                    }
-                    c := sub(c, e) // Truncate `contentsDescription` to `contentsType`.
-                    calldatacopy(p, add(add(o, 0x40), c), e) // Copy `contentsName`.
-                    mstore8(add(p, e), 40) // Store a '(' exactly right after the end.
-                }
-                // `d & 1 == 1` means that `contentsName` is invalid.
-                let d := shr(byte(0, mload(p)), 0x7fffffe000000000000010000000000) // Starts with `[a-z(]`.
-                // Advance `p` until we encounter '('.
-                for {} iszero(eq(byte(0, mload(p)), 40)) { p := add(p, 1) } {
-                    d := or(shr(byte(0, mload(p)), 0x120100000001), d) // Has a byte in ", )\x00".
-                }
-                mstore(p, " contents,string name,string") // Store the rest of the encoding.
-                mstore(add(p, 0x1c), " version,uint256 chainId,address")
-                mstore(add(p, 0x3c), " verifyingContract,bytes32 salt)")
-                p := add(p, 0x5c)
-                calldatacopy(p, add(o, 0x40), c) // Copy `contentsType`.
-                // Fill in the missing fields of the `TypedDataSign`.
-                calldatacopy(t, o, 0x40) // Copy the `contents` struct hash to `add(t, 0x20)`.
-                mstore(t, keccak256(m, sub(add(p, c), m))) // Store `typedDataSignTypehash`.
-                // The "\x19\x01" prefix is already at 0x00.
-                // `APP_DOMAIN_SEPARATOR` is already at 0x20.
-                mstore(0x40, keccak256(t, 0xe0)) // `hashStruct(typedDataSign)`.
-                // Compute the final hash, corrupted if `contentsName` is invalid.
-                hash := keccak256(0x1e, add(0x42, and(1, d)))
-                signature.length := sub(signature.length, l) // Truncate the signature.
-                break
-            }
-            mstore(0x40, m) // Restore the free memory pointer.
+        uint256 n = signature.length;
+        // `c` is `contentsDescription.length`, which is stored in the last 2 bytes of the signature.
+        // A signature shorter than `0x42` bytes takes the `PersonalSign` workflow whatever `c` is.
+        uint256 c = n < 2 ? 0 : uint16(bytes2(signature[n - 2:n]));
+        uint256 l = 0x42 + c; // Total length of appended data (32 + 32 + c + 2).
+        // Use the `PersonalSign` workflow if the reconstructed hash doesn't match,
+        // or if the appended data is invalid, i.e.
+        // `appendedData.length > signature.length || contentsDescription.length == 0`.
+        if (
+            n < l || c == 0
+                || keccak256(abi.encodePacked(hex"1901", signature[n - l:n - l + 0x40])) != hash
+        ) {
+            // Compute the `PersonalSign` struct hash, whose `prefixed` is `hash`.
+            hash = _hashTypedData(keccak256(abi.encode(_PERSONAL_SIGN_TYPEHASH, hash)));
+        } else {
+            // Else, use the `TypedDataSign` workflow.
+            hash = _erc1271TypedDataSignHash(signature[n - l:n - 2], domainFields);
+            signature = signature[:n - l]; // Truncate the signature.
         }
-        if (t == uint256(0)) hash = _hashTypedData(hash); // `PersonalSign` workflow.
         result = _erc1271IsValidSignatureNowCalldata(hash, signature);
     }
 
@@ -302,30 +284,217 @@ abstract contract ERC1271 is EIP712 {
         // but we can't fully depend on it because it can be manipulated.
         // See: https://x.com/NoahCitron/status/1580359718341484544
         if (tx.gasprice == uint256(0)) {
-            /// @solidity memory-safe-assembly
-            assembly {
-                mstore(gasprice(), gasprice())
-                // See: https://gist.github.com/Vectorized/3c9b63524d57492b265454f62d895f71
-                let b := 0x000000000000378eDCD5B5B0A24f5342d8C10485 // Basefee contract,
-                pop(staticcall(0xffff, b, codesize(), gasprice(), gasprice(), 0x20))
-                // If `gasprice < basefee`, the call cannot be on-chain, and we can skip the gas burn.
-                if iszero(mload(gasprice())) {
-                    let m := mload(0x40) // Cache the free memory pointer.
-                    mstore(gasprice(), 0x1626ba7e) // `isValidSignature(bytes32,bytes)`.
-                    mstore(0x20, b) // Recycle `b` to denote if we need to burn gas.
-                    mstore(0x40, 0x40)
-                    let gasToBurn := or(add(0xffff, gaslimit()), gaslimit())
-                    // Burns gas computationally efficiently. Also, requires that `gas > gasToBurn`.
-                    if or(eq(hash, b), lt(gas(), gasToBurn)) { invalid() }
-                    // Make a call to this with `b`, efficiently burning the gas provided.
-                    // No valid transaction can consume more than the gaslimit.
-                    // See: https://ethereum.github.io/yellowpaper/paper.pdf
-                    // Most RPCs perform calls with a gas budget greater than the gaslimit.
-                    pop(staticcall(gasToBurn, address(), 0x1c, 0x64, gasprice(), gasprice()))
-                    mstore(0x40, m) // Restore the free memory pointer.
-                }
+            // See: https://gist.github.com/Vectorized/3c9b63524d57492b265454f62d895f71
+            address b = 0x000000000000378eDCD5B5B0A24f5342d8C10485; // Basefee contract,
+            // The first word of the answer or the revert, zero-padded past its end.
+            (, bytes memory basefee,) = _erc1271StaticCallBounded(b, 0xffff, "", 0x20);
+            // If `gasprice < basefee`, the call cannot be on-chain, and we can skip the gas burn.
+            if (bytes32(basefee) == bytes32(0)) {
+                // Recycle `b` to denote if we need to burn gas.
+                bytes32 burn = bytes32(uint256(uint160(b)));
+                uint256 gasToBurn = (0xffff + block.gaslimit) | block.gaslimit;
+                // Burns gas computationally efficiently. Also, requires that `gas > gasToBurn`.
+                if (hash == burn || gasleft() < gasToBurn) _erc1271Invalid();
+                // Make a call to this with `b`, efficiently burning the gas provided.
+                // No valid transaction can consume more than the gaslimit.
+                // See: https://ethereum.github.io/yellowpaper/paper.pdf
+                // Most RPCs perform calls with a gas budget greater than the gaslimit.
+                // `isValidSignature(bytes32,bytes)`.
+                bytes memory payload = abi.encodeWithSelector(0x1626ba7e, burn, "");
+                _erc1271StaticCallBounded(address(this), gasToBurn, payload, 0);
             }
             result = _erc1271IsValidSignatureNowCalldata(hash, signature);
+        }
+    }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      PRIVATE HELPERS                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev The final hash of the `TypedDataSign` workflow for `appended`, the signature's
+    /// `APP_DOMAIN_SEPARATOR ‖ contents ‖ contentsDescription`, and `domainFields`, the
+    /// account's name hash, version hash, chain id, verifying contract and salt words.
+    function _erc1271TypedDataSignHash(bytes calldata appended, bytes memory domainFields)
+        private
+        pure
+        returns (bytes32)
+    {
+        (bytes32 appDomainSeparator, bytes32 contents) = abi.decode(appended, (bytes32, bytes32));
+        (bytes32 typedDataSignTypehash, bool invalid) =
+            _erc1271TypedDataSignTypehash(appended[0x40:]);
+        // `hashStruct(typedDataSign)`.
+        bytes32 structHash =
+            keccak256(abi.encodePacked(typedDataSignTypehash, contents, domainFields));
+        // Compute the final hash, corrupted if `contentsName` is invalid.
+        if (invalid) {
+            return keccak256(abi.encodePacked(hex"1901", appDomainSeparator, structHash, hex"00"));
+        }
+        return keccak256(abi.encodePacked(hex"1901", appDomainSeparator, structHash));
+    }
+
+    /// @dev The `typedDataSignTypehash` for `contentsDescription`, and whether its
+    /// `contentsName` is invalid.
+    function _erc1271TypedDataSignTypehash(bytes calldata contentsDescription)
+        private
+        pure
+        returns (bytes32 typedDataSignTypehash, bool invalid)
+    {
+        uint256 c = contentsDescription.length;
+        // `TypedDataSign({ContentsName} contents,string name,...){ContentsType}`.
+        bytes calldata contentsType = contentsDescription;
+        // The bytes `contentsName` is read from, up to the first '('.
+        bytes calldata contentsName = contentsDescription;
+        bool implicitMode = contentsDescription[c - 1] == ")";
+        if (!implicitMode) {
+            // `c - i` is the length of `contentsName` in explicit mode.
+            uint256 i = c - 1;
+            // Scan backwards until we encounter a ')'.
+            while (i != 0 && contentsDescription[i - 1] != ")") --i;
+            // Truncate `contentsDescription` to `contentsType`.
+            contentsType = contentsDescription[:i];
+            contentsName = contentsDescription[i:];
+        }
+        uint256 k;
+        (k, invalid) = _erc1271ScanContentsName(contentsName);
+        if (implicitMode && k == c) {
+            // Without a '(', the assembly reads `contentsName` on into the 31 zero bytes
+            // before the '(' it stores a word after the end, which makes it invalid.
+            typedDataSignTypehash = keccak256(
+                abi.encodePacked(
+                    "TypedDataSign(",
+                    contentsDescription,
+                    bytes31(0),
+                    " contents,string name,string" " version,uint256 chainId,address"
+                    " verifyingContract,bytes32 salt)",
+                    contentsDescription
+                )
+            );
+        } else {
+            typedDataSignTypehash = keccak256(
+                abi.encodePacked(
+                    "TypedDataSign(",
+                    contentsName[:k],
+                    " contents,string name,string" " version,uint256 chainId,address"
+                    " verifyingContract,bytes32 salt)",
+                    contentsType
+                )
+            );
+        }
+    }
+
+    /// @dev The length of `contentsName` up to its first '(', or all of it, and whether it
+    /// is invalid: it starts with `[a-z(]`, or has a byte in ", )\x00" before that '('.
+    /// It reads `contentsName` a word at a time, finding the bytes it looks for in each.
+    function _erc1271ScanContentsName(bytes calldata contentsName)
+        private
+        pure
+        returns (uint256 k, bool invalid)
+    {
+        uint256 n = contentsName.length;
+        uint256 ones = type(uint256).max / 0xff; // `0x0101...01`.
+        // The next 32 bytes of `contentsName`, zero-padded past its end.
+        uint256 w = uint256(bytes32(contentsName));
+        // `d & 1 == 1` means that `contentsName` is invalid.
+        uint256 d = 0x7fffffe000000000000010000000000 >> (w >> 248); // Starts with `[a-z(]`.
+        while (true) {
+            // Advance `k` until we encounter '('.
+            uint256 open = _erc1271ZeroBytes(w ^ (ones * 0x28));
+            // The number of bytes of the word before its first '(', or 32.
+            uint256 r = 32;
+            if (open != 0) {
+                r = 0;
+                if (open >> 128 == 0) (r, open) = (16, open << 128);
+                if (open >> 192 == 0) (r, open) = (r + 8, open << 64);
+                if (open >> 224 == 0) (r, open) = (r + 4, open << 32);
+                if (open >> 240 == 0) (r, open) = (r + 2, open << 16);
+                if (open >> 248 == 0) r += 1;
+            }
+            if (r > n - k) r = n - k;
+            // Has a byte in ", )\x00": clearing bit 5 zeroes `\x00` and ' '.
+            uint256 banned = _erc1271ZeroBytes(w & (ones * 0xdf))
+                | _erc1271ZeroBytes(w ^ (ones * 0x29)) | _erc1271ZeroBytes(w ^ (ones * 0x2c));
+            if (banned & ~(type(uint256).max >> (r << 3)) != 0) d |= 1;
+            k += r;
+            if (r < 32 || k == n) break;
+            w = uint256(bytes32(contentsName[k:]));
+        }
+        invalid = d & 1 != 0;
+    }
+
+    /// @dev `0x80` in each byte of `x` that is zero, and zero in the others. The sum of a
+    /// byte's low 7 bits and `0x7f` cannot carry into the next byte.
+    function _erc1271ZeroBytes(uint256 x) private pure returns (uint256) {
+        uint256 low = type(uint256).max / 0xff * 0x7f; // `0x7f7f...7f`.
+        return ~((((x & low) + low) | x) | low);
+    }
+
+    /// @dev The word of calldata at `offset`, zero-padded past the end of the calldata, as
+    /// `CALLDATALOAD` reads it.
+    function _erc1271CalldataWord(uint256 offset) private pure returns (bytes32) {
+        if (offset >= msg.data.length) return bytes32(0);
+        return bytes32(msg.data[offset:]);
+    }
+
+    /// @dev `a + b` modulo `2**256`, as the assembly adds calldata offsets.
+    function _erc1271AddMod(uint256 a, uint256 b) private pure returns (uint256) {
+        if (b > type(uint256).max - a) return b - (type(uint256).max - a) - 1;
+        return a + b;
+    }
+
+    /// @dev The calldata offset of `s`. Solidity cannot read a calldata slice's offset.
+    /// @custom:solar-trusted
+    function _erc1271CalldataOffset(bytes calldata s) private pure returns (uint256 offset) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            offset := s.offset
+        }
+    }
+
+    /// @dev The calldata slice of `length` bytes at `offset`, which may lie past the end of
+    /// the calldata, where reads give zeros. Solidity slices only within `msg.data`.
+    /// @custom:solar-trusted
+    function _erc1271CalldataSlice(uint256 offset, uint256 length)
+        private
+        pure
+        returns (bytes calldata s)
+    {
+        /// @solidity memory-safe-assembly
+        assembly {
+            s.offset := offset
+            s.length := length
+        }
+    }
+
+    /// @dev Static-calls `target` with `payload` and `gasLimit` gas, and copies at most
+    /// `maxCopy` bytes of the response into a new buffer sized to what it holds, allocated
+    /// after the call. `totalSize` is how many bytes there were.
+    /// @custom:solar-trusted
+    function _erc1271StaticCallBounded(
+        address target,
+        uint256 gasLimit,
+        bytes memory payload,
+        uint256 maxCopy
+    ) private view returns (bool success, bytes memory output, uint256 totalSize) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            success := staticcall(gasLimit, target, add(payload, 0x20), mload(payload), 0x00, 0x00)
+            totalSize := returndatasize()
+            let copied := totalSize
+            if gt(copied, maxCopy) { copied := maxCopy }
+            output := mload(0x40)
+            mstore(output, copied)
+            returndatacopy(add(output, 0x20), 0x00, copied)
+            mstore(0x40, and(add(add(output, 0x3f), copied), not(0x1f)))
+        }
+    }
+
+    /// @dev Halts with the designated invalid instruction, which consumes all the gas left.
+    /// Solidity cannot spell it: its failures revert.
+    /// @custom:solar-trusted
+    function _erc1271Invalid() private pure {
+        /// @solidity memory-safe-assembly
+        assembly {
+            invalid()
         }
     }
 }
