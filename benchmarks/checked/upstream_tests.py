@@ -15,9 +15,14 @@ benchmark or safety audit.
 `--fair` instead compares gas: it runs upstream built by solc and the port
 built by Solar on the same inputs and memory, and writes each suite's ratio to
 `gas.md`. Correctness comes from the normal run.
+
+A leg whose inputs are unchanged since an earlier run, down to the bytes of the
+compiler and of forge, reuses that run's results from the cache `benchmark.py`
+also keeps, `--cache-dir`; `--no-cache` runs every leg.
 """
 
 import argparse
+import contextlib
 import gzip
 import json
 import os
@@ -28,8 +33,12 @@ from benchmark import (
     ARCHIVE,
     REPO,
     ROOT,
+    Cache,
     closure,
+    default_cache_dir,
     digest,
+    file_sha256,
+    tool_identity,
 )
 
 LIBRARIES = [
@@ -202,6 +211,80 @@ def test_path(library):
     return SUITES.get(library, f"test/{library.rsplit('/', 1)[-1]}.t.sol")
 
 
+def project_files(folder):
+    """Each file of a generated project, by its path below `folder`, with its sha256."""
+    return [
+        [path.relative_to(folder).as_posix(), digest(path.read_bytes())]
+        for path in sorted(folder.rglob("*"))
+        if path.is_file()
+    ]
+
+
+def foundry_environment(env):
+    """The variables that configure Foundry, its threads or Solar's solc wrapper.
+
+    `FOUNDRY_SOLC` is left out: it is the compiler's path, and keys hold the
+    compiler's contents instead.
+    """
+    return sorted(
+        [name, value]
+        for name, value in env.items()
+        if name.startswith(("FOUNDRY_", "DAPP_", "RAYON_", "SOLC_WRAPPER"))
+        and name != "FOUNDRY_SOLC"
+    )
+
+
+def suite_key(folder, command, compiler, env, forge):
+    """The key of everything a leg's test results depend on.
+
+    That is every file of the generated project, whose `foundry.toml` holds the
+    settings, remappings, fuzz runs and seed; the compiler's and forge's
+    binaries; Foundry's environment and global configuration; the command; and
+    the number of CPUs, since forge splits each fuzz test's runs between up to
+    one worker per CPU, each drawing its own inputs from the seed. The
+    project's own path, the command's only path, is left out: the tests name
+    their files relative to the root.
+    """
+    config = Path.home() / ".foundry" / "foundry.toml"
+    return Cache.key(
+        "suite",
+        project_files(folder),
+        file_sha256(compiler),
+        tool_identity(forge),
+        foundry_environment(env),
+        config.read_text() if config.is_file() else None,
+        ["<root>" if part == str(folder) else part for part in command[1:]],
+        os.cpu_count(),
+    )
+
+
+def forge_test(cache, key, label, command, folder, env):
+    """Runs a leg's `forge test`, or returns the outputs of an identical earlier run.
+
+    Only a run whose tests ran is kept: an exit code of 0 or 1 with a JSON
+    report. Anything else, such as a build failure or a crash, runs again.
+    """
+    entry = cache.get("suite", key)
+    print(f"Running {label}" + (" (cached)" if entry else ""), flush=True)
+    if entry is not None:
+        return entry
+    result = subprocess.run(
+        command,
+        cwd=folder,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=False,
+    )
+    entry = {"returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
+    if result.returncode in (0, 1):
+        with contextlib.suppress(ValueError):
+            if isinstance(json.loads(result.stdout), dict):
+                cache.put("suite", key, entry)
+    return entry
+
+
 def gas_report(results):
     """Each suite's gas, the port built by Solar against upstream built by solc, over the tests
     both pass; `test__codesize` reports a size, not gas."""
@@ -239,6 +322,7 @@ def gas_report(results):
 def run(args):
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
+    cache = Cache(None if args.no_cache else args.cache_dir)
     libraries = args.library or LIBRARIES
     archive = json.loads(gzip.decompress(ARCHIVE.read_bytes()))
     sources = closure(archive["sources"], sorted({test_path(name) for name in libraries}))
@@ -306,23 +390,19 @@ def run(args):
         else:
             env.pop("SOLC_WRAPPER", None)
         command = [args.forge, "test", "--root", str(folder), "--force", "--json"]
-        print(f"Running {label}", flush=True)
-        result = subprocess.run(
-            command,
-            cwd=folder,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=600,
-            check=False,
-        )
-        (folder / "stdout.json").write_text(result.stdout)
-        (folder / "stderr.txt").write_text(result.stderr)
+        key = suite_key(folder, command, compiler, env, args.forge)
+        result = forge_test(cache, key, label, command, folder, env)
+        (folder / "stdout.json").write_text(result["stdout"])
+        (folder / "stderr.txt").write_text(result["stderr"])
         tests = {}
-        if result.stdout.lstrip().startswith("{"):
-            for contract, data in json.loads(result.stdout).items():
+        if result["stdout"].lstrip().startswith("{"):
+            for contract, data in json.loads(result["stdout"]).items():
                 for name, test in data.get("test_results", {}).items():
                     kind = test.get("kind", {})
+                    # NOTE: forge splits a fuzz test's runs between parallel
+                    # workers and stops them all at the first failure, so the
+                    # mean gas of a failing fuzz test changes from run to run;
+                    # a cached leg keeps the one its run saw.
                     tests[f"{contract}::{name}"] = {
                         "status": test["status"],
                         "reason": test.get("reason"),
@@ -341,17 +421,17 @@ def run(args):
         }
         allowed = KNOWN_FAILURES | (SOLC_SAFE_GAS_FAILURES if label == "solc-safe" else set())
         succeeded = complete and (
-            result.returncode == 0 if not failures else failures <= allowed
+            result["returncode"] == 0 if not failures else failures <= allowed
         )
         results[label] = {
-            "exit_code": result.returncode,
+            "exit_code": result["returncode"],
             "succeeded": succeeded,
             "tests": tests,
             "source_sha256": hashes,
             "command": command,
-            "compiler_sha256": digest(compiler.read_bytes()),
+            "compiler_sha256": file_sha256(compiler),
         }
-        print(f"{label}: exit {result.returncode}", flush=True)
+        print(f"{label}: exit {result['returncode']}", flush=True)
         (output / "results.json").write_text(json.dumps(results, indent=2) + "\n")
     if args.fair:
         report = gas_report(results)
@@ -388,4 +468,15 @@ if __name__ == "__main__":
         help="compare gas: same inputs and memory on both legs, no solc-safe leg, writes gas.md",
     )
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=default_cache_dir(),
+        help="reuse the results of legs with unchanged inputs from here (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="run every leg, neither reading nor writing the cache",
+    )
     raise SystemExit(run(parser.parse_args()))

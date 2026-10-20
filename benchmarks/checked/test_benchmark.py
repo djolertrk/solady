@@ -1,9 +1,18 @@
-"""Guard against counting incorrect executions as optimization wins."""
+"""Guard against counting incorrect executions as optimization wins, and
+against reusing a cached result whose inputs changed."""
 
+import contextlib
 import copy
+import io
+import os
+import subprocess
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 import benchmark
+import upstream_tests
 
 
 class ComparisonTests(unittest.TestCase):
@@ -256,6 +265,242 @@ class CaseIdentityTests(unittest.TestCase):
             identity,
             benchmark.case_identity("Lib", "f(bytes)", b"abc", "cancun", 200, changed),
         )
+
+
+class CacheTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.cache = benchmark.Cache(self.root)
+
+    def test_key_covers_the_format_the_kind_and_every_input(self):
+        inputs = ("abc", {"sources": {"a": 1, "b": 2}})
+        key = benchmark.Cache.key("compile", *inputs)
+        self.assertRegex(key, "^[0-9a-f]{64}$")
+        self.assertEqual(key, benchmark.Cache.key("compile", *inputs))
+        self.assertNotEqual(key, benchmark.Cache.key("suite", *inputs))
+        self.assertNotEqual(key, benchmark.Cache.key("compile", "abd", inputs[1]))
+        self.assertNotEqual(key, benchmark.Cache.key("compile", *inputs, None))
+        # A compiler may read sources in the order it is given them.
+        reordered = {"sources": {"b": 2, "a": 1}}
+        self.assertNotEqual(key, benchmark.Cache.key("compile", "abc", reordered))
+        with mock.patch.object(benchmark, "CACHE_FORMAT", benchmark.CACHE_FORMAT + 1):
+            self.assertNotEqual(key, benchmark.Cache.key("compile", *inputs))
+
+    def test_an_entry_reads_back_and_leaves_no_temporary_file(self):
+        self.assertIsNone(self.cache.get("suite", "k"))
+        entry = {"returncode": 1, "stdout": '{"a": "\u00e9"}', "seconds": 0.1}
+        self.cache.put("suite", "k", entry)
+        self.assertEqual(self.cache.get("suite", "k"), entry)
+        self.assertEqual([p.name for p in (self.root / "suite").iterdir()], ["k.json.gz"])
+        self.cache.put("suite", "k", {"returncode": 0})
+        self.assertEqual(self.cache.get("suite", "k"), {"returncode": 0})
+
+    def test_an_unreadable_entry_is_a_miss(self):
+        path = self.cache.path("suite", "k")
+        path.parent.mkdir(parents=True)
+        unparsable = benchmark.gzip.compress(b"{")
+        for data in [b"not gzip", unparsable[:-4], unparsable]:
+            path.write_bytes(data)
+            self.assertIsNone(self.cache.get("suite", "k"))
+
+    def test_a_cache_without_a_directory_keeps_nothing(self):
+        cache = benchmark.Cache()
+        cache.put("suite", "k", {"returncode": 0})
+        self.assertIsNone(cache.get("suite", "k"))
+
+    def test_the_default_directory_is_outside_the_repository(self):
+        with mock.patch.dict(os.environ, {"XDG_CACHE_HOME": str(self.root)}):
+            self.assertEqual(benchmark.default_cache_dir(), self.root / "solady-checked")
+        with mock.patch.dict(os.environ):
+            os.environ.pop("XDG_CACHE_HOME", None)
+            directory = benchmark.default_cache_dir()
+        self.assertEqual(directory, Path.home() / ".cache" / "solady-checked")
+        self.assertFalse(directory.is_relative_to(benchmark.ROOT))
+
+
+class CompileCacheTests(unittest.TestCase):
+    def test_a_build_is_reused_for_the_same_compiler_and_input(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache = benchmark.Cache(root / "cache")
+            solc, solar = root / "solc", root / "solar"
+            solc.write_bytes(b"one compiler")
+            solar.write_bytes(b"another compiler")
+            builds = []
+
+            def compile_json(binary, payload):
+                builds.append((binary, payload))
+                return {"contracts": {"Harness.sol": len(builds)}}
+
+            payload = {"sources": {"A.sol": {"content": "contract A {}"}}}
+            with mock.patch.object(benchmark, "compile_json", compile_json):
+                first = benchmark.compile_cached(cache, solc, payload)
+                self.assertEqual(benchmark.compile_cached(cache, solc, payload), first)
+                self.assertEqual(len(builds), 1)
+                benchmark.compile_cached(cache, solar, payload)
+                benchmark.compile_cached(cache, solc, {"sources": {}})
+                self.assertEqual(len(builds), 3)
+                benchmark.compile_cached(benchmark.Cache(), solc, payload)
+                self.assertEqual(len(builds), 4)
+
+
+class TraceCacheTests(unittest.TestCase):
+    CASE = {
+        "calldata": bytes.fromhex("12345678"),
+        "slots": [3, 4],
+        "setup": [bytes(32), bytes([1]) * 32],
+        "accounts": {"0x" + "a1" * 20: "0x60", "0x" + "b2" * 20: "0x"},
+        "observe": True,
+    }
+
+    def test_case_key_covers_every_input_of_a_call(self):
+        key = benchmark.trace_case_key(**self.CASE)
+        self.assertEqual(key, benchmark.trace_case_key(**self.CASE))
+        accounts = dict(reversed(self.CASE["accounts"].items()))
+        self.assertEqual(key, benchmark.trace_case_key(**dict(self.CASE, accounts=accounts)))
+        for change in [
+            {"calldata": bytes.fromhex("12345679")},
+            {"slots": [3, 5]},
+            {"setup": [bytes(32), bytes(32)]},
+            {"setup": None, "slots": []},
+            {"accounts": {"0x" + "a1" * 20: "0x61"}},
+            {"accounts": None},
+            {"observe": False},
+        ]:
+            with self.subTest(change=change):
+                self.assertNotEqual(key, benchmark.trace_case_key(**dict(self.CASE, **change)))
+
+    def test_traces_are_reused_only_on_the_same_harness(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = benchmark.Cache(Path(directory))
+            traces = benchmark.TraceCache(cache, "environment")
+            harness = traces.harness("0x01", "6000", b"\x00")
+            self.assertIsNone(traces.get(harness, "case"))
+            traces.put(harness, "case", {"opcode_gas": 21})
+            traces.save()
+            again = benchmark.TraceCache(cache, "environment")
+            self.assertEqual(
+                again.get(again.harness("0x01", "6000", b"\x00"), "case"), {"opcode_gas": 21}
+            )
+            self.assertIsNone(again.get(again.harness("0x01", "6000", b"\x00"), "other case"))
+            self.assertEqual((again.reused, again.traced), (1, 0))
+            elsewhere = benchmark.TraceCache(cache, "another node")
+            for other in [
+                again.harness("0x02", "6000", b"\x00"),
+                again.harness("0x01", "6001", b"\x00"),
+                again.harness("0x01", "6000", b"\x01"),
+                elsewhere.harness("0x01", "6000", b"\x00"),
+            ]:
+                self.assertIsNone(again.get(other, "case"))
+
+    def test_saving_keeps_the_traces_another_run_saved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = benchmark.Cache(Path(directory))
+            first, second = (benchmark.TraceCache(cache, "environment") for _ in range(2))
+            harness = first.harness("0x01", "6000", b"\x00")
+            self.assertIsNone(first.get(harness, "a"))
+            self.assertIsNone(second.get(harness, "b"))
+            first.put(harness, "a", {"opcode_gas": 1})
+            second.put(harness, "b", {"opcode_gas": 2})
+            first.save()
+            second.save()
+            self.assertEqual(
+                cache.get("trace", harness), {"a": {"opcode_gas": 1}, "b": {"opcode_gas": 2}}
+            )
+
+    def test_environment_covers_the_code_that_measures_a_call(self):
+        identity = {"version": "anvil 1", "sha256": "a"}
+        with mock.patch.object(benchmark, "tool_identity", return_value=identity):
+            key = benchmark.trace_environment("cancun", "0x01")
+            self.assertEqual(key, benchmark.trace_environment("cancun", "0x01"))
+            self.assertNotEqual(key, benchmark.trace_environment("prague", "0x01"))
+            self.assertNotEqual(key, benchmark.trace_environment("cancun", "0x02"))
+            with mock.patch.object(benchmark.inspect, "getsource", lambda f: f.__name__):
+                self.assertNotEqual(key, benchmark.trace_environment("cancun", "0x01"))
+        rebuilt = dict(identity, sha256="b")
+        with mock.patch.object(benchmark, "tool_identity", return_value=rebuilt):
+            self.assertNotEqual(key, benchmark.trace_environment("cancun", "0x01"))
+
+
+class SuiteCacheTests(unittest.TestCase):
+    FILES = {
+        "foundry.toml": '[profile.default.fuzz]\nruns = 256\nseed = "0x20260910"\n',
+        "src/utils/Lib.sol": "library Lib {}",
+        "test/Lib.t.sol": 'import "src/utils/Lib.sol";',
+    }
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.compiler = self.root / "solc"
+        self.compiler.write_bytes(b"compiler")
+        self.projects = 0
+
+    def project(self, files):
+        self.projects += 1
+        folder = self.root / f"project-{self.projects}"
+        for name, text in files.items():
+            (folder / name).parent.mkdir(parents=True, exist_ok=True)
+            (folder / name).write_text(text)
+        return folder
+
+    def key(self, folder, env=None, forge="forge 1.7.1"):
+        command = ["forge", "test", "--root", str(folder), "--force", "--json"]
+        identity = {"version": forge, "sha256": "f"}
+        with mock.patch.object(upstream_tests, "tool_identity", return_value=identity):
+            return upstream_tests.suite_key(folder, command, self.compiler, env or {}, "forge")
+
+    def test_key_does_not_depend_on_where_the_project_is(self):
+        self.assertEqual(self.key(self.project(self.FILES)), self.key(self.project(self.FILES)))
+
+    def test_key_covers_files_settings_tools_and_environment(self):
+        key = self.key(self.project(self.FILES))
+        seed = self.FILES["foundry.toml"].replace("0x20260910", "0x1")
+        for files in [
+            dict(self.FILES, **{"foundry.toml": seed}),
+            dict(self.FILES, **{"src/utils/Lib.sol": "library Lib { }"}),
+            dict(self.FILES, **{"test/data/vectors.jsonl": "{}"}),
+        ]:
+            with self.subTest(files=files):
+                self.assertNotEqual(key, self.key(self.project(files)))
+        folder = self.project(self.FILES)
+        self.assertNotEqual(key, self.key(folder, env={"FOUNDRY_FUZZ_RUNS": "1"}))
+        self.assertNotEqual(key, self.key(folder, env={"SOLC_WRAPPER": "1"}))
+        self.assertNotEqual(key, self.key(folder, forge="forge 1.7.2"))
+        # The compiler counts by its contents, not by the path forge finds it at.
+        self.assertEqual(key, self.key(folder, env={"FOUNDRY_SOLC": "/elsewhere/solc"}))
+        with mock.patch.object(upstream_tests.os, "cpu_count", return_value=1):
+            self.assertNotEqual(key, self.key(folder))
+
+    def test_a_run_whose_tests_ran_is_reused(self):
+        cache = benchmark.Cache(self.root / "cache")
+        finished = subprocess.CompletedProcess([], 1, stdout='{"test/Lib.t.sol:T": {}}', stderr="")
+        broken = subprocess.CompletedProcess([], 1, stdout="", stderr="Compiler run failed")
+        crashed = subprocess.CompletedProcess([], -9, stdout='{"test/Lib.t.sol:T": {}}', stderr="")
+        for result, runs in [(finished, 1), (broken, 2), (crashed, 2)]:
+            with self.subTest(result=result), contextlib.redirect_stdout(io.StringIO()):
+                key = upstream_tests.Cache.key("suite", result.stdout, result.returncode)
+                arguments = (cache, key, "leg", ["forge"], self.root, {})
+                with mock.patch.object(upstream_tests.subprocess, "run") as run:
+                    run.return_value = result
+                    first = upstream_tests.forge_test(*arguments)
+                    second = upstream_tests.forge_test(*arguments)
+                self.assertEqual(run.call_count, runs)
+                self.assertEqual(first, second)
+                self.assertEqual(first["stdout"], result.stdout)
+
+    def test_no_cache_runs_every_time(self):
+        finished = subprocess.CompletedProcess([], 0, stdout="{}", stderr="")
+        with contextlib.redirect_stdout(io.StringIO()):
+            with mock.patch.object(upstream_tests.subprocess, "run", return_value=finished) as run:
+                for _ in range(2):
+                    upstream_tests.forge_test(
+                        benchmark.Cache(), "k", "leg", ["forge"], self.root, {}
+                    )
+        self.assertEqual(run.call_count, 2)
 
 
 if __name__ == "__main__":

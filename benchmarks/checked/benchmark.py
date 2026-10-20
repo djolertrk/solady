@@ -8,6 +8,9 @@
 Every implementation is compiled by both compilers. solc runs through both code
 paths; the primary comparison uses its cheaper upstream result for each call.
 All measured cases must match a separate Python oracle, including revert bytes.
+
+A content-addressed cache, `--cache-dir`, reuses every build and trace whose
+inputs are unchanged since an earlier run; `--no-cache` bypasses it.
 """
 
 from __future__ import annotations
@@ -15,16 +18,23 @@ from __future__ import annotations
 import argparse
 import base64
 import urllib.parse
+import contextlib
+import functools
 import gzip
 import hashlib
+import inspect
 import json
+import os
 import posixpath
 import random
 import re
+import shutil
 import socket
 import subprocess
+import tempfile
 import time
 import urllib.request
+import zlib
 from pathlib import Path
 
 from eth_abi import encode
@@ -78,6 +88,100 @@ def compile_json(binary, payload):
     if errors:
         raise RuntimeError("\n".join(x.get("formattedMessage", str(x)) for x in errors))
     return output
+
+
+# Every cache key starts with this version; bump it when a cached value changes
+# meaning or layout, so that no entry written before is read again.
+CACHE_FORMAT = 1
+
+
+def default_cache_dir():
+    """Where the runners keep their cache unless told otherwise: outside the repository."""
+    base = os.environ.get("XDG_CACHE_HOME")
+    return (Path(base) if base else Path.home() / ".cache") / "solady-checked"
+
+
+class Cache:
+    """Content-addressed results of the slow steps: builds, suites and traces.
+
+    A key is the sha256 of the format version and of every input that affects
+    the value, so a changed input misses instead of finding a stale value, and
+    no entry ever needs invalidating. An entry is one gzip-compressed JSON file,
+    `<directory>/<kind>/<key>.json.gz`, written to a temporary file and renamed
+    into place, so a reader never sees a partial one; an unreadable entry is a
+    miss. Nothing is evicted: deleting the directory empties the cache. A cache
+    without a directory keeps nothing, for `--no-cache`.
+    """
+
+    def __init__(self, directory=None):
+        self.directory = directory
+
+    @staticmethod
+    def key(kind, *inputs):
+        # Dictionaries keep their order, which a compiler may depend on.
+        text = json.dumps([CACHE_FORMAT, kind, *inputs], separators=(",", ":"))
+        return digest(text.encode())
+
+    def path(self, kind, key):
+        return self.directory / kind / f"{key}.json.gz"
+
+    def get(self, kind, key):
+        if self.directory is None:
+            return None
+        try:
+            return json.loads(gzip.decompress(self.path(kind, key).read_bytes()))
+        except (OSError, EOFError, ValueError, zlib.error):
+            return None
+
+    def put(self, kind, key, value):
+        if self.directory is None:
+            return
+        path = self.path(kind, key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = json.dumps(value, separators=(",", ":")).encode()
+        handle, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        try:
+            with os.fdopen(handle, "wb") as file:
+                file.write(gzip.compress(data, compresslevel=1, mtime=0))
+            os.replace(temporary, path)
+        except BaseException:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(temporary)
+            raise
+
+
+@functools.cache
+def file_sha256(path):
+    """The sha256 of a file's bytes, read once per run."""
+    return digest(Path(path).read_bytes())
+
+
+@functools.cache
+def tool_identity(tool):
+    """A command-line tool's `--version` and the sha256 of its binary, for cache keys."""
+    path = shutil.which(str(tool))
+    if path is None:
+        raise FileNotFoundError(f"{tool} not found")
+    version = subprocess.check_output([path, "--version"], text=True).strip()
+    return {"version": version, "sha256": file_sha256(Path(path).resolve())}
+
+
+def compile_cached(cache, binary, payload, label=None):
+    """`compile_json` through `cache`, with the seconds the compile took.
+
+    A hit returns the seconds of the compile that produced the output. With a
+    `label`, prints the progress line for the build.
+    """
+    key = cache.key("compile", file_sha256(binary), payload)
+    entry = cache.get("compile", key)
+    if label is not None:
+        print(f"Compiling {label}" + (" (cached)" if entry else ""), flush=True)
+    if entry is None:
+        start = time.monotonic()
+        output = compile_json(binary, payload)
+        entry = {"output": output, "seconds": time.monotonic() - start}
+        cache.put("compile", key, entry)
+    return entry["output"], entry["seconds"]
 
 
 def walk(node):
@@ -321,6 +425,7 @@ def prepare(
     api_filters=(),
     isolate=False,
     upstream_overrides=(),
+    cache=Cache(),
 ):
     archive = json.loads(gzip.decompress(ARCHIVE.read_bytes()))
     # Upstream ships per-fork variants of some libraries (`src/utils/clz/`).
@@ -344,14 +449,15 @@ def prepare(
     )
     safe = dict(sorted(safe.items()))
     ast_settings = {"outputSelection": {"*": {"": ["ast"]}}}
-    safe_ast = compile_json(
-        solc, {"language": "Solidity", "sources": safe, "settings": ast_settings}
+    safe_ast, _ = compile_cached(
+        cache, solc, {"language": "Solidity", "sources": safe, "settings": ast_settings}
     )
     violations = safety_violations(safe_ast)
     if violations:
         raise ValueError(f"safe source audit failed: {violations}")
     # Parse the whole pinned archive for honest API coverage, without generating bytecode.
-    original_ast = compile_json(
+    original_ast, _ = compile_cached(
+        cache,
         solc,
         {
             "language": "Solidity",
@@ -465,7 +571,13 @@ def prepare(
             harness += f"function {row['wrapper']}({params}) external {mutability}{returns_clause} {{ {body} }}\n"
         harness += "}\n"
     safe["Harness.sol"] = {"content": harness}
-    upstream = closure(archive["sources"], safe.keys() - {"Harness.sol"} - set(port_only))
+    # Sorted like the safe sources: the closure's order follows a set's, which
+    # changes from run to run, and a compiler may depend on the input's order.
+    upstream = dict(
+        sorted(
+            closure(archive["sources"], safe.keys() - {"Harness.sol"} - set(port_only)).items()
+        )
+    )
     upstream["Harness.sol"] = {"content": harness}
     (out / "Harness.sol").write_text(harness)
     audit = {
@@ -1857,15 +1969,152 @@ def case_identity(library, api, calldata, evm_version, optimizer_runs, artifact)
     return digest(json.dumps(fields, sort_keys=True, separators=(",", ":")).encode())
 
 
+def trace_call(url, sender, address, code, calldata, slots, setup, accounts, observe):
+    """Runs one case on the harness at `address` and returns what the node measured.
+
+    The case first sets the storage words and account code it reads, so the
+    call depends on no earlier one. A store (`observe`) then runs for real and
+    reads its words back.
+    """
+    # The words storage starts from, written by the node itself.
+    for slot, word in zip(slots, setup or []):
+        rpc(url, "anvil_setStorageAt", [address, hex(slot), "0x" + word.hex()])
+    for account, account_code in (accounts or {}).items():
+        rpc(url, "anvil_setCode", [account, account_code])
+    tx = {
+        "from": sender,
+        "to": address,
+        "data": "0x" + calldata.hex(),
+        "gas": hex(80000000),
+    }
+    trace = rpc(
+        url,
+        "debug_traceCall",
+        [
+            tx,
+            "latest",
+            {
+                "disableStorage": True,
+                "disableStack": True,
+                "enableMemory": False,
+            },
+        ],
+    )
+    logs = trace["structLogs"]
+    traced = {
+        "opcode_gas": opcode_gas(logs),
+        "dispatch_gas": dispatch_gas(logs, code, calldata[:4]),
+        "trace_gas": trace.get("gas"),
+        "failed": trace.get("failed", False),
+        "return_data": "0x" + trace.get("returnValue", "").removeprefix("0x"),
+    }
+    if observe:
+        # A store is observed through the words it leaves: run it for real
+        # and read them back.
+        send_transaction(url, sender, address, calldata)
+        traced["storage"] = [
+            rpc(url, "eth_getStorageAt", [address, hex(slot), "latest"])
+            for slot in slots
+        ]
+    return traced
+
+
+def trace_environment(evm_version, sender):
+    """The key of what every trace depends on besides its harness and case.
+
+    That is the node, its fork and account, and the code that turns a call into
+    the measurements the cache keeps, so that changing how a call is measured
+    traces every case afresh.
+    """
+    return Cache.key(
+        "trace-environment",
+        tool_identity("anvil"),
+        evm_version,
+        sender,
+        [
+            inspect.getsource(function)
+            for function in (launch_anvil, trace_call, send_transaction, opcode_gas, dispatch_gas)
+        ],
+    )
+
+
+def trace_case_key(calldata, slots, setup, accounts, observe):
+    """The key of one case's inputs to `trace_call`."""
+    return Cache.key(
+        "trace-case",
+        calldata.hex(),
+        [hex(slot) for slot in slots],
+        [word.hex() for word in setup] if setup else None,
+        sorted((accounts or {}).items()),
+        observe,
+    )
+
+
+class TraceCache:
+    """Traces kept in a `Cache` by harness, then by case.
+
+    A harness is one deployed contract: its address and its creation and
+    runtime code, on a node `environment` describes. A leg whose bytecode is
+    unchanged finds every trace it made before, and a changed harness traces
+    its cases afresh. Reusing some cases while tracing others gives the results
+    of tracing them all because calls share no state: a case sets the storage
+    words and account code its call reads, and no harness reads the block or
+    the sender's balance, which the stores of earlier cases advance.
+    """
+
+    def __init__(self, cache, environment):
+        self.cache = cache
+        self.environment = environment
+        self.harnesses = {}
+        self.changed = set()
+        self.reused = 0
+        self.traced = 0
+
+    def harness(self, address, creation, runtime):
+        """The key of the harness at `address`; `creation` is hex, `runtime` bytes."""
+        return Cache.key("trace", self.environment, address, creation, runtime.hex())
+
+    def get(self, harness, case):
+        """The cached trace of `case` on `harness`, or None."""
+        traces = self.harnesses.get(harness)
+        if traces is None:
+            traces = self.harnesses[harness] = self.cache.get("trace", harness) or {}
+        traced = traces.get(case)
+        if traced is not None:
+            self.reused += 1
+        return traced
+
+    def put(self, harness, case, traced):
+        """Keeps a new trace of `case` on `harness` and returns it."""
+        if self.cache.directory is not None:
+            self.harnesses.setdefault(harness, {})[case] = traced
+            self.changed.add(harness)
+        self.traced += 1
+        return traced
+
+    def save(self):
+        """Writes every harness that gained traces back to the cache.
+
+        Traces another run saved for the harness meanwhile are kept too.
+        """
+        for harness in sorted(self.changed):
+            traces = self.cache.get("trace", harness) or {}
+            traces.update(self.harnesses[harness])
+            self.cache.put("trace", harness, traces)
+        self.changed.clear()
+
+
 def run(args):
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=False)
+    cache = Cache(None if args.no_cache else args.cache_dir)
     safe, upstream, apis, audit = prepare(
         args.solc,
         out,
         args.api,
         args.isolate_api,
         upstream_overrides=args.upstream_override or (),
+        cache=cache,
     )
     variants = [
         (
@@ -1882,7 +2131,6 @@ def run(args):
     binaries = {}
     artifacts = {}
     for label, binary, sources, ir in variants:
-        print(f"Compiling {label}", flush=True)
         settings = {
             "optimizer": {"enabled": True, "runs": args.runs},
             "evmVersion": args.evm_version,
@@ -1896,9 +2144,7 @@ def run(args):
             },
         }
         payload = {"language": "Solidity", "sources": sources, "settings": settings}
-        start = time.monotonic()
-        result = compile_json(binary, payload)
-        elapsed = time.monotonic() - start
+        result, elapsed = compile_cached(cache, binary, payload, label)
         if label.startswith("solc-safe") and safety_violations(result):
             raise ValueError(f"{label} safety audit failed")
         folder = out / label
@@ -1910,7 +2156,7 @@ def run(args):
             "compiler": subprocess.check_output(
                 [str(binary), "--version"], text=True
             ).strip(),
-            "compiler_sha256": digest(Path(binary).read_bytes()),
+            "compiler_sha256": file_sha256(binary),
             "input_sha256": digest(json.dumps(payload, sort_keys=True).encode()),
             "compile_seconds": elapsed,
             "contracts": {},
@@ -1925,7 +2171,9 @@ def run(args):
     proc, url, sender = launch_anvil(args.evm_version)
     cases = []
     failures = []
+    traces = None
     try:
+        traces = TraceCache(cache, trace_environment(args.evm_version, sender))
         addresses = {}
         runtime_code = {}
         for label, contracts in binaries.items():
@@ -1959,6 +2207,19 @@ def run(args):
                     "deployment_gas": int(receipt["gasUsed"], 16),
                     "exceeds_code_size_limit": (len(runtime) - 2) // 2 > CODE_SIZE_LIMIT,
                 }
+        # Every leg is deployed, reused or not, so each harness has the address
+        # a run without the cache gives it.
+        harnesses = {
+            label: {
+                name: traces.harness(
+                    addresses[label][name],
+                    artifact["evm"]["bytecode"]["object"],
+                    runtime_code[label][name],
+                )
+                for name, artifact in contracts.items()
+            }
+            for label, contracts in binaries.items()
+        }
         selected_apis = [
             row
             for row in apis
@@ -1987,59 +2248,42 @@ def run(args):
                 expected_bytes = (
                     expected if expected_revert else encode(row["outputs"], expected)
                 )
+                case_key = trace_case_key(calldata, slots, setup, accounts, final is not None)
                 measurements = {}
                 for label in binaries:
-                    harness_address = addresses[label][row["library"] + "Harness"]
-                    # The words storage starts from, written by the node itself.
-                    for slot, word in zip(slots, setup or []):
-                        rpc(url, "anvil_setStorageAt", [harness_address, hex(slot), "0x" + word.hex()])
-                    for account, code in (accounts or {}).items():
-                        rpc(url, "anvil_setCode", [account, code])
-                    tx = {
-                        "from": sender,
-                        "to": harness_address,
-                        "data": "0x" + calldata.hex(),
-                        "gas": hex(80000000),
-                    }
-                    trace = rpc(
-                        url,
-                        "debug_traceCall",
-                        [
-                            tx,
-                            "latest",
-                            {
-                                "disableStorage": True,
-                                "disableStack": True,
-                                "enableMemory": False,
-                            },
-                        ],
-                    )
-                    actual = trace.get("returnValue", "").removeprefix("0x")
-                    failed = trace.get("failed", False)
-                    logs = trace["structLogs"]
+                    name = row["library"] + "Harness"
+                    harness = harnesses[label][name]
+                    traced = traces.get(harness, case_key)
+                    if traced is None:
+                        traced = traces.put(
+                            harness,
+                            case_key,
+                            trace_call(
+                                url,
+                                sender,
+                                addresses[label][name],
+                                runtime_code[label][name],
+                                calldata,
+                                slots,
+                                setup,
+                                accounts,
+                                final is not None,
+                            ),
+                        )
+                    actual = traced["return_data"].removeprefix("0x")
                     measurement = {
                         "matches_oracle": (
-                            failed == expected_revert
+                            traced["failed"] == expected_revert
                             and actual.lower() == expected_bytes.hex()
                         ),
-                        "opcode_gas": opcode_gas(logs),
-                        "dispatch_gas": dispatch_gas(
-                            logs,
-                            runtime_code[label][row["library"] + "Harness"],
-                            calldata[:4],
-                        ),
-                        "trace_gas": trace.get("gas"),
-                        "failed": failed,
-                        "return_data": "0x" + actual,
+                        "opcode_gas": traced["opcode_gas"],
+                        "dispatch_gas": traced["dispatch_gas"],
+                        "trace_gas": traced["trace_gas"],
+                        "failed": traced["failed"],
+                        "return_data": traced["return_data"],
                     }
                     if final is not None:
-                        # A store is observed through the words it leaves:
-                        # run it for real and read them back.
-                        send_transaction(url, sender, harness_address, calldata)
-                        words = [
-                            rpc(url, "eth_getStorageAt", [harness_address, hex(slot), "latest"])
-                            for slot in slots
-                        ]
+                        words = traced["storage"]
                         measurement["storage"] = words
                         measurement["matches_oracle"] &= [
                             int(word, 16) for word in words
@@ -2086,6 +2330,9 @@ def run(args):
     finally:
         proc.terminate()
         proc.wait(timeout=10)
+        if traces is not None:
+            traces.save()
+    print(f"Traced {traces.traced} calls; reused {traces.reused} from the cache", flush=True)
     report = {
         "schema": "safe-solady-comparison@2",
         "evm_version": args.evm_version,
@@ -2289,4 +2536,15 @@ if __name__ == "__main__":
         help="measure against FILE as the upstream source at PATH, e.g. a fork variant",
     )
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=default_cache_dir(),
+        help="reuse builds and traces whose inputs are unchanged from here (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="build and trace every leg, neither reading nor writing the cache",
+    )
     raise SystemExit(run(parser.parse_args()))
