@@ -44,6 +44,7 @@ LIBRARIES = [
     "LibMap",
     "DateTimeLib",
     "LibPRNG",
+    "FixedPointMathLib",
     "tokens/ERC20",
     "tokens/WETH",
     "auth/Ownable",
