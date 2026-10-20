@@ -43,6 +43,7 @@ LIBRARIES = [
     "LibBitmap",
     "LibMap",
     "DateTimeLib",
+    "LibPRNG",
     "tokens/ERC20",
     "tokens/WETH",
     "auth/Ownable",

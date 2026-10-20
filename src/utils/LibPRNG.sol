@@ -1,10 +1,20 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.4;
+pragma solidity ^0.8.20;
 
 /// @notice Library for generating pseudorandom numbers.
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/utils/LibPRNG.sol)
 /// @author LazyShuffler based on NextShuffler by aschlosberg (divergencearran)
 /// (https://github.com/divergencetech/ethier/blob/main/contracts/random/NextShuffler.sol)
+/// @dev The checked port draws the same numbers and makes the same swaps as the
+/// assembly. The normal sample's lane sum multiplies past the word on purpose, so
+/// it goes through the raw `_mul`. A lazy shuffler keeps its packed state in its
+/// struct and its permutation in the slots the assembly derives from the struct's
+/// slot; trusted helpers name that slot and read and write the derived ones, and
+/// the signed and address shuffles go through upstream's trusted array casts. A
+/// shuffle keeps the state in a local and stores it when it ends, where the
+/// assembly stores it after every draw: they differ only for an array that
+/// overlaps the generator's memory.
+/// @custom:solar-safe memory arithmetic
 library LibPRNG {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                       CUSTOM ERRORS                        */
@@ -60,10 +70,7 @@ library LibPRNG {
 
     /// @dev Seeds the `prng` with `state`.
     function seed(PRNG memory prng, uint256 state) internal pure {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(prng, state)
-        }
+        prng.state = state;
     }
 
     /// @dev Returns the next pseudorandom uint256.
@@ -71,19 +78,8 @@ library LibPRNG {
     function next(PRNG memory prng) internal pure returns (uint256 result) {
         // We simply use `keccak256` for a great balance between
         // runtime gas costs, bytecode size, and statistical properties.
-        //
-        // A high-quality LCG with a 32-byte state
-        // is only about 30% more gas efficient during runtime,
-        // but requires a 32-byte multiplier, which can cause bytecode bloat
-        // when this function is inlined.
-        //
-        // Using this method is about 2x more efficient than
-        // `nextRandomness = uint256(keccak256(abi.encode(randomness)))`.
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := keccak256(prng, 0x20)
-            mstore(prng, result)
-        }
+        result = uint256(keccak256(abi.encode(prng.state)));
+        prng.state = result;
     }
 
     /// @dev Returns a pseudorandom uint256, uniformly distributed
@@ -94,71 +90,56 @@ library LibPRNG {
     /// or for small enough moduli such that the bias is negligible,
     /// use {next} instead.
     function uniform(PRNG memory prng, uint256 upper) internal pure returns (uint256 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            for {} 1 {} {
-                result := keccak256(prng, 0x20)
-                mstore(prng, result)
-                if iszero(lt(result, mod(sub(0, upper), upper))) { break }
-            }
-            result := mod(result, upper)
-        }
+        // `2**256 % upper`: draws below it would bias the remainder.
+        uint256 threshold = upper == 0 ? 0 : (type(uint256).max - upper + 1) % upper;
+        do {
+            result = next(prng);
+        } while (result < threshold);
+        result = upper == 0 ? 0 : result % upper;
     }
 
     /// @dev Returns a sample from the standard normal distribution denominated in `WAD`.
     function standardNormalWad(PRNG memory prng) internal pure returns (int256 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            // Technically, this is the Irwin-Hall distribution with 20 samples.
-            // The chance of drawing a sample outside 10 σ from the standard normal distribution
-            // is ≈ 0.000000000000000000000015, which is insignificant for most practical purposes.
-            // Passes the Kolmogorov-Smirnov test for 200k samples. Uses about 322 gas.
-            result := keccak256(prng, 0x20)
-            mstore(prng, result)
-            let n := 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff43 // Prime.
-            let a := 0x100000000000000000000000000000051 // Prime and a primitive root of `n`.
-            let m := 0x1fffffffffffffff1fffffffffffffff1fffffffffffffff1fffffffffffffff
-            let s := 0x1000000000000000100000000000000010000000000000001
-            let r1 := mulmod(result, a, n)
-            let r2 := mulmod(r1, a, n)
-            let r3 := mulmod(r2, a, n)
-            // forgefmt: disable-next-item
-            result := sub(sar(96, mul(26614938895861601847173011183,
-                add(add(shr(192, mul(s, add(and(m, result), and(m, r1)))),
-                shr(192, mul(s, add(and(m, r2), and(m, r3))))),
-                shr(192, mul(s, and(m, mulmod(r3, a, n))))))), 7745966692414833770)
-        }
+        // Technically, this is the Irwin-Hall distribution with 20 samples.
+        // The chance of drawing a sample outside 10 σ from the standard normal distribution
+        // is ≈ 0.000000000000000000000015, which is insignificant for most practical purposes.
+        // Passes the Kolmogorov-Smirnov test for 200k samples.
+        uint256 r0 = next(prng);
+        uint256 n = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff43; // Prime.
+        uint256 a = 0x100000000000000000000000000000051; // Prime and a primitive root of `n`.
+        uint256 m = 0x1fffffffffffffff1fffffffffffffff1fffffffffffffff1fffffffffffffff;
+        uint256 r1 = mulmod(r0, a, n);
+        uint256 r2 = mulmod(r1, a, n);
+        uint256 r3 = mulmod(r2, a, n);
+        uint256 sum = _laneSum((m & r0) + (m & r1)) + _laneSum((m & r2) + (m & r3))
+            + _laneSum(m & mulmod(r3, a, n));
+        result = (int256(26614938895861601847173011183 * sum) >> 96) - 7745966692414833770;
     }
 
     /// @dev Returns a sample from the unit exponential distribution denominated in `WAD`.
     function exponentialWad(PRNG memory prng) internal pure returns (uint256 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            // Passes the Kolmogorov-Smirnov test for 200k samples.
-            // Gas usage varies, starting from about 172+ gas.
-            let r := keccak256(prng, 0x20)
-            mstore(prng, r)
-            let p := shl(129, r)
-            let w := shl(1, r)
-            if iszero(gt(w, p)) {
-                let n := 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff43 // Prime.
-                let a := 0x100000000000000000000000000000051 // Prime and a primitive root of `n`.
-                for {} 1 {} {
-                    r := mulmod(r, a, n)
-                    if iszero(lt(shl(129, r), w)) {
-                        r := mulmod(r, a, n)
-                        result := add(1000000000000000000, result)
-                        w := shl(1, r)
-                        p := shl(129, r)
-                        if iszero(lt(w, p)) { break }
-                        continue
-                    }
-                    w := shl(1, r)
-                    if iszero(lt(w, shl(129, r))) { break }
+        // Passes the Kolmogorov-Smirnov test for 200k samples.
+        uint256 r = next(prng);
+        uint256 p = r << 129;
+        uint256 w = r << 1;
+        if (w <= p) {
+            uint256 n = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff43; // Prime.
+            uint256 a = 0x100000000000000000000000000000051; // Prime and a primitive root of `n`.
+            while (true) {
+                r = mulmod(r, a, n);
+                if (r << 129 >= w) {
+                    r = mulmod(r, a, n);
+                    result += 1000000000000000000;
+                    w = r << 1;
+                    p = r << 129;
+                    if (w >= p) break;
+                    continue;
                 }
+                w = r << 1;
+                if (w >= r << 129) break;
             }
-            result := add(div(p, shl(129, 170141183460469231732)), result)
         }
+        result += p / (uint256(170141183460469231732) << 129);
     }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -167,46 +148,24 @@ library LibPRNG {
 
     /// @dev Shuffles the array in-place with Fisher-Yates shuffle.
     function shuffle(PRNG memory prng, uint256[] memory a) internal pure {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let n := mload(a)
-            let w := not(0)
-            let mask := shr(128, w)
-            if n {
-                for { a := add(a, 0x20) } 1 {} {
-                    // We can just directly use `keccak256`, cuz
-                    // the other approaches don't save much.
-                    let r := keccak256(prng, 0x20)
-                    mstore(prng, r)
-
-                    // Note that there will be a very tiny modulo bias
-                    // if the length of the array is not a power of 2.
-                    // For all practical purposes, it is negligible
-                    // and will not be a fairness or security concern.
-                    {
-                        let j := add(a, shl(5, mod(shr(128, r), n)))
-                        n := add(n, w) // `sub(n, 1)`.
-                        if iszero(n) { break }
-
-                        let i := add(a, shl(5, n))
-                        let t := mload(i)
-                        mstore(i, mload(j))
-                        mstore(j, t)
-                    }
-
-                    {
-                        let j := add(a, shl(5, mod(and(r, mask), n)))
-                        n := add(n, w) // `sub(n, 1)`.
-                        if iszero(n) { break }
-
-                        let i := add(a, shl(5, n))
-                        let t := mload(i)
-                        mstore(i, mload(j))
-                        mstore(j, t)
-                    }
-                }
-            }
+        uint256 n = a.length;
+        if (n == 0) return;
+        // The state stays in a local until the shuffle ends.
+        uint256 r = prng.state;
+        while (true) {
+            r = uint256(keccak256(abi.encode(r)));
+            // Note that there will be a very tiny modulo bias
+            // if the length of the array is not a power of 2.
+            // For all practical purposes, it is negligible
+            // and will not be a fairness or security concern.
+            uint256 j = (r >> 128) % n;
+            if (--n == 0) break;
+            (a[n], a[j]) = (a[j], a[n]);
+            j = (r & type(uint128).max) % n;
+            if (--n == 0) break;
+            (a[n], a[j]) = (a[j], a[n]);
         }
+        prng.state = r;
     }
 
     /// @dev Shuffles the array in-place with Fisher-Yates shuffle.
@@ -222,45 +181,26 @@ library LibPRNG {
     /// @dev Partially shuffles the array in-place with Fisher-Yates shuffle.
     /// The first `k` elements will be uniformly sampled without replacement.
     function shuffle(PRNG memory prng, uint256[] memory a, uint256 k) internal pure {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let n := mload(a)
-            k := xor(k, mul(xor(k, n), lt(n, k))) // `min(n, k)`.
-            if k {
-                let mask := shr(128, not(0))
-                let b := 0
-                for { a := add(a, 0x20) } 1 {} {
-                    // We can just directly use `keccak256`, cuz
-                    // the other approaches don't save much.
-                    let r := keccak256(prng, 0x20)
-                    mstore(prng, r)
-
-                    // Note that there will be a very tiny modulo bias
-                    // if the length of the array is not a power of 2.
-                    // For all practical purposes, it is negligible
-                    // and will not be a fairness or security concern.
-                    {
-                        let j := add(a, shl(5, add(b, mod(shr(128, r), sub(n, b)))))
-                        let i := add(a, shl(5, b))
-                        let t := mload(i)
-                        mstore(i, mload(j))
-                        mstore(j, t)
-                        b := add(b, 1)
-                        if eq(b, k) { break }
-                    }
-
-                    {
-                        let j := add(a, shl(5, add(b, mod(and(r, mask), sub(n, b)))))
-                        let i := add(a, shl(5, b))
-                        let t := mload(i)
-                        mstore(i, mload(j))
-                        mstore(j, t)
-                        b := add(b, 1)
-                        if eq(b, k) { break }
-                    }
-                }
-            }
+        uint256 n = a.length;
+        if (k > n) k = n;
+        if (k == 0) return;
+        uint256 b;
+        // The state stays in a local until the shuffle ends.
+        uint256 r = prng.state;
+        while (true) {
+            r = uint256(keccak256(abi.encode(r)));
+            // Note that there will be a very tiny modulo bias
+            // if the length of the array is not a power of 2.
+            // For all practical purposes, it is negligible
+            // and will not be a fairness or security concern.
+            uint256 j = b + (r >> 128) % (n - b);
+            (a[b], a[j]) = (a[j], a[b]);
+            if (++b == k) break;
+            j = b + (r & type(uint128).max) % (n - b);
+            (a[b], a[j]) = (a[j], a[b]);
+            if (++b == k) break;
         }
+        prng.state = r;
     }
 
     /// @dev Partially shuffles the array in-place with Fisher-Yates shuffle.
@@ -277,45 +217,24 @@ library LibPRNG {
 
     /// @dev Shuffles the bytes in-place with Fisher-Yates shuffle.
     function shuffle(PRNG memory prng, bytes memory a) internal pure {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let n := mload(a)
-            let w := not(0)
-            let mask := shr(128, w)
-            if n {
-                let b := add(a, 0x01)
-                for { a := add(a, 0x20) } 1 {} {
-                    // We can just directly use `keccak256`, cuz
-                    // the other approaches don't save much.
-                    let r := keccak256(prng, 0x20)
-                    mstore(prng, r)
-
-                    // Note that there will be a very tiny modulo bias
-                    // if the length of the array is not a power of 2.
-                    // For all practical purposes, it is negligible
-                    // and will not be a fairness or security concern.
-                    {
-                        let o := mod(shr(128, r), n)
-                        n := add(n, w) // `sub(n, 1)`.
-                        if iszero(n) { break }
-
-                        let t := mload(add(b, n))
-                        mstore8(add(a, n), mload(add(b, o)))
-                        mstore8(add(a, o), t)
-                    }
-
-                    {
-                        let o := mod(and(r, mask), n)
-                        n := add(n, w) // `sub(n, 1)`.
-                        if iszero(n) { break }
-
-                        let t := mload(add(b, n))
-                        mstore8(add(a, n), mload(add(b, o)))
-                        mstore8(add(a, o), t)
-                    }
-                }
-            }
+        uint256 n = a.length;
+        if (n == 0) return;
+        // The state stays in a local until the shuffle ends.
+        uint256 r = prng.state;
+        while (true) {
+            r = uint256(keccak256(abi.encode(r)));
+            // Note that there will be a very tiny modulo bias
+            // if the length of the array is not a power of 2.
+            // For all practical purposes, it is negligible
+            // and will not be a fairness or security concern.
+            uint256 o = (r >> 128) % n;
+            if (--n == 0) break;
+            (a[n], a[o]) = (a[o], a[n]);
+            o = (r & type(uint128).max) % n;
+            if (--n == 0) break;
+            (a[n], a[o]) = (a[o], a[n]);
         }
+        prng.state = r;
     }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -327,19 +246,10 @@ library LibPRNG {
     /// Reverts if `$` has already been initialized.
     /// If you need to reduce the length after initialization, just use a fresh new `$`.
     function initialize(LazyShuffler storage $, uint256 n) internal {
-        /// @solidity memory-safe-assembly
-        assembly {
-            if iszero(lt(sub(n, 1), 0xfffffffe)) {
-                mstore(0x00, 0x83b53941) // `InvalidInitialLazyShufflerLength()`.
-                revert(0x1c, 0x04)
-            }
-            if sload($.slot) {
-                mstore(0x00, 0x0c9f11f2) // `LazyShufflerAlreadyInitialized()`.
-                revert(0x1c, 0x04)
-            }
-            mstore(0x00, $.slot)
-            sstore($.slot, or(shl(224, n), shl(32, shr(64, keccak256(0x00, 0x20)))))
-        }
+        if (n == 0 || n > 0xfffffffe) revert InvalidInitialLazyShufflerLength();
+        if ($._state != 0) revert LazyShufflerAlreadyInitialized();
+        uint256 permutationSlot = uint256(keccak256(abi.encode(_slotOf($)))) >> 64;
+        $._state = (n << 224) | (permutationSlot << 32);
     }
 
     /// @dev Increases the length of `$`.
@@ -347,21 +257,12 @@ library LibPRNG {
     /// Reverts if `n` is less than the current length, or if `n >= 2**32 - 1`.
     /// Reverts if `n` crosses the entry width boundary at a length of 65535.
     function grow(LazyShuffler storage $, uint256 n) internal {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let state := sload($.slot) // The packed value at `$`.
-            if iszero(state) {
-                mstore(0x00, 0x1ead2566) // `LazyShufflerNotInitialized()`.
-                revert(0x1c, 0x04)
-            }
-            let o := shr(224, state) // The old length.
-            let limit := or(0xfffe, mul(0xffff0000, gt(o, 0xfffe)))
-            if or(lt(n, o), gt(n, limit)) {
-                mstore(0x00, 0xbed37c6e) // `InvalidNewLazyShufflerLength()`.
-                revert(0x1c, 0x04)
-            }
-            sstore($.slot, or(shl(224, n), shr(32, shl(32, state))))
-        }
+        uint256 state = $._state; // The packed value at `$`.
+        if (state == 0) revert LazyShufflerNotInitialized();
+        uint256 o = state >> 224; // The old length.
+        uint256 limit = o > 0xfffe ? 0xfffffffe : 0xfffe;
+        if (n < o || n > limit) revert InvalidNewLazyShufflerLength();
+        $._state = (n << 224) | ((state << 32) >> 32);
     }
 
     /// @dev Restarts the shuffler by setting `numShuffled` to zero,
@@ -369,74 +270,42 @@ library LibPRNG {
     /// Restarting does NOT clear the internal permutation, nor changes the length.
     /// Even with the same sequence of randomness, reshuffling can yield different results.
     function restart(LazyShuffler storage $) internal {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let state := sload($.slot)
-            if iszero(state) {
-                mstore(0x00, 0x1ead2566) // `LazyShufflerNotInitialized()`.
-                revert(0x1c, 0x04)
-            }
-            sstore($.slot, shl(32, shr(32, state)))
-        }
+        uint256 state = $._state;
+        if (state == 0) revert LazyShufflerNotInitialized();
+        $._state = (state >> 32) << 32;
     }
 
     /// @dev Returns the number of elements that have been shuffled.
     function numShuffled(LazyShuffler storage $) internal view returns (uint256 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := and(0xffffffff, sload($.slot))
-        }
+        result = $._state & 0xffffffff;
     }
 
     /// @dev Returns the length of `$`.
     /// Returns zero if `$` is not initialized, else a non-zero value less than `2**32 - 1`.
     function length(LazyShuffler storage $) internal view returns (uint256 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := shr(224, sload($.slot))
-        }
+        result = $._state >> 224;
     }
 
     /// @dev Returns if `$` has been initialized.
     function initialized(LazyShuffler storage $) internal view returns (bool result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := iszero(iszero(sload($.slot)))
-        }
+        result = $._state != 0;
     }
 
     /// @dev Returns if there are any more elements left to shuffle.
     /// Reverts if `$` is not initialized.
     function finished(LazyShuffler storage $) internal view returns (bool result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let state := sload($.slot) // The packed value at `$`.
-            if iszero(state) {
-                mstore(0x00, 0x1ead2566) // `LazyShufflerNotInitialized()`.
-                revert(0x1c, 0x04)
-            }
-            result := eq(shr(224, state), and(0xffffffff, state))
-        }
+        uint256 state = $._state; // The packed value at `$`.
+        if (state == 0) revert LazyShufflerNotInitialized();
+        result = state >> 224 == state & 0xffffffff;
     }
 
     /// @dev Returns the current value stored at `index`, accounting for all historical shuffling.
     /// Reverts if `index` is greater than or equal to the `length` of `$`.
     function get(LazyShuffler storage $, uint256 index) internal view returns (uint256 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let state := sload($.slot) // The packed value at `$`.
-            let n := shr(224, state) // Length of `$`.
-            if iszero(lt(index, n)) {
-                mstore(0x00, 0x61367cc4) // `LazyShufflerGetOutOfBounds()`.
-                revert(0x1c, 0x04)
-            }
-            let u32 := gt(n, 0xfffe)
-            let s := add(shr(sub(4, u32), index), shr(64, shl(32, state))) // Bucket slot.
-            let o := shl(add(4, u32), and(index, shr(u32, 15))) // Bucket slot offset (bits).
-            let m := sub(shl(shl(u32, 16), 1), 1) // Value mask.
-            result := and(m, shr(o, sload(s)))
-            result := xor(index, mul(xor(index, sub(result, 1)), iszero(iszero(result))))
-        }
+        uint256 state = $._state; // The packed value at `$`.
+        uint256 n = state >> 224; // Length of `$`.
+        if (index >= n) revert LazyShufflerGetOutOfBounds();
+        result = _getAt(n > 0xfffe, state, index);
     }
 
     /// @dev Does a single Fisher-Yates shuffle step, increments the `numShuffled` in `$`,
@@ -444,39 +313,19 @@ library LibPRNG {
     /// `randomness` can be taken from a good-enough source, or a higher quality source like VRF.
     /// Reverts if there are no more values to shuffle, which includes the case if `$` is not initialized.
     function next(LazyShuffler storage $, uint256 randomness) internal returns (uint256 chosen) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            function _get(u32_, state_, i_) -> _value {
-                let s_ := add(shr(sub(4, u32_), i_), shr(64, shl(32, state_))) // Bucket slot.
-                let o_ := shl(add(4, u32_), and(i_, shr(u32_, 15))) // Bucket slot offset (bits).
-                let m_ := sub(shl(shl(u32_, 16), 1), 1) // Value mask.
-                _value := and(m_, shr(o_, sload(s_)))
-                _value := xor(i_, mul(xor(i_, sub(_value, 1)), iszero(iszero(_value))))
-            }
-            function _set(u32_, state_, i_, value_) {
-                let s_ := add(shr(sub(4, u32_), i_), shr(64, shl(32, state_))) // Bucket slot.
-                let o_ := shl(add(4, u32_), and(i_, shr(u32_, 15))) // Bucket slot offset (bits).
-                let m_ := sub(shl(shl(u32_, 16), 1), 1) // Value mask.
-                let v_ := sload(s_) // Bucket slot value.
-                value_ := mul(iszero(eq(i_, value_)), add(value_, 1))
-                sstore(s_, xor(v_, shl(o_, and(m_, xor(shr(o_, v_), value_)))))
-            }
-            let state := sload($.slot) // The packed value at `$`.
-            let shuffled := and(0xffffffff, state) // Number of elements shuffled.
-            let n := shr(224, state) // Length of `$`.
-            let remainder := sub(n, shuffled) // Number of elements left to shuffle.
-            if iszero(remainder) {
-                mstore(0x00, 0x51065f79) // `LazyShuffleFinished()`.
-                revert(0x1c, 0x04)
-            }
-            mstore(0x00, randomness) // (Re)hash the randomness so that we don't
-            mstore(0x20, shuffled) // need to expect guarantees on its distribution.
-            let index := add(mod(keccak256(0x00, 0x40), remainder), shuffled)
-            chosen := _get(gt(n, 0xfffe), state, index)
-            _set(gt(n, 0xfffe), state, index, _get(gt(n, 0xfffe), state, shuffled))
-            _set(gt(n, 0xfffe), state, shuffled, chosen)
-            sstore($.slot, add(1, state)) // Increment the `numShuffled` by 1, and store it.
-        }
+        uint256 state = $._state; // The packed value at `$`.
+        uint256 shuffled = state & 0xffffffff; // Number of elements shuffled.
+        uint256 n = state >> 224; // Length of `$`.
+        uint256 remainder = n - shuffled; // Number of elements left to shuffle.
+        if (remainder == 0) revert LazyShuffleFinished();
+        // (Re)hash the randomness so that we don't
+        // need to expect guarantees on its distribution.
+        uint256 index = uint256(keccak256(abi.encode(randomness, shuffled))) % remainder + shuffled;
+        bool u32 = n > 0xfffe;
+        chosen = _getAt(u32, state, index);
+        _setAt(u32, state, index, _getAt(u32, state, shuffled));
+        _setAt(u32, state, shuffled, chosen);
+        $._state = state + 1; // Increment the `numShuffled` by 1, and store it.
     }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -484,6 +333,7 @@ library LibPRNG {
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     /// @dev Reinterpret cast to an uint256 array.
+    /// @custom:solar-trusted
     function _toUints(int256[] memory a) private pure returns (uint256[] memory casted) {
         /// @solidity memory-safe-assembly
         assembly {
@@ -492,6 +342,7 @@ library LibPRNG {
     }
 
     /// @dev Reinterpret cast to an uint256 array.
+    /// @custom:solar-trusted
     function _toUints(address[] memory a) private pure returns (uint256[] memory casted) {
         /// @solidity memory-safe-assembly
         assembly {
@@ -499,6 +350,70 @@ library LibPRNG {
             // of the word zeroized (as per Solidity spec), we can directly
             // compare these addresses as if they are whole uint256 words.
             casted := a
+        }
+    }
+
+    /// @dev The sum of the four 64-bit lanes of `x`, which the multiplication gathers in its
+    /// top lane: the bits it carries past the word are dropped, as the assembly drops them.
+    function _laneSum(uint256 x) private pure returns (uint256) {
+        return _mul(0x1000000000000000100000000000000010000000000000001, x) >> 192;
+    }
+
+    /// @dev The permuted value at `i`, or `i` itself where the permutation holds zero: entries
+    /// are 16 bits wide, or 32 bits once the length passes `0xfffe`, at `permutationSlot`
+    /// onwards.
+    function _getAt(bool u32, uint256 state, uint256 i) private view returns (uint256 value) {
+        uint256 w = u32 ? 1 : 0;
+        uint256 s = (i >> (4 - w)) + ((state << 32) >> 64); // Bucket slot.
+        uint256 o = (i & (15 >> w)) << (4 + w); // Bucket slot offset (bits).
+        uint256 m = (uint256(1) << (16 << w)) - 1; // Value mask.
+        value = (_sload(s) >> o) & m;
+        value = value == 0 ? i : value - 1;
+    }
+
+    /// @dev Records `value` at `i`, as zero where it is `i` itself.
+    function _setAt(bool u32, uint256 state, uint256 i, uint256 value) private {
+        uint256 w = u32 ? 1 : 0;
+        uint256 s = (i >> (4 - w)) + ((state << 32) >> 64); // Bucket slot.
+        uint256 o = (i & (15 >> w)) << (4 + w); // Bucket slot offset (bits).
+        uint256 m = (uint256(1) << (16 << w)) - 1; // Value mask.
+        uint256 v = _sload(s); // Bucket slot value.
+        value = i == value ? 0 : value + 1;
+        _sstore(s, v ^ ((((v >> o) ^ value) & m) << o));
+    }
+
+    /// @dev Unchecked arithmetic for multiplying two numbers.
+    /// @custom:solar-trusted
+    function _mul(uint256 a, uint256 b) private pure returns (uint256 c) {
+        unchecked {
+            c = a * b;
+        }
+    }
+
+    /// @dev The storage slot of `$`, which Solidity spells only in assembly.
+    /// @custom:solar-trusted
+    function _slotOf(LazyShuffler storage $) private pure returns (uint256 slot) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            slot := $.slot
+        }
+    }
+
+    /// @dev The word in storage slot `slot`. Solidity cannot name a slot it did not allocate.
+    /// @custom:solar-trusted
+    function _sload(uint256 slot) private view returns (uint256 value) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            value := sload(slot)
+        }
+    }
+
+    /// @dev Stores `value` in storage slot `slot`.
+    /// @custom:solar-trusted
+    function _sstore(uint256 slot, uint256 value) private {
+        /// @solidity memory-safe-assembly
+        assembly {
+            sstore(slot, value)
         }
     }
 }
