@@ -177,6 +177,7 @@ library LibString {
     /// @dev Helper to cast `$` to a `BytesStorage`.
     /// Solidity cannot retype a storage reference, so this keeps the upstream assembly.
     /// @custom:solar-trusted
+    /// @custom:solar-inline
     function bytesStorage(StringStorage storage $)
         internal
         pure
