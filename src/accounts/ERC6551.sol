@@ -44,12 +44,14 @@ import {UUPSUpgradeable} from "../utils/UUPSUpgradeable.sol";
 /// with trusted static calls that copy at most the words the assembly reads of an answer:
 /// `_erc6551StaticCallWord` through the scratch space, `_erc6551StaticCallInto` into a buffer.
 /// Calls are Solidity's `call`, with a revert bubbled up by the trusted `_erc6551RevertRaw`.
-/// `executeBatch` reads each call with Solidity's calldata access, which follows the same
-/// offsets and checks the call and its `data` lie in calldata, where the assembly reads past
-/// them, and reads `target` as the word it is stored as at the offset the trusted
-/// `_erc6551Offset` gives. Trusted helpers also read and write the state slot, which Solidity
-/// cannot name, and answer a token callback with `msg.sig` as the call's whole return data,
-/// which a fallback cannot return in Solidity.
+/// `executeBatch` reads the calls as the assembly does, following their offsets with
+/// wrap-around additions, reading `target` as the word it is stored as, and reading past the
+/// calldata as zeros, where Solidity's accessors would check the calls lie in calldata: trusted
+/// helpers read the array's calldata offset and make each call's data a slice wherever it lies,
+/// which Solidity cannot, and a data length no gas could copy halts with a trusted `invalid()`,
+/// as the copy would run out of gas. Trusted helpers also read and write the state slot, which
+/// Solidity cannot name, and answer a token callback with `msg.sig` as the call's whole return
+/// data, which a fallback cannot return in Solidity.
 /// @custom:solar-safe memory arithmetic
 abstract contract ERC6551 is UUPSUpgradeable, Receiver, ERC1271 {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -146,7 +148,7 @@ abstract contract ERC6551 is UUPSUpgradeable, Receiver, ERC1271 {
         bool isValid = _isValidSigner(signer, bytes32(0), context);
         // `isValid ? bytes4(keccak256("isValidSigner(address,bytes)")) : 0x00000000`.
         // We use `0x00000000` for invalid, in convention with the reference implementation.
-        result = isValid ? bytes4(0x523e3260) : bytes4(0);
+        result = bytes4(uint32(isValid ? 0x523e3260 : 0));
     }
 
     /// @dev Returns empty calldata bytes.
@@ -217,11 +219,20 @@ abstract contract ERC6551 is UUPSUpgradeable, Receiver, ERC1271 {
         returns (bytes[] memory results)
     {
         if (operation != 0) revert OperationNotSupported();
+        // Each call is `(target, value, data)` at the offset its head word gives from `calls`,
+        // read as the assembly reads it, following the offsets unchecked.
+        uint256 offset = _erc6551CalldataOffset(calls);
         results = new bytes[](calls.length);
         for (uint256 i; i < calls.length; ++i) {
-            Call calldata c = calls[i];
+            uint256 e = _erc6551Add(offset, uint256(_erc6551CalldataWord(offset + (i << 5))));
+            uint256 o = _erc6551Add(e, uint256(_erc6551CalldataWord(_erc6551Add(e, 0x40))));
+            uint256 length = uint256(_erc6551CalldataWord(o));
+            // A length no gas could copy halts, as the copy would.
+            if (length >> 63 != 0) _erc6551Invalid();
             results[i] = _erc6551Call(
-                address(uint160(_erc6551Load(msg.data, _erc6551Offset(c)))), c.value, c.data
+                address(uint160(uint256(_erc6551CalldataWord(e)))),
+                uint256(_erc6551CalldataWord(_erc6551Add(e, 0x20))),
+                _erc6551CalldataSlice(_erc6551Add(o, 0x20), length)
             );
         }
         _updateState();
@@ -235,8 +246,9 @@ abstract contract ERC6551 is UUPSUpgradeable, Receiver, ERC1271 {
     /// See: https://eips.ethereum.org/EIPS/eip-165
     /// This function call must use less than 30000 gas.
     function supportsInterface(bytes4 interfaceId) public view virtual returns (bool result) {
+        uint256 s = uint32(interfaceId);
         // ERC165: 0x01ffc9a7, ERC6551: 0x6faff5f1, ERC6551Executable: 0x51945447.
-        result = interfaceId == 0x01ffc9a7 || interfaceId == 0x6faff5f1 || interfaceId == 0x51945447;
+        result = s == 0x01ffc9a7 || s == 0x6faff5f1 || s == 0x51945447;
     }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -368,10 +380,21 @@ abstract contract ERC6551 is UUPSUpgradeable, Receiver, ERC1271 {
         if (success && answerSize > 0x1f) return (true, uint256(first));
     }
 
-    /// @dev The word at `offset` in `b`.
+    /// @dev The word of calldata at `offset`, zero-padded past the end of the calldata, as
+    /// `CALLDATALOAD` reads it.
     /// @custom:solar-inline
-    function _erc6551Load(bytes calldata b, uint256 offset) private pure returns (uint256) {
-        return uint256(bytes32(b[offset:offset + 0x20]));
+    function _erc6551CalldataWord(uint256 offset) private pure returns (bytes32) {
+        return bytes32(_erc6551CalldataSlice(offset, 0x20));
+    }
+
+    /// @dev `a + b` modulo `2**256`, as the assembly adds calldata offsets. Solidity's
+    /// addition reverts where this wraps around.
+    /// @custom:solar-trusted
+    /// @custom:solar-inline
+    function _erc6551Add(uint256 a, uint256 b) private pure returns (uint256 c) {
+        unchecked {
+            c = a + b;
+        }
     }
 
     /// @dev The word in storage slot `slot`. Solidity cannot name a slot it did not allocate.
@@ -461,14 +484,29 @@ abstract contract ERC6551 is UUPSUpgradeable, Receiver, ERC1271 {
         }
     }
 
-    /// @dev The calldata offset at which `c` starts, where its `target` word lies. Solidity
-    /// cannot read where a calldata struct lies, nor read an address word without checking it is
-    /// clean.
+    /// @dev The calldata offset of `calls`. Solidity cannot read a calldata array's offset.
     /// @custom:solar-trusted
-    function _erc6551Offset(Call calldata c) private pure returns (uint256 o) {
+    /// @custom:solar-inline
+    function _erc6551CalldataOffset(Call[] calldata calls) private pure returns (uint256 offset) {
         /// @solidity memory-safe-assembly
         assembly {
-            o := c
+            offset := calls.offset
+        }
+    }
+
+    /// @dev The calldata slice of `length` bytes at `offset`, which may lie past the end of
+    /// the calldata, where reads give zeros. Solidity slices only within `msg.data`.
+    /// @custom:solar-trusted
+    /// @custom:solar-inline
+    function _erc6551CalldataSlice(uint256 offset, uint256 length)
+        private
+        pure
+        returns (bytes calldata s)
+    {
+        /// @solidity memory-safe-assembly
+        assembly {
+            s.offset := offset
+            s.length := length
         }
     }
 
@@ -489,6 +527,16 @@ abstract contract ERC6551 is UUPSUpgradeable, Receiver, ERC1271 {
         assembly {
             mstore(0x00, word)
             return(0x00, 0x20)
+        }
+    }
+
+    /// @dev Halts with the designated invalid instruction, which consumes all the gas left, as
+    /// running out of gas does. Solidity cannot spell it: its failures revert.
+    /// @custom:solar-trusted
+    function _erc6551Invalid() private pure {
+        /// @solidity memory-safe-assembly
+        assembly {
+            invalid()
         }
     }
 

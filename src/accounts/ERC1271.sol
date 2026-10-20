@@ -7,19 +7,21 @@ import {SignatureCheckerLib} from "../utils/SignatureCheckerLib.sol";
 /// @notice ERC1271 mixin with nested EIP-712 approach.
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/accounts/ERC1271.sol)
 ///
-/// The checked port reads the signature with calldata slices and `abi.decode`, and builds the
+/// The checked port reads the signature through calldata slices and words, and builds the
 /// `TypedDataSign` type and the hashes with `abi.encodePacked` and `abi.encode`, keeping the
-/// assembly's byte layouts, its checks of `contentsName` (read a word at a time), the hash it
-/// corrupts with one more zero byte for an invalid name, and its fallbacks to `PersonalSign`.
-/// An ERC6492 wrapper whose inner signature lies within the signature unwraps to a slice of it.
-/// Otherwise the assembly reads words and makes a slice wherever the wrapper's offsets point,
-/// past the signature or the calldata, and it reads the magic suffix of a signature shorter
-/// than a word from before the signature; Solidity cannot read a slice's calldata offset nor
-/// slice past `msg.data`, so two trusted helpers do just that, and reads past the calldata
-/// give zeros, as `CALLDATALOAD` does. The RPC check makes a trusted static call that copies
-/// at most the word it reads, and halts with a trusted `invalid()`, which Solidity cannot
-/// spell. The helpers' names carry an `_erc1271` prefix, so that a contract can inherit this
-/// alongside other ports.
+/// assembly's byte layouts, its checks of `contentsName` (skipping the bytes no check looks for
+/// a word at a time), the hash it corrupts with one more zero byte for an invalid name, and its
+/// fallbacks to `PersonalSign`. Like the assembly, it follows an ERC6492 wrapper's offsets
+/// wherever they point, past the signature or the calldata, reads the magic suffix of a
+/// signature shorter than a word from before the signature, and reads past the calldata as
+/// zeros, as `CALLDATALOAD` does: Solidity cannot read a slice's calldata offset, slice past
+/// `msg.data`, nor add offsets with wrap-around, so three trusted helpers do just that, and the
+/// zero bytes the assembly hashes come from a slice past the calldata. The RPC check makes a
+/// trusted static call that reads at most a word of the answer, and halts with a trusted
+/// `invalid()`, which Solidity cannot spell. At address zero, where the assembly mistakes
+/// the `TypedDataSign` workflow's buffer for its `PersonalSign` flag, the port works as at any
+/// other address. The helpers' names carry an `_erc1271` prefix, so that a contract can
+/// inherit this alongside other ports.
 /// @custom:solar-safe memory arithmetic
 abstract contract ERC1271 is EIP712 {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -53,7 +55,7 @@ abstract contract ERC1271 is EIP712 {
         bool success = _erc1271IsValidSignature(hash, _erc1271UnwrapSignature(signature));
         // `success ? bytes4(keccak256("isValidSignature(bytes32,bytes)")) : 0xffffffff`.
         // We use `0xffffffff` for invalid, in convention with the reference implementation.
-        result = success ? bytes4(0x1626ba7e) : bytes4(0xffffffff);
+        result = bytes4(uint32(success ? 0x1626ba7e : 0xffffffff));
     }
 
     /// @dev Returns the ERC1271 signer.
@@ -91,38 +93,17 @@ abstract contract ERC1271 is EIP712 {
         result = signature;
         // Unwraps the ERC6492 wrapper if it exists.
         // See: https://eips.ethereum.org/EIPS/eip-6492
-        uint256 n = result.length;
-        // The word that ends the signature. A signature shorter than a word ends a word that
-        // starts before it, and one that would start before the calldata reads as zero.
-        bytes32 suffix;
-        if (n >= 0x20) {
-            suffix = bytes32(result[n - 0x20:n]);
-        } else {
-            uint256 end = _erc1271CalldataOffset(result) + n;
-            if (end >= 0x20) suffix = _erc1271CalldataWord(end - 0x20);
-        }
+        // The assembly adds calldata offsets with wrap-around, and reads past the calldata as
+        // zeros, so it reads the magic suffix of a signature shorter than a word from before
+        // the signature, and follows the wrapper's offsets wherever they point.
+        uint256 o = _erc1271CalldataOffset(result);
         // `0x6492...6492`.
-        if (suffix == 0x6492649264926492649264926492649264926492649264926492649264926492) {
-            // The wrapper's third head word is the offset of the inner signature, and the word
-            // there its length. When they lie within the signature, it is a slice of it.
-            if (n >= 0x60) {
-                uint256 o = uint256(bytes32(result[0x40:0x60]));
-                if (o < n - 0x1f) {
-                    uint256 start = o + 0x20;
-                    uint256 length = uint256(bytes32(result[o:start]));
-                    if (length <= n - start) return result[start:start + length];
-                }
-            }
-            // Otherwise, follow them as the assembly does, wherever they point.
-            uint256 offset = _erc1271CalldataOffset(result);
-            uint256 p = _erc1271AddMod(offset, uint256(_erc1271CalldataWord(offset + 0x40)));
-            uint256 innerStart = _erc1271AddMod(p, 0x20);
-            uint256 innerLength = uint256(_erc1271CalldataWord(p));
-            if (innerStart <= msg.data.length && innerLength <= msg.data.length - innerStart) {
-                return msg.data[innerStart:innerStart + innerLength];
-            }
-            // A slice that runs past the calldata, which reads as zeros there.
-            result = _erc1271CalldataSlice(innerStart, innerLength);
+        if (
+            _erc1271CalldataWord(_erc1271Add(_erc1271Add(o, result.length), ~uint256(0x1f)))
+                == 0x6492649264926492649264926492649264926492649264926492649264926492
+        ) {
+            o = _erc1271Add(o, uint256(_erc1271CalldataWord(_erc1271Add(o, 0x40))));
+            result = _erc1271CalldataSlice(_erc1271Add(o, 0x20), uint256(_erc1271CalldataWord(o)));
         }
     }
 
@@ -233,11 +214,10 @@ abstract contract ERC1271 is EIP712 {
         virtual
         returns (bool result)
     {
-        uint256 t = uint256(uint160(address(this)));
         // The `TypedDataSign` fields after `contents`, as `abi.encode` lays them out.
         bytes memory domainFields;
         // Forces the compiler to pop the variables after the scope, avoiding stack-too-deep.
-        if (t != uint256(0)) {
+        {
             (
                 ,
                 string memory name,
@@ -253,7 +233,11 @@ abstract contract ERC1271 is EIP712 {
         uint256 n = signature.length;
         // `c` is `contentsDescription.length`, which is stored in the last 2 bytes of the signature.
         // A signature shorter than `0x42` bytes takes the `PersonalSign` workflow whatever `c` is.
-        uint256 c = n < 2 ? 0 : uint16(bytes2(signature[n - 2:n]));
+        uint256 c = uint256(
+            _erc1271CalldataWord(
+                _erc1271Add(_erc1271Add(_erc1271CalldataOffset(signature), n), ~uint256(1))
+            )
+        ) >> 240;
         uint256 l = 0x42 + c; // Total length of appended data (32 + 32 + c + 2).
         // Use the `PersonalSign` workflow if the reconstructed hash doesn't match,
         // or if the appended data is invalid, i.e.
@@ -286,22 +270,25 @@ abstract contract ERC1271 is EIP712 {
         if (tx.gasprice == uint256(0)) {
             // See: https://gist.github.com/Vectorized/3c9b63524d57492b265454f62d895f71
             address b = 0x000000000000378eDCD5B5B0A24f5342d8C10485; // Basefee contract,
-            // The first word of the answer or the revert, zero-padded past its end.
-            (, bytes memory basefee,) = _erc1271StaticCallBounded(b, 0xffff, "", 0x20);
             // If `gasprice < basefee`, the call cannot be on-chain, and we can skip the gas burn.
-            if (bytes32(basefee) == bytes32(0)) {
+            // The first word of the answer or the revert, zero-padded past its end.
+            bytes memory empty;
+            if (_erc1271StaticCallWord(b, 0xffff, empty) == bytes32(0)) {
                 // Recycle `b` to denote if we need to burn gas.
                 bytes32 burn = bytes32(uint256(uint160(b)));
-                uint256 gasToBurn = (0xffff + block.gaslimit) | block.gaslimit;
+                uint256 gasToBurn = _erc1271Add(0xffff, block.gaslimit) | block.gaslimit;
                 // Burns gas computationally efficiently. Also, requires that `gas > gasToBurn`.
                 if (hash == burn || gasleft() < gasToBurn) _erc1271Invalid();
                 // Make a call to this with `b`, efficiently burning the gas provided.
                 // No valid transaction can consume more than the gaslimit.
                 // See: https://ethereum.github.io/yellowpaper/paper.pdf
                 // Most RPCs perform calls with a gas budget greater than the gaslimit.
-                // `isValidSignature(bytes32,bytes)`.
-                bytes memory payload = abi.encodeWithSelector(0x1626ba7e, burn, "");
-                _erc1271StaticCallBounded(address(this), gasToBurn, payload, 0);
+                // `isValidSignature(bytes32,bytes)`, with `b` and empty bytes.
+                _erc1271StaticCallWord(
+                    address(this),
+                    gasToBurn,
+                    abi.encodeWithSelector(0x1626ba7e, burn, uint256(0x40), uint256(0))
+                );
             }
             result = _erc1271IsValidSignatureNowCalldata(hash, signature);
         }
@@ -319,21 +306,30 @@ abstract contract ERC1271 is EIP712 {
         pure
         returns (bytes32)
     {
-        (bytes32 appDomainSeparator, bytes32 contents) = abi.decode(appended, (bytes32, bytes32));
+        // `APP_DOMAIN_SEPARATOR ‖ contents`, at `o`.
+        uint256 o = _erc1271CalldataOffset(appended);
         (bytes32 typedDataSignTypehash, bool invalid) =
             _erc1271TypedDataSignTypehash(appended[0x40:]);
         // `hashStruct(typedDataSign)`.
-        bytes32 structHash =
-            keccak256(abi.encodePacked(typedDataSignTypehash, contents, domainFields));
-        // Compute the final hash, corrupted if `contentsName` is invalid.
-        if (invalid) {
-            return keccak256(abi.encodePacked(hex"1901", appDomainSeparator, structHash, hex"00"));
-        }
-        return keccak256(abi.encodePacked(hex"1901", appDomainSeparator, structHash));
+        bytes32 structHash = keccak256(
+            abi.encodePacked(
+                typedDataSignTypehash, _erc1271CalldataWord(_erc1271Add(o, 0x20)), domainFields
+            )
+        );
+        // Compute the final hash, corrupted with one more zero byte if `contentsName` is invalid.
+        return keccak256(
+            abi.encodePacked(
+                hex"1901",
+                _erc1271CalldataWord(o),
+                structHash,
+                _erc1271CalldataSlice(msg.data.length, invalid ? 1 : 0)
+            )
+        );
     }
 
     /// @dev The `typedDataSignTypehash` for `contentsDescription`, and whether its
     /// `contentsName` is invalid.
+    /// @custom:solar-inline
     function _erc1271TypedDataSignTypehash(bytes calldata contentsDescription)
         private
         pure
@@ -349,100 +345,94 @@ abstract contract ERC1271 is EIP712 {
             // `c - i` is the length of `contentsName` in explicit mode.
             uint256 i = c - 1;
             // Scan backwards until we encounter a ')'.
-            while (i != 0 && contentsDescription[i - 1] != ")") --i;
+            while (i != 0 && uint8(contentsDescription[i - 1]) != 0x29) --i;
             // Truncate `contentsDescription` to `contentsType`.
             contentsType = contentsDescription[:i];
             contentsName = contentsDescription[i:];
         }
         uint256 k;
         (k, invalid) = _erc1271ScanContentsName(contentsName);
-        if (implicitMode && k == c) {
-            // Without a '(', the assembly reads `contentsName` on into the 31 zero bytes
-            // before the '(' it stores a word after the end, which makes it invalid.
-            typedDataSignTypehash = keccak256(
-                abi.encodePacked(
-                    "TypedDataSign(",
-                    contentsDescription,
-                    bytes31(0),
-                    " contents,string name,string" " version,uint256 chainId,address"
-                    " verifyingContract,bytes32 salt)",
-                    contentsDescription
-                )
-            );
-        } else {
-            typedDataSignTypehash = keccak256(
-                abi.encodePacked(
-                    "TypedDataSign(",
-                    contentsName[:k],
-                    " contents,string name,string" " version,uint256 chainId,address"
-                    " verifyingContract,bytes32 salt)",
-                    contentsType
-                )
-            );
-        }
+        // Without a '(', the assembly reads `contentsName` on into the 31 zero bytes before
+        // the '(' it stores a word after the end, which makes it invalid.
+        bytes calldata zeros =
+            _erc1271CalldataSlice(msg.data.length, implicitMode && k == c ? 31 : 0);
+        typedDataSignTypehash = keccak256(
+            abi.encodePacked(
+                "TypedDataSign(",
+                contentsName[:k],
+                zeros,
+                " contents,string name,string" " version,uint256 chainId,address"
+                " verifyingContract,bytes32 salt)",
+                contentsType
+            )
+        );
     }
 
     /// @dev The length of `contentsName` up to its first '(', or all of it, and whether it
     /// is invalid: it starts with `[a-z(]`, or has a byte in ", )\x00" before that '('.
-    /// It reads `contentsName` a word at a time, finding the bytes it looks for in each.
+    /// It skips, a word at a time, the bytes before the first one below `0x2d`, which neither
+    /// '(' nor a banned byte is, then reads the rest a byte at a time.
+    /// @custom:solar-inline
     function _erc1271ScanContentsName(bytes calldata contentsName)
         private
         pure
         returns (uint256 k, bool invalid)
     {
         uint256 n = contentsName.length;
-        uint256 ones = type(uint256).max / 0xff; // `0x0101...01`.
-        // The next 32 bytes of `contentsName`, zero-padded past its end.
-        uint256 w = uint256(bytes32(contentsName));
+        uint256 o = _erc1271CalldataOffset(contentsName);
+        // The next 32 bytes from `k`, read past the end of `contentsName`.
+        uint256 w = uint256(_erc1271CalldataWord(o));
         // `d & 1 == 1` means that `contentsName` is invalid.
         uint256 d = 0x7fffffe000000000000010000000000 >> (w >> 248); // Starts with `[a-z(]`.
+        uint256 low = type(uint256).max / 0xff * 0x7f; // `0x7f7f...7f`.
         while (true) {
-            // Advance `k` until we encounter '('.
-            uint256 open = _erc1271ZeroBytes(w ^ (ones * 0x28));
-            // The number of bytes of the word before its first '(', or 32.
-            uint256 r = 32;
-            if (open != 0) {
-                r = 0;
-                if (open >> 128 == 0) (r, open) = (16, open << 128);
-                if (open >> 192 == 0) (r, open) = (r + 8, open << 64);
-                if (open >> 224 == 0) (r, open) = (r + 4, open << 32);
-                if (open >> 240 == 0) (r, open) = (r + 2, open << 16);
-                if (open >> 248 == 0) r += 1;
+            // The bytes below `0x2d`, with their top bit set, and those past the end of
+            // `contentsName`. The sum of a byte's low 7 bits and `0x53` cannot carry.
+            uint256 stop = ~((((w & low) + low / 0x7f * 0x53) | w) | low)
+                | (type(uint256).max >> ((n - k) << 3));
+            if (stop != 0) {
+                // Advance `k` to the first of them.
+                uint256 r;
+                if (stop >> 128 == 0) (r, stop) = (16, stop << 128);
+                if (stop >> 192 == 0) (r, stop) = (r + 8, stop << 64);
+                if (stop >> 224 == 0) (r, stop) = (r + 4, stop << 32);
+                if (stop >> 240 == 0) (r, stop) = (r + 2, stop << 16);
+                if (stop >> 248 == 0) r += 1;
+                k += r;
+                break;
             }
-            if (r > n - k) r = n - k;
-            // Has a byte in ", )\x00": clearing bit 5 zeroes `\x00` and ' '.
-            uint256 banned = _erc1271ZeroBytes(w & (ones * 0xdf))
-                | _erc1271ZeroBytes(w ^ (ones * 0x29)) | _erc1271ZeroBytes(w ^ (ones * 0x2c));
-            if (banned & ~(type(uint256).max >> (r << 3)) != 0) d |= 1;
-            k += r;
-            if (r < 32 || k == n) break;
-            w = uint256(bytes32(contentsName[k:]));
+            k += 32;
+            w = uint256(_erc1271CalldataWord(_erc1271Add(o, k)));
+        }
+        // Advance `k` until we encounter '('.
+        for (; k < n; ++k) {
+            uint256 b = uint8(contentsName[k]);
+            if (b == 0x28) break;
+            d |= 0x120100000001 >> b; // Has a byte in ", )\x00".
         }
         invalid = d & 1 != 0;
     }
 
-    /// @dev `0x80` in each byte of `x` that is zero, and zero in the others. The sum of a
-    /// byte's low 7 bits and `0x7f` cannot carry into the next byte.
-    function _erc1271ZeroBytes(uint256 x) private pure returns (uint256) {
-        uint256 low = type(uint256).max / 0xff * 0x7f; // `0x7f7f...7f`.
-        return ~((((x & low) + low) | x) | low);
-    }
-
     /// @dev The word of calldata at `offset`, zero-padded past the end of the calldata, as
     /// `CALLDATALOAD` reads it.
+    /// @custom:solar-inline
     function _erc1271CalldataWord(uint256 offset) private pure returns (bytes32) {
-        if (offset >= msg.data.length) return bytes32(0);
-        return bytes32(msg.data[offset:]);
+        return bytes32(_erc1271CalldataSlice(offset, 0x20));
     }
 
-    /// @dev `a + b` modulo `2**256`, as the assembly adds calldata offsets.
-    function _erc1271AddMod(uint256 a, uint256 b) private pure returns (uint256) {
-        if (b > type(uint256).max - a) return b - (type(uint256).max - a) - 1;
-        return a + b;
+    /// @dev `a + b` modulo `2**256`, as the assembly adds calldata offsets. Solidity's
+    /// addition reverts where this wraps around.
+    /// @custom:solar-trusted
+    /// @custom:solar-inline
+    function _erc1271Add(uint256 a, uint256 b) private pure returns (uint256 c) {
+        unchecked {
+            c = a + b;
+        }
     }
 
     /// @dev The calldata offset of `s`. Solidity cannot read a calldata slice's offset.
     /// @custom:solar-trusted
+    /// @custom:solar-inline
     function _erc1271CalldataOffset(bytes calldata s) private pure returns (uint256 offset) {
         /// @solidity memory-safe-assembly
         assembly {
@@ -453,6 +443,7 @@ abstract contract ERC1271 is EIP712 {
     /// @dev The calldata slice of `length` bytes at `offset`, which may lie past the end of
     /// the calldata, where reads give zeros. Solidity slices only within `msg.data`.
     /// @custom:solar-trusted
+    /// @custom:solar-inline
     function _erc1271CalldataSlice(uint256 offset, uint256 length)
         private
         pure
@@ -465,26 +456,19 @@ abstract contract ERC1271 is EIP712 {
         }
     }
 
-    /// @dev Static-calls `target` with `payload` and `gasLimit` gas, and copies at most
-    /// `maxCopy` bytes of the response into a new buffer sized to what it holds, allocated
-    /// after the call. `totalSize` is how many bytes there were.
+    /// @dev Static-calls `target` with `payload` and `gasLimit` gas, and returns the first word
+    /// of the answer or the revert, zero-padded past its end, read through the scratch space.
     /// @custom:solar-trusted
-    function _erc1271StaticCallBounded(
-        address target,
-        uint256 gasLimit,
-        bytes memory payload,
-        uint256 maxCopy
-    ) private view returns (bool success, bytes memory output, uint256 totalSize) {
+    function _erc1271StaticCallWord(address target, uint256 gasLimit, bytes memory payload)
+        private
+        view
+        returns (bytes32 word)
+    {
         /// @solidity memory-safe-assembly
         assembly {
-            success := staticcall(gasLimit, target, add(payload, 0x20), mload(payload), 0x00, 0x00)
-            totalSize := returndatasize()
-            let copied := totalSize
-            if gt(copied, maxCopy) { copied := maxCopy }
-            output := mload(0x40)
-            mstore(output, copied)
-            returndatacopy(add(output, 0x20), 0x00, copied)
-            mstore(0x40, and(add(add(output, 0x3f), copied), not(0x1f)))
+            mstore(0x00, 0)
+            pop(staticcall(gasLimit, target, add(payload, 0x20), mload(payload), 0x00, 0x20))
+            word := mload(0x00)
         }
     }
 

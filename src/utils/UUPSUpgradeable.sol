@@ -14,11 +14,13 @@ import {CallContextChecker} from "./CallContextChecker.sol";
 /// - This implementation is NOT compatible with legacy OpenZeppelin proxies
 /// which do not store the implementation at `_ERC1967_IMPLEMENTATION_SLOT`.
 ///
-/// The checked port checks `proxiableUUID` with a trusted static call that copies at most
-/// one word of the answer, as the assembly reads it, stores the implementation with a trusted
-/// helper, since Solidity cannot name the ERC-1967 slot, and bubbles a failed delegatecall's
-/// revert data with a trusted helper; the event is an ordinary emit. The helpers' names carry
-/// a `_uupsUpgradeable` prefix, so that a contract can inherit this alongside other ports.
+/// The checked port checks `proxiableUUID` with a trusted static call that reads at most one
+/// word of the answer, through the scratch space, as the assembly reads it, stores the
+/// implementation with a trusted helper, since Solidity cannot name the ERC-1967 slot, and
+/// makes the delegatecall with a trusted call that copies none of the answer, bubbling a
+/// revert's data with a trusted helper, as the assembly does; the event is an ordinary emit.
+/// The helpers' names carry a `_uupsUpgradeable` prefix, so that a contract can inherit this
+/// alongside other ports.
 /// @custom:solar-safe memory arithmetic
 abstract contract UUPSUpgradeable is CallContextChecker {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -82,13 +84,13 @@ abstract contract UUPSUpgradeable is CallContextChecker {
         _authorizeUpgrade(newImplementation);
         // Check if `newImplementation` implements `proxiableUUID` correctly.
         // A failed call or an answer shorter than a word never matches the slot.
-        bytes memory payload = abi.encodeWithSelector(0x52d1902d); // `proxiableUUID()`.
-        (bool success, bytes memory answer, uint256 answerSize) =
-            _uupsUpgradeableStaticCallBounded(newImplementation, gasleft(), payload, 0x20);
-        if (
-            !success || answerSize < 0x20
-                || abi.decode(answer, (bytes32)) != _ERC1967_IMPLEMENTATION_SLOT
-        ) revert UpgradeFailed();
+        (bool success, uint256 answerSize, bytes32 answer) = _uupsUpgradeableStaticCallWord(
+            newImplementation,
+            abi.encodeWithSelector(0x52d1902d) // `proxiableUUID()`.
+        );
+        if (!success || answerSize < 0x20 || answer != _ERC1967_IMPLEMENTATION_SLOT) {
+            revert UpgradeFailed();
+        }
         // Emit the {Upgraded} event.
         emit Upgraded(newImplementation);
         // Updates the implementation.
@@ -99,10 +101,10 @@ abstract contract UUPSUpgradeable is CallContextChecker {
         // Perform a delegatecall to `newImplementation` if `data` is non-empty.
         if (data.length != 0) {
             // Forwards the `data` to `newImplementation` via delegatecall.
-            bytes memory result;
-            (success, result) = newImplementation.delegatecall(data);
             // Bubble up the revert if the call reverts.
-            if (!success) _uupsUpgradeableRevertRaw(result);
+            if (!_uupsUpgradeableDelegateCall(newImplementation, data)) {
+                _uupsUpgradeableRevertReturndata();
+            }
         }
     }
 
@@ -120,35 +122,53 @@ abstract contract UUPSUpgradeable is CallContextChecker {
         }
     }
 
-    /// @dev Static-calls `target` with `payload` and `gasLimit` gas, and copies at most
-    /// `maxCopy` bytes of the response into a new buffer sized to what it holds, allocated
-    /// after the call. `totalSize` is how many bytes there were.
+    /// @dev Static-calls `target` with `payload` and all the gas left, and returns the size and
+    /// the first word of the answer, read through the scratch space; past the size, the word
+    /// holds what the scratch space held.
     /// @custom:solar-trusted
-    function _uupsUpgradeableStaticCallBounded(
-        address target,
-        uint256 gasLimit,
-        bytes memory payload,
-        uint256 maxCopy
-    ) private view returns (bool success, bytes memory output, uint256 totalSize) {
+    /// @custom:solar-inline
+    function _uupsUpgradeableStaticCallWord(address target, bytes memory payload)
+        private
+        view
+        returns (bool success, uint256 totalSize, bytes32 first)
+    {
         /// @solidity memory-safe-assembly
         assembly {
-            success := staticcall(gasLimit, target, add(payload, 0x20), mload(payload), 0x00, 0x00)
+            success := staticcall(gas(), target, add(payload, 0x20), mload(payload), 0x00, 0x20)
             totalSize := returndatasize()
-            let copied := totalSize
-            if gt(copied, maxCopy) { copied := maxCopy }
-            output := mload(0x40)
-            mstore(output, copied)
-            returndatacopy(add(output, 0x20), 0x00, copied)
-            mstore(0x40, and(add(add(output, 0x3f), copied), not(0x1f)))
+            first := mload(0x00)
         }
     }
 
-    /// @dev Reverts the current call with exactly `data`.
+    /// @dev Delegate-calls `target` with `payload` and all the gas left, and copies none of
+    /// the answer. Solidity's calls copy the whole answer.
     /// @custom:solar-trusted
-    function _uupsUpgradeableRevertRaw(bytes memory data) private pure {
+    function _uupsUpgradeableDelegateCall(address target, bytes memory payload)
+        private
+        returns (bool success)
+    {
         /// @solidity memory-safe-assembly
         assembly {
-            revert(add(data, 0x20), mload(data))
+            success := delegatecall(
+                gas(),
+                target,
+                add(payload, 0x20),
+                mload(payload),
+                codesize(),
+                0x00
+            )
+        }
+    }
+
+    /// @dev Reverts the current call with the return data of the last call, which Solidity
+    /// cannot read without copying it on success too.
+    /// @custom:solar-trusted
+    function _uupsUpgradeableRevertReturndata() private pure {
+        /// @solidity memory-safe-assembly
+        assembly {
+            let m := mload(0x40)
+            returndatacopy(m, 0x00, returndatasize())
+            revert(m, returndatasize())
         }
     }
 }
