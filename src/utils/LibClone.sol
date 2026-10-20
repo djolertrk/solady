@@ -1642,10 +1642,6 @@ library LibClone {
 
     /// @dev A copy of the `count` bytes of `b` at `offset`. Reverts with
     /// `Panic(0x32)` unless they all lie inside `b`, before allocating.
-    /// Declared under the `solar-view` custom tag, the result reads the bytes
-    /// of `b` in place instead; the compiler then rejects every write to them
-    /// while the view is still read, so the program behaves as if the copy
-    /// were made.
     function _slice(bytes memory b, uint256 offset, uint256 count)
         private
         pure

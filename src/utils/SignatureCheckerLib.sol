@@ -262,7 +262,6 @@ library SignatureCheckerLib {
         if (offset > n - 32) return false;
         uint256 length = uint256(_readBytes32(signature, offset));
         if (length > n - 32 - offset) return false;
-        /// @custom:solar-view
         bytes memory inner = _slice(signature, offset + 32, length);
         return _erc1271(signer, abi.encodePacked(_ERC1271_MAGIC, hash, uint256(0x40), length, inner));
     }
@@ -281,10 +280,6 @@ library SignatureCheckerLib {
 
     /// @dev A copy of the `count` bytes of `b` at `offset`. Reverts with
     /// `Panic(0x32)` unless they all lie inside `b`, before allocating.
-    /// Declared under the `solar-view` custom tag, the result reads the bytes
-    /// of `b` in place instead; the compiler then rejects every write to them
-    /// while the view is still read, so the program behaves as if the copy
-    /// were made.
     function _slice(bytes memory b, uint256 offset, uint256 count)
         private
         pure

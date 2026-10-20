@@ -246,14 +246,11 @@ library EfficientHashLib {
         return sha256(abi.encode(b));
     }
 
-    /// @dev `sha256` of `b` from `start` to `end`, clamped as above. The range
-    /// is a view of `b`, which Solar hashes where it lies and other compilers
-    /// copy out first.
+    /// @dev `sha256` of `b` from `start` to `end`, clamped as above.
     function sha2(bytes memory b, uint256 start, uint256 end) internal view returns (bytes32) {
         uint256 n = b.length;
         if (end > n) end = n;
         if (start > end) start = end;
-        /// @custom:solar-view
         bytes memory part = _slice(b, start, end - start);
         return sha256(part);
     }
@@ -304,10 +301,6 @@ library EfficientHashLib {
 
     /// @dev A copy of the `count` bytes of `b` at `offset`. Reverts with
     /// `Panic(0x32)` unless they all lie inside `b`, before allocating.
-    /// Declared under the `solar-view` custom tag, the result reads the bytes
-    /// of `b` in place instead; the compiler then rejects every write to them
-    /// while the view is still read, so the program behaves as if the copy
-    /// were made.
     function _slice(bytes memory b, uint256 offset, uint256 count)
         private
         pure
