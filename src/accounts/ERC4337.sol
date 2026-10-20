@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.4;
+pragma solidity ^0.8.5;
 
 import {Receiver} from "./Receiver.sol";
 import {LibZip} from "../utils/LibZip.sol";
@@ -25,6 +25,18 @@ import {SignatureCheckerLib, ERC1271} from "../accounts/ERC1271.sol";
 /// for security reviews. This implementation is intended to serve as a base reference
 /// for smart account developers working in such companies. If you are using this
 /// implementation, please do get one or more security reviews before deployment.
+///
+/// The checked port makes the calls with Solidity's calls, or with trusted calls that copy no
+/// more of the answer than the assembly reads, and bubbles a revert with a trusted helper. It
+/// reads and writes the raw storage slots with trusted helpers, since Solidity cannot name
+/// them. `executeBatch` reads the calls as the assembly does, following their offsets with
+/// wrap-around additions and without the checks of Solidity's accessors, which would reject
+/// dirty addresses and offsets past the calldata; a trusted helper reads the array's calldata
+/// offset, which Solidity cannot. Reads past the calldata give zeros, as `CALLDATALOAD` does;
+/// call data that runs past it is copied with the zeros, and a length no gas could copy halts
+/// with a trusted `invalid()`, as the copy would run out of gas. The helpers' names carry an
+/// `_erc4337` prefix, so that a contract can inherit this alongside other ports.
+/// @custom:solar-safe memory arithmetic
 abstract contract ERC4337 is Ownable, UUPSUpgradeable, Receiver, ERC1271 {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                          STRUCTS                           */
@@ -125,14 +137,11 @@ abstract contract ERC4337 is Ownable, UUPSUpgradeable, Receiver, ERC1271 {
         bool success = SignatureCheckerLib.isValidSignatureNowCalldata(
             owner(), SignatureCheckerLib.toEthSignedMessageHash(userOpHash), userOp.signature
         );
-        /// @solidity memory-safe-assembly
-        assembly {
-            // Returns 0 if the recovered address matches the owner.
-            // Else returns 1, which is equivalent to:
-            // `(success ? 0 : 1) | (uint256(validUntil) << 160) | (uint256(validAfter) << (160 + 48))`
-            // where `validUntil` is 0 (indefinite) and `validAfter` is 0.
-            validationData := iszero(success)
-        }
+        // Returns 0 if the recovered address matches the owner.
+        // Else returns 1, which is equivalent to:
+        // `(success ? 0 : 1) | (uint256(validUntil) << 160) | (uint256(validAfter) << (160 + 48))`
+        // where `validUntil` is 0 (indefinite) and `validAfter` is 0.
+        validationData = success ? 0 : 1;
     }
 
     /// @dev Override to validate the nonce of the userOp.
@@ -158,12 +167,9 @@ abstract contract ERC4337 is Ownable, UUPSUpgradeable, Receiver, ERC1271 {
     /// which MAY be zero, in case there is enough deposit, or the userOp has a paymaster.
     modifier payPrefund(uint256 missingAccountFunds) virtual {
         _;
-        /// @solidity memory-safe-assembly
-        assembly {
-            if missingAccountFunds {
-                // Ignore failure (it's EntryPoint's job to verify, not the account's).
-                pop(call(gas(), caller(), missingAccountFunds, codesize(), 0x00, codesize(), 0x00))
-            }
+        if (missingAccountFunds != 0) {
+            // Ignore failure (it's EntryPoint's job to verify, not the account's).
+            _erc4337CallBounded(msg.sender, missingAccountFunds, gasleft(), "", 0);
         }
     }
 
@@ -185,20 +191,10 @@ abstract contract ERC4337 is Ownable, UUPSUpgradeable, Receiver, ERC1271 {
         onlyEntryPointOrOwner
         returns (bytes memory result)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := mload(0x40)
-            calldatacopy(result, data.offset, data.length)
-            if iszero(call(gas(), target, value, result, data.length, codesize(), 0x00)) {
-                // Bubble up the revert if the call reverts.
-                returndatacopy(result, 0x00, returndatasize())
-                revert(result, returndatasize())
-            }
-            mstore(result, returndatasize()) // Store the length.
-            let o := add(result, 0x20)
-            returndatacopy(o, 0x00, returndatasize()) // Copy the returndata.
-            mstore(0x40, add(o, returndatasize())) // Allocate the memory.
-        }
+        bool success;
+        (success, result) = target.call{value: value}(data);
+        // Bubble up the revert if the call reverts.
+        if (!success) _erc4337RevertRaw(result);
     }
 
     /// @dev Execute a sequence of calls from this account.
@@ -209,31 +205,27 @@ abstract contract ERC4337 is Ownable, UUPSUpgradeable, Receiver, ERC1271 {
         onlyEntryPointOrOwner
         returns (bytes[] memory results)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            results := mload(0x40)
-            mstore(results, calls.length)
-            let r := add(0x20, results)
-            let m := add(r, shl(5, calls.length))
-            calldatacopy(r, calls.offset, shl(5, calls.length))
-            for { let end := m } iszero(eq(r, end)) { r := add(r, 0x20) } {
-                let e := add(calls.offset, mload(r))
-                let o := add(e, calldataload(add(e, 0x40)))
-                calldatacopy(m, add(o, 0x20), calldataload(o))
-                // forgefmt: disable-next-item
-                if iszero(call(gas(), calldataload(e), calldataload(add(e, 0x20)),
-                    m, calldataload(o), codesize(), 0x00)) {
-                    // Bubble up the revert if the call reverts.
-                    returndatacopy(m, 0x00, returndatasize())
-                    revert(m, returndatasize())
-                }
-                mstore(r, m) // Append `m` into `results`.
-                mstore(m, returndatasize()) // Store the length,
-                let p := add(m, 0x20)
-                returndatacopy(p, 0x00, returndatasize()) // and copy the returndata.
-                m := add(p, returndatasize()) // Advance `m`.
+        // Each call is `(target, value, data)` at the offset its head word gives from `calls`,
+        // read as the assembly reads it, following the offsets unchecked.
+        uint256 offset = _erc4337CalldataOffset(calls);
+        results = new bytes[](calls.length);
+        for (uint256 i; i < calls.length; ++i) {
+            uint256 p = offset + (i << 5);
+            (uint256 target, uint256 value, uint256 start, uint256 length) =
+                _erc4337ReadCall(_erc4337Add(offset, uint256(bytes32(msg.data[p:p + 0x20]))));
+            bool success;
+            bytes memory result;
+            if (start <= msg.data.length && length <= msg.data.length - start) {
+                bytes calldata data = msg.data[start:start + length];
+                (success, result) = address(uint160(target)).call{value: value}(data);
+            } else {
+                // The data runs past the calldata, which reads as zeros there.
+                bytes memory data = _erc4337CalldataPadded(start, length);
+                (success, result) = address(uint160(target)).call{value: value}(data);
             }
-            mstore(0x40, m) // Allocate the memory.
+            // Bubble up the revert if the call reverts.
+            if (!success) _erc4337RevertRaw(result);
+            results[i] = result; // Append the returndata into `results`.
         }
     }
 
@@ -246,21 +238,11 @@ abstract contract ERC4337 is Ownable, UUPSUpgradeable, Receiver, ERC1271 {
         delegateExecuteGuard
         returns (bytes memory result)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := mload(0x40)
-            calldatacopy(result, data.offset, data.length)
-            // Forwards the `data` to `delegate` via delegatecall.
-            if iszero(delegatecall(gas(), delegate, result, data.length, codesize(), 0x00)) {
-                // Bubble up the revert if the call reverts.
-                returndatacopy(result, 0x00, returndatasize())
-                revert(result, returndatasize())
-            }
-            mstore(result, returndatasize()) // Store the length.
-            let o := add(result, 0x20)
-            returndatacopy(o, 0x00, returndatasize()) // Copy the returndata.
-            mstore(0x40, add(o, returndatasize())) // Allocate the memory.
-        }
+        bool success;
+        // Forwards the `data` to `delegate` via delegatecall.
+        (success, result) = delegate.delegatecall(data);
+        // Bubble up the revert if the call reverts.
+        if (!success) _erc4337RevertRaw(result);
     }
 
     /// @dev Ensures that the owner and implementation slots' values aren't changed.
@@ -268,21 +250,13 @@ abstract contract ERC4337 is Ownable, UUPSUpgradeable, Receiver, ERC1271 {
     modifier delegateExecuteGuard() virtual {
         bytes32 ownerSlotValue;
         bytes32 implementationSlotValue;
-        /// @solidity memory-safe-assembly
-        assembly {
-            implementationSlotValue := sload(_ERC1967_IMPLEMENTATION_SLOT)
-            ownerSlotValue := sload(_OWNER_SLOT)
-        }
+        implementationSlotValue = bytes32(_erc4337Sload(uint256(_ERC1967_IMPLEMENTATION_SLOT)));
+        ownerSlotValue = bytes32(_erc4337Sload(uint256(_OWNER_SLOT)));
         _;
-        /// @solidity memory-safe-assembly
-        assembly {
-            if iszero(
-                and(
-                    eq(implementationSlotValue, sload(_ERC1967_IMPLEMENTATION_SLOT)),
-                    eq(ownerSlotValue, sload(_OWNER_SLOT))
-                )
-            ) { revert(codesize(), 0x00) }
-        }
+        bool kept = implementationSlotValue
+            == bytes32(_erc4337Sload(uint256(_ERC1967_IMPLEMENTATION_SLOT)));
+        kept = kept && ownerSlotValue == bytes32(_erc4337Sload(uint256(_OWNER_SLOT)));
+        if (!kept) revert();
     }
 
     /// @dev Requires that the caller is the EntryPoint, the owner, or the account itself.
@@ -297,10 +271,7 @@ abstract contract ERC4337 is Ownable, UUPSUpgradeable, Receiver, ERC1271 {
 
     /// @dev Returns the raw storage value at `storageSlot`.
     function storageLoad(bytes32 storageSlot) public view virtual returns (bytes32 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := sload(storageSlot)
-        }
+        result = bytes32(_erc4337Sload(uint256(storageSlot)));
     }
 
     /// @dev Writes the raw storage value at `storageSlot`.
@@ -311,21 +282,13 @@ abstract contract ERC4337 is Ownable, UUPSUpgradeable, Receiver, ERC1271 {
         onlyEntryPointOrOwner
         storageStoreGuard(storageSlot)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            sstore(storageSlot, storageValue)
-        }
+        _erc4337Sstore(uint256(storageSlot), uint256(storageValue));
     }
 
     /// @dev Ensures that the `storageSlot` is prohibited for direct storage writes.
     /// You can override this modifier to ensure the sanctity of other storage slots too.
     modifier storageStoreGuard(bytes32 storageSlot) virtual {
-        /// @solidity memory-safe-assembly
-        assembly {
-            if or(eq(storageSlot, _OWNER_SLOT), eq(storageSlot, _ERC1967_IMPLEMENTATION_SLOT)) {
-                revert(codesize(), 0x00)
-            }
-        }
+        if (storageSlot == _OWNER_SLOT || storageSlot == _ERC1967_IMPLEMENTATION_SLOT) revert();
         _;
     }
 
@@ -336,48 +299,30 @@ abstract contract ERC4337 is Ownable, UUPSUpgradeable, Receiver, ERC1271 {
     /// @dev Returns the account's balance on the EntryPoint.
     function getDeposit() public view virtual returns (uint256 result) {
         address ep = entryPoint();
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x20, address()) // Store the `account` argument.
-            mstore(0x00, 0x70a08231) // `balanceOf(address)`.
-            result := mul( // Returns 0 if the EntryPoint does not exist.
-                mload(0x20),
-                and( // The arguments of `and` are evaluated from right to left.
-                    gt(returndatasize(), 0x1f), // At least 32 bytes returned.
-                    staticcall(gas(), ep, 0x1c, 0x24, 0x20, 0x20)
-                )
-            )
-        }
+        // `balanceOf(address)`, with the `account` argument.
+        bytes memory payload = abi.encodeWithSelector(0x70a08231, address(this));
+        (bool success, bytes memory answer, uint256 answerSize) =
+            _erc4337StaticCallBounded(ep, gasleft(), payload, 0x20);
+        // Returns 0 if the EntryPoint does not exist.
+        // At least 32 bytes returned.
+        if (success && answerSize > 0x1f) result = abi.decode(answer, (uint256));
     }
 
     /// @dev Deposit more funds for this account in the EntryPoint.
     function addDeposit() public payable virtual {
         address ep = entryPoint();
-        /// @solidity memory-safe-assembly
-        assembly {
-
-            // The EntryPoint has balance accounting logic in the `receive()` function, as defined in ERC-4337.
-            // forgefmt: disable-next-item
-            if iszero(mul(extcodesize(ep), call(gas(), ep, callvalue(), codesize(), 0x00, codesize(), 0x00))) {
-                revert(codesize(), 0x00) // For gas estimation.
-            }
-        }
+        // The EntryPoint has balance accounting logic in the `receive()` function, as defined in ERC-4337.
+        (bool success,,) = _erc4337CallBounded(ep, msg.value, gasleft(), "", 0);
+        if (!success || ep.code.length == 0) revert(); // For gas estimation.
     }
 
     /// @dev Withdraw ETH from the account's deposit on the EntryPoint.
     function withdrawDepositTo(address to, uint256 amount) public payable virtual onlyOwner {
         address ep = entryPoint();
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x14, to) // Store the `to` argument.
-            mstore(0x34, amount) // Store the `amount` argument.
-            mstore(0x00, 0x205c2878000000000000000000000000) // `withdrawTo(address,uint256)`.
-            if iszero(mul(extcodesize(ep), call(gas(), ep, 0, 0x10, 0x44, codesize(), 0x00))) {
-                returndatacopy(mload(0x40), 0x00, returndatasize())
-                revert(mload(0x40), returndatasize())
-            }
-            mstore(0x34, 0) // Restore the part of the free memory pointer that was overwritten.
-        }
+        // `withdrawTo(address,uint256)`, with the `to` and `amount` arguments.
+        (bool success, bytes memory result) =
+            ep.call(abi.encodeWithSelector(0x205c2878, to, amount));
+        if (!success || ep.code.length == 0) _erc4337RevertRaw(result);
     }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -423,6 +368,154 @@ abstract contract ERC4337 is Ownable, UUPSUpgradeable, Receiver, ERC1271 {
             LibZip.cdFallback();
         } else {
             revert FnSelectorNotRecognized();
+        }
+    }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      PRIVATE HELPERS                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev The word of calldata at `offset`, zero-padded past the end of the calldata, as
+    /// `CALLDATALOAD` reads it.
+    function _erc4337CalldataWord(uint256 offset) private pure returns (bytes32) {
+        uint256 n = msg.data.length;
+        if (offset >= n) return bytes32(0);
+        if (n - offset < 0x20) return bytes32(msg.data[offset:]);
+        return bytes32(msg.data[offset:offset + 0x20]);
+    }
+
+    /// @dev `a + b` modulo `2**256`, as the assembly adds calldata offsets. Solidity's
+    /// addition reverts where this wraps around.
+    /// @custom:solar-trusted
+    function _erc4337Add(uint256 a, uint256 b) private pure returns (uint256 c) {
+        unchecked {
+            c = a + b;
+        }
+    }
+
+    /// @dev The target, value, data offset and data length of the call whose head is at `e`.
+    function _erc4337ReadCall(uint256 e)
+        private
+        pure
+        returns (uint256 target, uint256 value, uint256 start, uint256 length)
+    {
+        uint256 n = msg.data.length;
+        uint256 o;
+        if (n >= 0x60 && e <= n - 0x60) {
+            (target, value, o) = abi.decode(msg.data[e:e + 0x60], (uint256, uint256, uint256));
+        } else {
+            target = uint256(_erc4337CalldataWord(e));
+            value = uint256(_erc4337CalldataWord(_erc4337Add(e, 0x20)));
+            o = uint256(_erc4337CalldataWord(_erc4337Add(e, 0x40)));
+        }
+        o = _erc4337Add(e, o);
+        if (n >= 0x20 && o <= n - 0x20) length = uint256(bytes32(msg.data[o:o + 0x20]));
+        else length = uint256(_erc4337CalldataWord(o));
+        start = _erc4337Add(o, 0x20);
+    }
+
+    /// @dev The `length` bytes of calldata at `start`, which run past its end, zero-padded as
+    /// `CALLDATACOPY` pads them. A length no gas could copy halts, as the copy would.
+    function _erc4337CalldataPadded(uint256 start, uint256 length)
+        private
+        pure
+        returns (bytes memory)
+    {
+        if (length >> 63 != 0) _erc4337Invalid();
+        uint256 n = msg.data.length;
+        if (start >= n) return new bytes(length);
+        return bytes.concat(msg.data[start:], new bytes(length - (n - start)));
+    }
+
+    /// @dev The word in storage slot `slot`. Solidity cannot name a slot it did not allocate.
+    /// @custom:solar-trusted
+    function _erc4337Sload(uint256 slot) private view returns (uint256 value) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            value := sload(slot)
+        }
+    }
+
+    /// @dev Stores `value` in storage slot `slot`.
+    /// @custom:solar-trusted
+    function _erc4337Sstore(uint256 slot, uint256 value) private {
+        /// @solidity memory-safe-assembly
+        assembly {
+            sstore(slot, value)
+        }
+    }
+
+    /// @dev The calldata offset of `calls`. Solidity cannot read a calldata array's offset.
+    /// @custom:solar-trusted
+    function _erc4337CalldataOffset(Call[] calldata calls) private pure returns (uint256 offset) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            offset := calls.offset
+        }
+    }
+
+    /// @dev Calls `target` with `payload`, `value` wei and `gasLimit` gas, and copies at most
+    /// `maxCopy` bytes of the response into a new buffer sized to what it holds, allocated
+    /// after the call. `totalSize` is how many bytes there were.
+    /// @custom:solar-trusted
+    function _erc4337CallBounded(
+        address target,
+        uint256 value,
+        uint256 gasLimit,
+        bytes memory payload,
+        uint256 maxCopy
+    ) private returns (bool success, bytes memory output, uint256 totalSize) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            success := call(gasLimit, target, value, add(payload, 0x20), mload(payload), 0x00, 0x00)
+            totalSize := returndatasize()
+            let copied := totalSize
+            if gt(copied, maxCopy) { copied := maxCopy }
+            output := mload(0x40)
+            mstore(output, copied)
+            returndatacopy(add(output, 0x20), 0x00, copied)
+            mstore(0x40, and(add(add(output, 0x3f), copied), not(0x1f)))
+        }
+    }
+
+    /// @dev Static-calls `target` with `payload` and `gasLimit` gas, and copies at most
+    /// `maxCopy` bytes of the response into a new buffer, as `_erc4337CallBounded` does.
+    /// @custom:solar-trusted
+    function _erc4337StaticCallBounded(
+        address target,
+        uint256 gasLimit,
+        bytes memory payload,
+        uint256 maxCopy
+    ) private view returns (bool success, bytes memory output, uint256 totalSize) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            success := staticcall(gasLimit, target, add(payload, 0x20), mload(payload), 0x00, 0x00)
+            totalSize := returndatasize()
+            let copied := totalSize
+            if gt(copied, maxCopy) { copied := maxCopy }
+            output := mload(0x40)
+            mstore(output, copied)
+            returndatacopy(add(output, 0x20), 0x00, copied)
+            mstore(0x40, and(add(add(output, 0x3f), copied), not(0x1f)))
+        }
+    }
+
+    /// @dev Reverts the current call with exactly `data`.
+    /// @custom:solar-trusted
+    function _erc4337RevertRaw(bytes memory data) private pure {
+        /// @solidity memory-safe-assembly
+        assembly {
+            revert(add(data, 0x20), mload(data))
+        }
+    }
+
+    /// @dev Halts with the designated invalid instruction, which consumes all the gas left, as
+    /// running out of gas does. Solidity cannot spell it: its failures revert.
+    /// @custom:solar-trusted
+    function _erc4337Invalid() private pure {
+        /// @solidity memory-safe-assembly
+        assembly {
+            invalid()
         }
     }
 }
