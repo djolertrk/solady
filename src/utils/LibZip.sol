@@ -14,10 +14,11 @@ pragma solidity ^0.8.4;
 /// `cdFallback` the calldata, from a copy with a zero word after it, which keeps the words read
 /// near its end in bounds, and writes whole words into an output buffer with room to spare, the
 /// bytes of a word past its step replaced by the next step's word; the trusted `_truncate` then
-/// sets the output's length. FastLZ keeps upstream's hash table, 8192 offsets of 32 bits, in 1024
-/// words, measures matches a word at a time, and copies a repeat shorter than a match as a word of
-/// whole repeats. The decompressors grow their output as it fills. `cdDecompress` reads the byte
-/// after its input with the trusted `_byteAfter`, as upstream reads it for the length of a run
+/// sets the output's length. `cdCompress` and `cdFallback` keep the copy in the output's buffer,
+/// after the room for the output. FastLZ keeps upstream's hash table, 8192 offsets of 32 bits, in
+/// 1024 words, measures matches a word at a time, and copies a repeat shorter than a match as a
+/// word of whole repeats. The decompressors grow their output as it fills. `cdDecompress` reads the
+/// byte after its input with the trusted `_byteAfter`, as upstream reads it for the length of a run
 /// whose `0x00` ends the input, and `cdFallback` ends the call with the trusted `_return` and
 /// `_returnCall`. Deliberate differences, on input the compressors never write: a `0xff` run longer
 /// than 32 bytes goes on with zeros where upstream leaves the memory there as it was, and
@@ -76,56 +77,65 @@ library LibZip {
 
     /// @dev Returns the decompressed `data`.
     function flzDecompress(bytes memory data) internal pure returns (bytes memory result) {
-        uint256 n = data.length;
         // `data`, and a zero word after it, which the last literal run's word reaches.
         bytes memory x = bytes.concat(data, bytes32(0));
-        // The output, in a buffer with room for a step and a word to spare, that doubles when
-        // it fills.
-        result = new bytes((n << 1) + 320);
+        // The output, in a buffer that doubles when it fills.
+        result = new bytes((data.length << 1) + 320);
         uint256 o;
         uint256 i;
         while (true) {
-            for (uint256 end = result.length - 296; i < n && o <= end;) {
+            // Each step starts at most a word before the end; a long match needs more room.
+            // Both tests take one branch, as the loop's only exit.
+            uint256 end = result.length - 32;
+            for (; (i < x.length - 32 ? 1 : 0) & (o <= end ? 1 : 0) != 0;) {
+                uint256 w = uint256(_readBytes32(x, i));
+                uint256 c = w >> 248;
+                if (c < 32) {
+                    // A literal run of `c + 1` bytes, written with the rest of their word. All
+                    // but a 32nd are in the token's word.
+                    _writeBytes32(result, o, c < 31 ? bytes32(w << 8) : _readBytes32(x, i + 1));
+                    o += c + 1;
+                    i += c + 2;
+                    continue;
+                }
                 // A match of length `l`, repeating the `s` bytes before it.
                 uint256 l;
-                uint256 s;
-                {
-                    uint256 w = uint256(_readBytes32(x, i));
-                    uint256 c = w >> 248;
-                    uint256 t = c >> 5;
-                    if (t == 0) {
-                        // A literal run of `c + 1` bytes, written with the rest of their word.
-                        _writeBytes32(result, o, _readBytes32(x, i + 1));
-                        o += c + 1;
-                        i += c + 2;
-                        continue;
-                    }
-                    s = (c & 0x1f) << 8;
-                    if (t == 7) {
-                        l = ((w >> 240) & 0xff) + 9;
-                        s += ((w >> 232) & 0xff) + 1;
-                        i += 3;
-                    } else {
-                        l = t + 2;
-                        s += ((w >> 240) & 0xff) + 1;
-                        i += 2;
-                    }
+                uint256 s = (c & 0x1f) << 8;
+                if (c < 0xe0) {
+                    // A match of at most 8 bytes, written as one word: the bytes it repeats,
+                    // or a word of whole repeats of them when they reach the match.
+                    l = (c >> 5) + 2;
+                    s += ((w >> 240) & 0xff) + 1;
+                    bytes32 v = _readBytes32(result, o - s);
+                    if (l > s) v = _repeated(v, s);
+                    _writeBytes32(result, o, v);
+                    o += l;
+                    i += 2;
+                    continue;
                 }
+                // A length field of 7 takes a byte of its own.
+                l = ((w >> 240) & 0xff) + 9;
+                s += ((w >> 232) & 0xff) + 1;
                 uint256 from = o - s;
-                if (l <= s) {
-                    // The repeated bytes do not reach the match.
-                    _copy(result, o, result, from, l);
-                } else if (s < 32) {
-                    _repeat(result, o, from, s, l);
+                if (l <= 32 && l <= s) {
+                    // One word, whose first `l` bytes are already written.
+                    _writeBytes32(result, o, _readBytes32(result, from));
                 } else {
-                    // Every word read is already written, as it ends 32 or more bytes back.
-                    for (uint256 j; j < l; j += 32) {
-                        _writeBytes32(result, o + j, _readBytes32(result, from + j));
+                    // A longer match needs room for its words.
+                    if (o + 264 > end) break;
+                    if (s < 32) {
+                        _repeat(result, o, from, s, l);
+                    } else {
+                        for (uint256 j; j < l; j += 32) {
+                            _writeBytes32(result, o + j, _readBytes32(result, from + j));
+                        }
                     }
                 }
                 o += l;
+                i += 3;
             }
-            if (i >= n) break;
+            // The last step may end past `end`, and the word after the output must fit.
+            if (i >= x.length - 32 && o <= end) break;
             result = bytes.concat(result, new bytes(result.length));
         }
         _writeBytes32(result, o, 0);
@@ -152,45 +162,44 @@ library LibZip {
     /// @dev Returns the compressed `data`.
     function cdCompress(bytes memory data) internal pure returns (bytes memory result) {
         uint256 n = data.length;
-        // A byte takes at most two bytes of output, and every step writes a whole word.
-        result = new bytes((n << 1) + 32);
+        // The output, which a byte takes at most two bytes of, with room for a word past it,
+        // then `data` and a zero word, in one buffer.
+        result = bytes.concat(new bytes((n << 1) + 32), data, bytes32(0));
         uint256 o;
-        /// @custom:solar-scratch
-        {
-            // `data`, and a zero word after it.
-            bytes memory x = bytes.concat(data, bytes32(0));
-            for (uint256 i; i < n;) {
-                uint256 w = uint256(_readBytes32(x, i));
-                uint256 r;
-                if (w >> 248 == 0) {
-                    // A run of up to 128 zeros: `0x00` and its length minus one.
-                    while (true) {
-                        uint256 z = _leadingClearBytes(_nonzeroBytes(w));
-                        r += z;
-                        if (z != 32 || r >= 128 || i + r >= n) break;
-                        w = uint256(_readBytes32(x, i + r));
-                    }
-                    if (r > 128) r = 128;
-                    if (r > n - i) r = n - i;
-                    _writeBytes32(result, o, bytes32((r - 1) << 240));
-                    o += 2;
-                } else if (w >> 248 == 0xff) {
-                    // A run of up to 32 `0xff` bytes: `0x00` and `0x80` plus its length minus
-                    // one. The zero word after `data` ends it there.
-                    r = _leadingClearBytes(_nonzeroBytes(~w));
-                    _writeBytes32(result, o, bytes32((0x7f + r) << 240));
-                    o += 2;
-                } else {
-                    // Literal bytes up to the next `0x00` or `0xff`, at most a word of them.
-                    r = _leadingClearBytes(_specials(w));
-                    _writeBytes32(result, o, bytes32(w));
-                    o += r;
+        uint256 end = result.length - 32;
+        for (uint256 i = end - n; i < end;) {
+            uint256 w = uint256(_readBytes32(result, i));
+            uint256 r;
+            if (w >> 248 == 0) {
+                // A run of up to 128 zeros: `0x00` and its length minus one.
+                while (true) {
+                    uint256 z = _leadingClearBytes(_nonzeroBytes(w));
+                    r += z;
+                    if (z != 32 || r >= 128 || i + r >= end) break;
+                    w = uint256(_readBytes32(result, i + r));
                 }
-                i += r;
+                if (r > 128) r = 128;
+                if (r > end - i) r = end - i;
+                // The length minus one, as the run holds at least the byte at `i`.
+                _writeBytes32(result, o, bytes32(((r + 0xff) & 0xff) << 240));
+                o += 2;
+            } else if (w >> 248 == 0xff) {
+                // A run of up to 32 `0xff` bytes: `0x00` and `0x80` plus its length minus
+                // one. The zero word after `data` ends it there.
+                r = _leadingClearBytes(_nonzeroBytes(~w));
+                _writeBytes32(result, o, bytes32((0x7f + r) << 240));
+                o += 2;
+            } else {
+                // Literal bytes up to the next `0x00` or `0xff`, at most a word of them: often
+                // one, as calldata has many small numbers.
+                r = (((w >> 240) + 1) & 0xff) < 2 ? 1 : _leadingClearBytes(_specials(w));
+                _writeBytes32(result, o, bytes32(w));
+                o += r;
             }
+            i += r;
         }
         // Bitwise negate the first 4 bytes, then clear what the last step wrote past the end.
-        _writeBytes32(result, 0, _readBytes32(result, 0) ^ _NEGATED_PREFIX);
+        _writeBytes4(result, 0, _readBytes4(result, 0) ^ _NEGATED_PREFIX);
         _writeBytes32(result, o, 0);
         _truncate(result, o);
     }
@@ -211,23 +220,32 @@ library LibZip {
     /// If called internally, it must be called at the end of the function.
     function cdFallback() internal {
         uint256 n = msg.data.length;
-        if (n == 0) _return("");
-        // The calldata with its first 4 bytes negated, and a zero word after it negated
-        // likewise, as upstream reads it. The byte after the calldata is the length of a run
-        // whose `0x00` ends the calldata; any other step that reaches it is a literal run,
-        // which a zero there ends.
-        bytes memory x = bytes.concat(msg.data, bytes32(0));
-        _writeBytes32(x, 0, _readBytes32(x, 0) ^ _NEGATED_PREFIX);
-        if (x[n - 1] != 0) x[n] = 0;
-        // The output, in a buffer with room for a step and a word to spare. Each step writes a
-        // whole word, whose bytes past the step the next step replaces. Should the output not
-        // fit, which takes a ratio above 16, it starts over in a buffer twice as long.
-        bytes memory data = new bytes((n << 4) + 160);
+        bytes memory data;
+        if (n == 0) _return(data);
+        // The output, with room for a step and a word to spare, then the calldata and a zero
+        // word, in one buffer. Each step writes a whole word, whose bytes past the step the
+        // next step replaces. Should the output not fit, which takes a ratio above 16, it
+        // starts over with room for 64 bytes per byte of calldata, which always fits.
+        uint256 cap = n << 4;
         uint256 o;
-        uint256 i;
         while (true) {
-            for (uint256 end = data.length - 160; i < n && o <= end;) {
-                bytes32 w = _readBytes32(x, i);
+            uint256 b = cap + 160;
+            data = new bytes(b + n + 32);
+            _copyCalldata(data, b, msg.data, n);
+            // Negate the first 4 bytes, and the bytes after a shorter calldata up to the one
+            // after its last byte when that is `0xff`, as upstream reads them: a negated `0xff`
+            // is the `0x00` of a run whose length upstream reads there; any other step that
+            // reaches the byte after the calldata is a literal run, which a zero there ends.
+            uint256 head = uint256(_readBytes32(data, b));
+            uint256 z = (head << ((n - 1) << 3)) >> 248 == 0xff ? 1 : 0;
+            head ^= uint256(_NEGATED_PREFIX) & ~(type(uint256).max >> ((n + z) << 3));
+            _writeBytes32(data, b, bytes32(head));
+            o = 0;
+            uint256 i = b;
+            uint256 end = b + n;
+            // Both tests take one branch, as the loop's only exit.
+            for (; (i < end ? 1 : 0) & (o <= cap ? 1 : 0) != 0;) {
+                bytes32 w = _readBytes32(data, i);
                 if (w[0] == 0) {
                     uint256 d = uint8(w[1]);
                     // A run of `0xff` bytes writes 32 of them at most, as upstream does. A
@@ -238,19 +256,20 @@ library LibZip {
                     i += 2;
                     // A literal run after the run, as calldata usually has, is read from the
                     // same word. The room for a step covers both.
-                    if (w[2] == 0 || i >= n) continue;
+                    if (w[2] == 0 || i >= end) continue;
                     w <<= 16;
                 }
                 // Literal bytes up to the next zero or the end of the word.
-                uint256 r = 1;
-                while (r < 32 && w[r] != 0) ++r;
+                uint256 r;
+                do {
+                    ++r;
+                } while (r < 32 && w[r] != 0);
                 _writeBytes32(data, o, w);
                 o += r;
                 i += r;
             }
-            if (i >= n) break;
-            data = new bytes(data.length << 1);
-            o = i = 0;
+            if (i >= end) break;
+            cap = n << 6;
         }
         // The bytes past `o` are not cleared: `data` is only the call's input.
         _truncate(data, o);
@@ -293,6 +312,17 @@ library LibZip {
         for (uint256 j; j < l; j += step) {
             _writeBytes32(out, o + j, bytes32(p));
         }
+    }
+
+    /// @dev The word of whole repeats of the first `s` bytes of `v`, fewer than 32, at every
+    /// multiple of `s` in it.
+    function _repeated(bytes32 v, uint256 s) private pure returns (bytes32) {
+        uint256 shift = 256 - (s << 3);
+        uint256 p = (uint256(v) >> shift) << shift;
+        for (uint256 k = s; k < 32; k <<= 1) {
+            p |= p >> (k << 3);
+        }
+        return bytes32(p);
     }
 
     /// @dev Hashes the three bytes at each offset from `ip` into `htab` until one matches the
@@ -367,6 +397,7 @@ library LibZip {
     /// at most 32 bytes, each after a control byte holding its length minus one, and returns
     /// the offset after them. Each run is written with the rest of its word, which later
     /// writes replace.
+    /// @custom:solar-inline
     function _literals(bytes memory out, uint256 op, bytes memory x, uint256 start, uint256 count)
         private
         pure
@@ -422,7 +453,7 @@ library LibZip {
         // Negate the first 4 bytes, and with them the bytes after a shorter input, as upstream
         // reads them. The byte after the input is the length of a run whose `0x00` ends the
         // input; any other step that reaches it is a literal run, which a zero there ends.
-        _writeBytes32(x, 0, _readBytes32(x, 0) ^ _NEGATED_PREFIX);
+        _writeBytes4(x, 0, _readBytes4(x, 0) ^ _NEGATED_PREFIX);
         x[n] = x[n - 1] == 0 ? bytes1(uint8(next)) ^ x[n] : bytes1(0);
         // The output, in a buffer with room for a step and a word to spare, that doubles when
         // it fills. Each step writes a whole word, whose bytes past the step the next step
@@ -431,7 +462,8 @@ library LibZip {
         uint256 o;
         uint256 i;
         while (true) {
-            for (uint256 end = result.length - 192; i < n && o <= end;) {
+            // Both tests take one branch, as the loop's only exit.
+            for (uint256 end = result.length - 192; (i < n ? 1 : 0) & (o <= end ? 1 : 0) != 0;) {
                 bytes32 w = _readBytes32(x, i);
                 if (w[0] == 0) {
                     uint256 d = uint8(w[1]);
@@ -508,7 +540,7 @@ library LibZip {
     /// @custom:solar-inline
     function _readBytes32(bytes memory b, uint256 offset) private pure returns (bytes32 result) {
         for (uint256 k; k < 32; ++k) {
-            result |= bytes32(b[offset + k]) >> (8 * k);
+            result |= bytes32(b[offset + k]) >> (k << 3);
         }
     }
 
@@ -520,17 +552,30 @@ library LibZip {
         }
     }
 
-    /// @dev Copies the `count` bytes of `src` from `srcOffset` to `dst` at `dstOffset`.
+    /// @dev The 4 bytes of `b` at `offset`, followed by zeros.
     /// @custom:solar-inline
-    function _copy(
-        bytes memory dst,
-        uint256 dstOffset,
-        bytes memory src,
-        uint256 srcOffset,
-        uint256 count
-    ) private pure {
-        for (uint256 k; k < count; ++k) {
-            dst[dstOffset + k] = src[srcOffset + k];
+    function _readBytes4(bytes memory b, uint256 offset) private pure returns (bytes32 result) {
+        for (uint256 k; k < 4; ++k) {
+            result |= bytes32(b[offset + k]) >> (k << 3);
+        }
+    }
+
+    /// @dev Writes the first 4 bytes of `value` into `b` at `offset`.
+    /// @custom:solar-inline
+    function _writeBytes4(bytes memory b, uint256 offset, bytes32 value) private pure {
+        for (uint256 k; k < 4; ++k) {
+            b[offset + k] = value[k];
+        }
+    }
+
+    /// @dev Copies the first `n` bytes of `src` to `dst` at `dstOffset`.
+    /// @custom:solar-inline
+    function _copyCalldata(bytes memory dst, uint256 dstOffset, bytes calldata src, uint256 n)
+        private
+        pure
+    {
+        for (uint256 k; k < n; ++k) {
+            dst[dstOffset + k] = src[k];
         }
     }
 
