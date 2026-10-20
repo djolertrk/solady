@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.4;
+pragma solidity ^0.8.5;
 
 import {ERC7821} from "./ERC7821.sol";
 import {LibERC7579} from "./LibERC7579.sol";
@@ -33,6 +33,18 @@ import {EnumerableRoles} from "../auth/EnumerableRoles.sol";
 /// and `...` is the remaining 22 bytes which can be anything.
 /// For ease of mind, just use:
 /// `0x0100000000007821000100000000000000000000000000000000000000000000`.
+///
+/// The checked port keeps the minimum delay and the operations in the assembly's slots and
+/// words: the negated minimum delay, and for each operation `keccak256` of its id and the 9 bytes
+/// of `_TIMELOCK_SLOT`, holding its ready timestamp above its done bit. Solidity cannot name those
+/// slots, so trusted helpers read and write them; the events are Solidity's `emit`, which logs
+/// the assembly's words. `_bulkSetRole` reads each address as the word it is stored as, through
+/// the trusted `_timelockToUints` view of the array, and passes on its low 160 bits, as the
+/// assembly does, where Solidity would reject a word with upper bits set. One deliberate
+/// difference, inherited from the checked `ERC7821`: `execute` with `executionData` that does
+/// not fit itself reverts as it is read, before the role and operation checks the assembly
+/// reaches with it; data that `propose` accepted always fits.
+/// @custom:solar-safe memory arithmetic
 contract Timelock is ERC7821, EnumerableRoles {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                         CONSTANTS                          */
@@ -171,21 +183,10 @@ contract Timelock is ERC7821, EnumerableRoles {
         address[] calldata cancellers
     ) public virtual {
         _initializeTimelockAuthorizationCheck();
-        /// @solidity memory-safe-assembly
-        assembly {
-            if shr(254, initialMinDelay) {
-                mstore(0x00, 0xd1efaf25) // `TimelockDelayOverflow()`.
-                revert(0x1c, 0x04)
-            }
-            let s := _TIMELOCK_SLOT
-            if sload(s) {
-                mstore(0x00, 0xc44f149c) // `TimelockAlreadyInitialized()`.
-                revert(0x1c, 0x04)
-            }
-            sstore(s, not(initialMinDelay))
-            mstore(0x00, initialMinDelay)
-            log1(0x00, 0x20, _MIN_DELAY_SET_EVENT_SIGNATURE)
-        }
+        if (initialMinDelay >> 254 != 0) revert TimelockDelayOverflow();
+        if (_timelockSload(_TIMELOCK_SLOT) != 0) revert TimelockAlreadyInitialized();
+        _timelockSstore(_TIMELOCK_SLOT, ~initialMinDelay);
+        emit MinDelaySet(initialMinDelay);
         if (initialAdmin != address(0)) {
             _setRole(initialAdmin, ADMIN_ROLE, true);
         }
@@ -207,14 +208,9 @@ contract Timelock is ERC7821, EnumerableRoles {
         uint256 self = __timelockSelf;
         uint256 deployer = __timelockDeployer;
         uint256 deployerOrigin = __timelockDeployerOrigin;
-        /// @solidity memory-safe-assembly
-        assembly {
-            if eq(self, address()) {
-                if iszero(or(eq(caller(), deployer), eq(caller(), deployerOrigin))) {
-                    mstore(0x00, 0x55140ae8) // `TimelockUnauthorized()`.
-                    revert(0x1c, 0x04)
-                }
-            }
+        if (self == uint256(uint160(address(this)))) {
+            uint256 sender = uint256(uint160(msg.sender));
+            if (sender != deployer && sender != deployerOrigin) revert TimelockUnauthorized();
         }
     }
 
@@ -232,86 +228,36 @@ contract Timelock is ERC7821, EnumerableRoles {
     {
         LibERC7579.decodeBatchAndOpData(executionData); // Check if properly encoded.
         uint256 t = minDelay();
-        /// @solidity memory-safe-assembly
-        assembly {
-            if shr(254, delay) {
-                mstore(0x00, 0xd1efaf25) // `TimelockDelayOverflow()`.
-                revert(0x1c, 0x04)
-            }
-            if lt(delay, t) {
-                mstore(0x00, 0x54336609) // `TimelockInsufficientDelay(uint256,uint256)`.
-                mstore(0x20, delay)
-                mstore(0x40, t)
-                revert(0x1c, 0x44)
-            }
-            let m := mload(0x40)
-            calldatacopy(add(m, 0x80), executionData.offset, executionData.length)
-            mstore(0x00, mode)
-            mstore(0x20, keccak256(add(m, 0x80), executionData.length))
-            id := keccak256(0x00, 0x40)
-            mstore(0x09, _TIMELOCK_SLOT)
-            mstore(0x00, id)
-            let s := keccak256(0x00, 0x29) // Operation slot.
-            if sload(s) {
-                mstore(0x00, 0xd639b0bf) // `TimelockInvalidOperation(bytes32,uint256)`.
-                mstore(0x20, id)
-                mstore(0x40, 1) // `1 << OperationState.Unset`
-                revert(0x1c, 0x44)
-            }
-            // Emits the {Proposed} event.
-            mstore(m, mode)
-            mstore(add(m, 0x20), 0x60)
-            let r := add(delay, timestamp()) // `readyTimestamp`.
-            sstore(s, shl(1, r)) // Update the operation in the storage.
-            mstore(add(m, 0x40), r)
-            mstore(add(m, 0x60), executionData.length)
-            // Some indexers require the bytes to be zero-right padded.
-            mstore(add(add(m, 0x80), executionData.length), 0) // Zeroize the slot after the end.
-            // forgefmt: disable-next-item
-            log2(m, add(0x80, and(not(0x1f), add(0x1f, executionData.length))),
-                _PROPOSED_EVENT_SIGNATURE, id)
-        }
+        if (delay >> 254 != 0) revert TimelockDelayOverflow();
+        if (delay < t) revert TimelockInsufficientDelay(delay, t);
+        id = keccak256(abi.encode(mode, keccak256(executionData)));
+        uint256 s = _timelockOperationSlot(id); // Operation slot.
+        if (_timelockSload(s) != 0) revert TimelockInvalidOperation(id, 1); // `1 << OperationState.Unset`
+        uint256 r = delay + block.timestamp; // `readyTimestamp`.
+        _timelockSstore(s, r << 1); // Update the operation in the storage.
+        emit Proposed(id, mode, executionData, r);
     }
 
     /// @dev Cancels the operation with `id`.
     /// Emits a {Cancelled} event.
     function cancel(bytes32 id) public virtual onlyRole(CANCELLER_ROLE) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x09, _TIMELOCK_SLOT)
-            mstore(0x00, id)
-            let s := keccak256(0x00, 0x29) // Operation slot.
-            let p := sload(s)
-            if or(and(1, p), iszero(p)) {
-                mstore(0x00, 0xd639b0bf) // `TimelockInvalidOperation(bytes32,uint256)`.
-                mstore(0x20, id)
-                mstore(0x40, 6) // `(1 << OperationState.Waiting) | (1 << OperationState.Ready)`
-                revert(0x1c, 0x44)
-            }
-            sstore(s, 0) // Clears the operation's storage slot.
-            // Emits the {Cancelled} event.
-            log2(0x00, 0x00, _CANCELLED_EVENT_SIGNATURE, id)
+        uint256 s = _timelockOperationSlot(id); // Operation slot.
+        uint256 p = _timelockSload(s);
+        if (p & 1 != 0 || p == 0) {
+            // `(1 << OperationState.Waiting) | (1 << OperationState.Ready)`
+            revert TimelockInvalidOperation(id, 6);
         }
+        _timelockSstore(s, 0); // Clears the operation's storage slot.
+        emit Cancelled(id);
     }
 
     /// @dev Allows the timelock itself to set the minimum delay.
     /// Emits a {MinDelaySet} event.
     function setMinDelay(uint256 newMinDelay) public virtual {
-        /// @solidity memory-safe-assembly
-        assembly {
-            if iszero(eq(caller(), address())) {
-                mstore(0x00, 0x55140ae8) // `TimelockUnauthorized()`.
-                revert(0x1c, 0x04)
-            }
-            if shr(254, newMinDelay) {
-                mstore(0x00, 0xd1efaf25) // `TimelockDelayOverflow()`.
-                revert(0x1c, 0x04)
-            }
-            sstore(_TIMELOCK_SLOT, not(newMinDelay))
-            // Emits the {SetMinDelay} event.
-            mstore(0x00, newMinDelay)
-            log1(0x00, 0x20, _MIN_DELAY_SET_EVENT_SIGNATURE)
-        }
+        if (msg.sender != address(this)) revert TimelockUnauthorized();
+        if (newMinDelay >> 254 != 0) revert TimelockDelayOverflow();
+        _timelockSstore(_TIMELOCK_SLOT, ~newMinDelay);
+        emit MinDelaySet(newMinDelay);
     }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -320,32 +266,19 @@ contract Timelock is ERC7821, EnumerableRoles {
 
     /// @dev Returns the minimum delay.
     function minDelay() public view virtual returns (uint256 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := not(sload(_TIMELOCK_SLOT))
-        }
+        result = ~_timelockSload(_TIMELOCK_SLOT);
     }
 
     /// @dev Returns the ready timestamp for `id`.
     function readyTimestamp(bytes32 id) public view virtual returns (uint256 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x09, _TIMELOCK_SLOT)
-            mstore(0x00, id)
-            result := shr(1, sload(keccak256(0x00, 0x29)))
-        }
+        result = _timelockSload(_timelockOperationSlot(id)) >> 1;
     }
 
     /// @dev Returns the current operation state of `id`.
     function operationState(bytes32 id) public view virtual returns (OperationState result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x09, _TIMELOCK_SLOT)
-            mstore(0x00, id)
-            result := sload(keccak256(0x00, 0x29))
-            // forgefmt: disable-next-item
-            result := mul(iszero(iszero(result)),
-                add(and(result, 1), sub(2, lt(timestamp(), shr(1, result)))))
+        uint256 p = _timelockSload(_timelockOperationSlot(id));
+        if (p != 0) {
+            result = OperationState((p & 1) + 2 - (block.timestamp < p >> 1 ? 1 : 0));
         }
     }
 
@@ -358,14 +291,9 @@ contract Timelock is ERC7821, EnumerableRoles {
         internal
         virtual
     {
-        for (uint256 i; i != addresses.length;) {
-            address a;
-            /// @solidity memory-safe-assembly
-            assembly {
-                a := calldataload(add(addresses.offset, shl(5, i)))
-                i := add(i, 1)
-            }
-            _setRole(a, role, active);
+        uint256[] calldata words = _timelockToUints(addresses);
+        for (uint256 i; i != words.length; ++i) {
+            _setRole(address(uint160(words[i])), role, active);
         }
     }
 
@@ -386,66 +314,74 @@ contract Timelock is ERC7821, EnumerableRoles {
         if (!hasRole(OPEN_ROLE_HOLDER, EXECUTOR_ROLE)) {
             _checkRole(EXECUTOR_ROLE);
         }
-        bytes32 id;
-        uint256 s;
-        /// @solidity memory-safe-assembly
-        assembly {
-            // Copies the `executionData` for the event and to compute the `id`.
-            calldatacopy(mload(0x40), executionData.offset, executionData.length)
-            mstore(0x00, mode)
-            mstore(0x20, keccak256(mload(0x40), executionData.length))
-            id := keccak256(0x00, 0x40)
-            mstore(0x09, _TIMELOCK_SLOT)
-            mstore(0x00, id)
-            s := keccak256(0x00, 0x29)
-            let p := sload(s)
-            if or(or(and(1, p), iszero(p)), lt(timestamp(), shr(1, p))) {
-                mstore(0x00, 0xd639b0bf) // `TimelockInvalidOperation(bytes32,uint256)`.
-                mstore(0x20, id)
-                mstore(0x40, 4) // `1 << OperationState.Ready`
-                revert(0x1c, 0x44)
-            }
-            // Check if optional predecessor has been executed.
-            if iszero(lt(opData.length, 0x20)) {
-                let b := calldataload(opData.offset) // Predecessor's id.
-                mstore(0x00, b) // `_TIMELOCK_SLOT` is already at `0x09`.
-                if iszero(or(iszero(b), and(1, sload(keccak256(0x00, 0x29))))) {
-                    mstore(0x00, 0x90a9a618) // `TimelockUnexecutedPredecessor(bytes32)`.
-                    mstore(0x20, b)
-                    revert(0x1c, 0x24)
-                }
+        bytes32 id = keccak256(abi.encode(mode, keccak256(executionData)));
+        uint256 s = _timelockOperationSlot(id);
+        uint256 p = _timelockSload(s);
+        if (p & 1 != 0 || p == 0 || block.timestamp < p >> 1) {
+            revert TimelockInvalidOperation(id, 4); // `1 << OperationState.Ready`
+        }
+        // Check if optional predecessor has been executed.
+        if (opData.length >= 0x20) {
+            bytes32 b = bytes32(opData[:0x20]); // Predecessor's id.
+            if (b != bytes32(0) && _timelockSload(_timelockOperationSlot(b)) & 1 == 0) {
+                revert TimelockUnexecutedPredecessor(b);
             }
         }
         _execute(calls, id);
-        /// @solidity memory-safe-assembly
-        assembly {
-            // Recheck the operation after the calls, in case of reentrancy.
-            let p := sload(s)
-            if or(or(and(1, p), iszero(p)), lt(timestamp(), shr(1, p))) {
-                mstore(0x00, 0xd639b0bf) // `TimelockInvalidOperation(bytes32,uint256)`.
-                mstore(0x20, id)
-                mstore(0x40, 4) // `1 << OperationState.Ready`
-                revert(0x1c, 0x44)
-            }
-            let m := mload(0x40)
-            // Copies the `executionData` for the event.
-            calldatacopy(add(m, 0x60), executionData.offset, executionData.length)
-            // Emits the {Executed} event.
-            mstore(m, mode)
-            mstore(add(m, 0x20), 0x40)
-            mstore(add(m, 0x40), executionData.length)
-            // Some indexers require the bytes to be zero-right padded.
-            mstore(add(add(m, 0x60), executionData.length), 0) // Zeroize the slot after the end.
-            // forgefmt: disable-next-item
-            log2(m, add(0x60, and(not(0x1f), add(0x1f, executionData.length))),
-                _EXECUTED_EVENT_SIGNATURE, id)
-            sstore(s, or(1, p)) // Set the operation as executed in the storage.
+        // Recheck the operation after the calls, in case of reentrancy.
+        p = _timelockSload(s);
+        if (p & 1 != 0 || p == 0 || block.timestamp < p >> 1) {
+            revert TimelockInvalidOperation(id, 4); // `1 << OperationState.Ready`
         }
+        emit Executed(id, mode, executionData);
+        _timelockSstore(s, p | 1); // Set the operation as executed in the storage.
     }
 
     /// @dev This guards the public `setRole` function,
     /// such that it can only be called by the timelock itself, or an admin.
     function _authorizeSetRole(address, uint256, bool) internal virtual override(EnumerableRoles) {
         if (msg.sender != address(this)) _checkRole(ADMIN_ROLE);
+    }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      PRIVATE HELPERS                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev The slot of operation `id`: `keccak256` of `id` and the 9 bytes of `_TIMELOCK_SLOT`.
+    function _timelockOperationSlot(bytes32 id) private pure returns (uint256) {
+        return uint256(keccak256(abi.encodePacked(id, uint72(_TIMELOCK_SLOT))));
+    }
+
+    /// @dev The word in storage slot `slot`. Solidity cannot name a slot it did not allocate.
+    /// @custom:solar-trusted
+    function _timelockSload(uint256 slot) private view returns (uint256 value) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            value := sload(slot)
+        }
+    }
+
+    /// @dev Stores `value` in storage slot `slot`.
+    /// @custom:solar-trusted
+    function _timelockSstore(uint256 slot, uint256 value) private {
+        /// @solidity memory-safe-assembly
+        assembly {
+            sstore(slot, value)
+        }
+    }
+
+    /// @dev Views `a` as the words its addresses are stored as. Solidity reads an address from
+    /// calldata only after checking its upper bits are clear.
+    /// @custom:solar-trusted
+    function _timelockToUints(address[] calldata a)
+        private
+        pure
+        returns (uint256[] calldata words)
+    {
+        /// @solidity memory-safe-assembly
+        assembly {
+            words.offset := a.offset
+            words.length := a.length
+        }
     }
 }

@@ -85,6 +85,10 @@ LIBRARIES = [
     "utils/ext/delegatexyz/DelegateCheckerLib",
     "utils/legacy/LibCWIA",
     "utils/legacy/CWIA",
+    "accounts/LibERC7579",
+    "accounts/LibERC6551",
+    "accounts/ERC7821",
+    "accounts/Timelock",
 ]
 
 
