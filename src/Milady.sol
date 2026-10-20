@@ -45,7 +45,6 @@ import "./utils/Initializable.sol";
 import "./utils/JSONParserLib.sol";
 import "./utils/LibBit.sol";
 import "./utils/LibBitmap.sol";
-import "./utils/LibCall.sol";
 import "./utils/LibClone.sol";
 import "./utils/LibMap.sol";
 import "./utils/LibPRNG.sol";
@@ -73,6 +72,8 @@ import "./utils/UpgradeableBeacon.sol";
 import "./utils/WebAuthn.sol";
 import "./utils/ext/delegatexyz/DelegateCheckerLib.sol";
 
+/// @dev The checked port imports the checked sources; the library holds only constants.
+/// @custom:solar-safe memory arithmetic
 library Milady {
     string internal constant WEBSITE = "https://miladymaker.net";
 
