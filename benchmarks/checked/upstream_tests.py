@@ -41,6 +41,7 @@ LIBRARIES = [
     "LibString",
     "LibSort",
     "LibBitmap",
+    "LibMap",
     "tokens/ERC20",
     "tokens/WETH",
 ]

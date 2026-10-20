@@ -1,8 +1,15 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.4;
+pragma solidity ^0.8.20;
 
 /// @notice Library for storage of packed unsigned integers.
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/utils/LibMap.sol)
+/// @dev The checked port updates a packed value as the assembly does, flipping
+/// the bits where the stored value and the new one differ, over the same mapping
+/// slots. The generic `bitWidth` operations keep the assembly's results for a
+/// zero width, which divides by zero, and for widths of 256 and more, whose mask
+/// wraps to every bit. A search's index arithmetic is checked: it wraps in the
+/// assembly only for ranges of more values than any call can read.
+/// @custom:solar-safe memory arithmetic
 library LibMap {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                          STRUCTS                           */
@@ -44,25 +51,15 @@ library LibMap {
 
     /// @dev Returns the uint8 value at `index` in `map`.
     function get(Uint8Map storage map, uint256 index) internal view returns (uint8 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x20, map.slot)
-            mstore(0x00, shr(5, index))
-            result := byte(and(31, not(index)), sload(keccak256(0x00, 0x40)))
-        }
+        result = uint8(map.map[index >> 5] >> ((index & 31) << 3));
     }
 
     /// @dev Updates the uint8 value at `index` in `map`.
     function set(Uint8Map storage map, uint256 index, uint8 value) internal {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x20, map.slot)
-            mstore(0x00, shr(5, index))
-            let s := keccak256(0x00, 0x40) // Storage slot.
-            mstore(0x00, sload(s))
-            mstore8(and(31, not(index)), value)
-            sstore(s, mload(0x00))
-        }
+        uint256 s = index >> 5; // Storage slot.
+        uint256 o = (index & 31) << 3; // Storage slot offset (bits).
+        uint256 v = map.map[s]; // Storage slot value.
+        map.map[s] = v ^ ((((v >> o) ^ value) & 0xff) << o);
     }
 
     /// @dev Returns the uint16 value at `index` in `map`.
@@ -72,16 +69,10 @@ library LibMap {
 
     /// @dev Updates the uint16 value at `index` in `map`.
     function set(Uint16Map storage map, uint256 index, uint16 value) internal {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x20, map.slot)
-            mstore(0x00, shr(4, index))
-            let s := keccak256(0x00, 0x40) // Storage slot.
-            let o := shl(4, and(index, 15)) // Storage slot offset (bits).
-            let v := sload(s) // Storage slot value.
-            let m := 0xffff // Value mask.
-            sstore(s, xor(v, shl(o, and(m, xor(shr(o, v), value)))))
-        }
+        uint256 s = index >> 4; // Storage slot.
+        uint256 o = (index & 15) << 4; // Storage slot offset (bits).
+        uint256 v = map.map[s]; // Storage slot value.
+        map.map[s] = v ^ ((((v >> o) ^ value) & 0xffff) << o);
     }
 
     /// @dev Returns the uint32 value at `index` in `map`.
@@ -91,37 +82,23 @@ library LibMap {
 
     /// @dev Updates the uint32 value at `index` in `map`.
     function set(Uint32Map storage map, uint256 index, uint32 value) internal {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x20, map.slot)
-            mstore(0x00, shr(3, index))
-            let s := keccak256(0x00, 0x40) // Storage slot.
-            let o := shl(5, and(index, 7)) // Storage slot offset (bits).
-            let v := sload(s) // Storage slot value.
-            let m := 0xffffffff // Value mask.
-            sstore(s, xor(v, shl(o, and(m, xor(shr(o, v), value)))))
-        }
+        uint256 s = index >> 3; // Storage slot.
+        uint256 o = (index & 7) << 5; // Storage slot offset (bits).
+        uint256 v = map.map[s]; // Storage slot value.
+        map.map[s] = v ^ ((((v >> o) ^ value) & 0xffffffff) << o);
     }
 
     /// @dev Returns the uint40 value at `index` in `map`.
     function get(Uint40Map storage map, uint256 index) internal view returns (uint40 result) {
-        unchecked {
-            result = uint40(map.map[index / 6] >> ((index % 6) * 40));
-        }
+        result = uint40(map.map[index / 6] >> ((index % 6) * 40));
     }
 
     /// @dev Updates the uint40 value at `index` in `map`.
     function set(Uint40Map storage map, uint256 index, uint40 value) internal {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x20, map.slot)
-            mstore(0x00, div(index, 6))
-            let s := keccak256(0x00, 0x40) // Storage slot.
-            let o := mul(40, mod(index, 6)) // Storage slot offset (bits).
-            let v := sload(s) // Storage slot value.
-            let m := 0xffffffffff // Value mask.
-            sstore(s, xor(v, shl(o, and(m, xor(shr(o, v), value)))))
-        }
+        uint256 s = index / 6; // Storage slot.
+        uint256 o = (index % 6) * 40; // Storage slot offset (bits).
+        uint256 v = map.map[s]; // Storage slot value.
+        map.map[s] = v ^ ((((v >> o) ^ value) & 0xffffffffff) << o);
     }
 
     /// @dev Returns the uint64 value at `index` in `map`.
@@ -131,16 +108,10 @@ library LibMap {
 
     /// @dev Updates the uint64 value at `index` in `map`.
     function set(Uint64Map storage map, uint256 index, uint64 value) internal {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x20, map.slot)
-            mstore(0x00, shr(2, index))
-            let s := keccak256(0x00, 0x40) // Storage slot.
-            let o := shl(6, and(index, 3)) // Storage slot offset (bits).
-            let v := sload(s) // Storage slot value.
-            let m := 0xffffffffffffffff // Value mask.
-            sstore(s, xor(v, shl(o, and(m, xor(shr(o, v), value)))))
-        }
+        uint256 s = index >> 2; // Storage slot.
+        uint256 o = (index & 3) << 6; // Storage slot offset (bits).
+        uint256 v = map.map[s]; // Storage slot value.
+        map.map[s] = v ^ ((((v >> o) ^ value) & 0xffffffffffffffff) << o);
     }
 
     /// @dev Returns the uint128 value at `index` in `map`.
@@ -150,16 +121,10 @@ library LibMap {
 
     /// @dev Updates the uint128 value at `index` in `map`.
     function set(Uint128Map storage map, uint256 index, uint128 value) internal {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x20, map.slot)
-            mstore(0x00, shr(1, index))
-            let s := keccak256(0x00, 0x40) // Storage slot.
-            let o := shl(7, and(index, 1)) // Storage slot offset (bits).
-            let v := sload(s) // Storage slot value.
-            let m := 0xffffffffffffffffffffffffffffffff // Value mask.
-            sstore(s, xor(v, shl(o, and(m, xor(shr(o, v), value)))))
-        }
+        uint256 s = index >> 1; // Storage slot.
+        uint256 o = (index & 1) << 7; // Storage slot offset (bits).
+        uint256 v = map.map[s]; // Storage slot value.
+        map.map[s] = v ^ ((((v >> o) ^ value) & 0xffffffffffffffffffffffffffffffff) << o);
     }
 
     /// @dev Returns the value at `index` in `map`.
@@ -168,11 +133,9 @@ library LibMap {
         view
         returns (uint256 result)
     {
-        unchecked {
-            uint256 d = _rawDiv(256, bitWidth); // Bucket size.
-            uint256 m = (1 << bitWidth) - 1; // Value mask.
-            result = (map[_rawDiv(index, d)] >> (_rawMod(index, d) * bitWidth)) & m;
-        }
+        uint256 d = _rawDiv(256, bitWidth); // Bucket size.
+        uint256 m = _mask(bitWidth); // Value mask.
+        result = (map[_rawDiv(index, d)] >> _offset(index, d, bitWidth)) & m;
     }
 
     /// @dev Updates the value at `index` in `map`.
@@ -182,12 +145,12 @@ library LibMap {
         uint256 value,
         uint256 bitWidth
     ) internal {
-        unchecked {
-            uint256 d = _rawDiv(256, bitWidth); // Bucket size.
-            uint256 m = (1 << bitWidth) - 1; // Value mask.
-            uint256 o = _rawMod(index, d) * bitWidth; // Storage slot offset (bits).
-            map[_rawDiv(index, d)] ^= (((map[_rawDiv(index, d)] >> o) ^ value) & m) << o;
-        }
+        uint256 d = _rawDiv(256, bitWidth); // Bucket size.
+        uint256 m = _mask(bitWidth); // Value mask.
+        uint256 o = _offset(index, d, bitWidth); // Storage slot offset (bits).
+        uint256 s = _rawDiv(index, d); // Storage slot.
+        uint256 v = map[s];
+        map[s] = v ^ ((((v >> o) ^ value) & m) << o);
     }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -262,29 +225,25 @@ library LibMap {
         uint256 end,
         uint256 bitWidth
     ) internal view returns (bool found, uint256 index) {
-        unchecked {
-            if (start >= end) end = start;
-            uint256 t;
-            uint256 o = start - 1; // Offset to derive the actual index.
-            uint256 l = 1; // Low.
-            uint256 d = _rawDiv(256, bitWidth); // Bucket size.
-            uint256 m = (1 << bitWidth) - 1; // Value mask.
-            uint256 h = end - start; // High.
-            while (true) {
-                index = (l & h) + ((l ^ h) >> 1);
-                if (l > h) break;
-                t = (map[_rawDiv(index + o, d)] >> (_rawMod(index + o, d) * bitWidth)) & m;
-                if (t == needle) break;
-                if (needle <= t) h = index - 1;
-                else l = index + 1;
-            }
-            /// @solidity memory-safe-assembly
-            assembly {
-                m := or(iszero(index), iszero(bitWidth))
-                found := iszero(or(xor(t, needle), m))
-                index := add(o, xor(index, mul(xor(index, 1), m)))
-            }
+        if (start >= end) end = start;
+        uint256 t;
+        uint256 l = 1; // Low.
+        uint256 d = _rawDiv(256, bitWidth); // Bucket size.
+        uint256 m = _mask(bitWidth); // Value mask.
+        uint256 h = end - start; // High.
+        while (true) {
+            index = (l & h) + ((l ^ h) >> 1);
+            if (l > h) break;
+            // The one-based `index` counts from `start`.
+            uint256 at = start + (index - 1);
+            t = (map[_rawDiv(at, d)] >> _offset(at, d, bitWidth)) & m;
+            if (t == needle) break;
+            if (needle <= t) h = index - 1;
+            else l = index + 1;
         }
+        bool none = index == 0 || bitWidth == 0;
+        found = t == needle && !none;
+        index = none ? start : start + (index - 1);
     }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -293,17 +252,26 @@ library LibMap {
 
     /// @dev Returns `x / y`, returning 0 if `y` is zero.
     function _rawDiv(uint256 x, uint256 y) private pure returns (uint256 z) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            z := div(x, y)
-        }
+        if (y != 0) z = x / y;
     }
 
     /// @dev Returns `x % y`, returning 0 if `y` is zero.
     function _rawMod(uint256 x, uint256 y) private pure returns (uint256 z) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            z := mod(x, y)
-        }
+        if (y != 0) z = x % y;
+    }
+
+    /// @dev Returns `(index % d) * bitWidth`, the bit offset of `index` in its bucket
+    /// of `d` values: below 256, as `d * bitWidth <= 256` whenever `d` is not zero.
+    /// The masks keep both factors whole and let the product skip its overflow check.
+    /// @custom:solar-inline
+    function _offset(uint256 index, uint256 d, uint256 bitWidth) private pure returns (uint256) {
+        return (_rawMod(index, d) & 0xffff) * (bitWidth & 0xffff);
+    }
+
+    /// @dev Returns `(1 << bitWidth) - 1`, every bit for a width of 256 or more: the
+    /// shift clears all of them then, as the assembly's subtraction wraps.
+    /// @custom:solar-inline
+    function _mask(uint256 bitWidth) private pure returns (uint256) {
+        return ~(type(uint256).max << bitWidth);
     }
 }
