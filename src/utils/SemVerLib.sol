@@ -3,6 +3,14 @@ pragma solidity ^0.8.4;
 
 /// @notice Library for comparing SemVers.
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/utils/SemVerLib.sol)
+/// @dev The checked port reads each version from the top of a word that it shifts left as it
+/// goes, so the bytes past the 32 read as zero, as upstream's `byte` reads them. It orders
+/// numbers without computing them: the digits of a number, at most 32, are the digits of a
+/// base-256 number, one to a byte, which orders as the decimal number does, leading zeros
+/// included. An identifier that is not numeric orders as its bytes left-aligned in a word,
+/// which is what upstream copies through scratch memory, and a word-at-a-time test tells
+/// whether an identifier is numeric. It needs no trusted helper.
+/// @custom:solar-safe memory arithmetic
 library SemVerLib {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                         COMPARISON                         */
@@ -15,53 +23,97 @@ library SemVerLib {
     /// - If a strict order cannot be determined, returns 0.
     /// To convert a regular string to a small string (bytes32), use `LibString.toSmallString`.
     function cmp(bytes32 a, bytes32 b) internal pure returns (int256 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            function mmp(i_, a_) -> _r, _o {
-                for { _o := i_ } iszero(gt(sub(byte(_o, a_), 48), 9)) { _o := add(1, _o) } {
-                    _r := add(mul(10, _r), sub(byte(_o, a_), 48))
-                }
-            }
-            function pre(i_, a_) -> hasNonDigit_, _r, _o {
-                mstore(0x00, 0)
-                for { _o := i_ } 1 { _o := add(1, _o) } {
-                    let c_ := byte(_o, a_)
-                    if and(1, shr(c_, 0x480000000001)) { break } // '\x00', '.', '+'
-                    let digit_ := sub(c_, 48)
-                    hasNonDigit_ := or(hasNonDigit_, gt(digit_, 9))
-                    _r := add(mul(10, _r), digit_)
-                    mstore8(sub(_o, i_), c_)
-                }
-                mstore(shl(5, hasNonDigit_), _r) // Overwrite if it's numeric.
-                _r := mload(0x00)
-            }
-            let x, i := mmp(eq(118, or(32, byte(0, a))), a) // 'v', 'V'
-            let y, j := mmp(eq(118, or(32, byte(0, b))), b) // 'v', 'V'
-            result := sub(gt(x, y), lt(x, y))
-            for {} 1 {} {
-                let u := eq(byte(i, a), 46) // `.`
-                let v := eq(byte(j, b), 46) // `.`
-                if iszero(lt(result, or(u, v))) { break }
-                if u { u, i := mmp(add(i, 1), a)} // `.`
-                if v { v, j := mmp(add(j, 1), b)} // `.`
-                result := sub(gt(u, v), lt(u, v))
-            }
-            if iszero(result) {
-                let u := eq(byte(i, a), 45) // `-`
-                let v := eq(byte(j, b), 45) // `-`
-                result := sub(lt(u, v), gt(u, v))
-                for {} lt(result, u) {} {
-                    u, x, i := pre(add(i, 1), a)
-                    v, y, j := pre(add(j, 1), b)
-                    result := sub(gt(u, v), lt(u, v))
-                    if result { break }
-                    result := sub(gt(x, y), lt(x, y))
-                    if result { break }
-                    u := eq(byte(i, a), 46) // `.`
-                    v := eq(byte(j, b), 46) // `.`
-                    result := sub(gt(u, v), lt(u, v))
-                }
-            }
+        // The unread rest of each version, its next byte on top.
+        uint256 s = uint256(a);
+        uint256 t = uint256(b);
+        if ((s >> 248) | 32 == 118) s <<= 8; // `v`, `V`.
+        if ((t >> 248) | 32 == 118) t <<= 8; // `v`, `V`.
+        uint256 x;
+        uint256 y;
+        (x, s) = _number(s);
+        (y, t) = _number(t);
+        // The `.`-separated numbers that follow, while equal, a missing one counting as zero.
+        while (x == y) {
+            bool u = s >> 248 == 46; // `.`
+            bool v = t >> 248 == 46; // `.`
+            if (!(u || v)) break;
+            x = 0;
+            y = 0;
+            if (u) (x, s) = _number(s << 8);
+            if (v) (y, t) = _number(t << 8);
         }
+        if (x != y) return x < y ? -1 : int256(1);
+        // A pre-release precedes its release.
+        bool more = s >> 248 == 45; // `-`
+        if (more != (t >> 248 == 45)) return more ? -1 : int256(1);
+        // The `.`-separated pre-release identifiers, while both have another.
+        while (more) {
+            bool p;
+            bool q;
+            (p, x, s) = _identifier(s << 8);
+            (q, y, t) = _identifier(t << 8);
+            // A numeric identifier precedes one that is not.
+            if (p != q) return p ? int256(1) : -1;
+            if (x != y) return x < y ? -1 : int256(1);
+            more = s >> 248 == 46; // `.`
+            if (more != (t >> 248 == 46)) return more ? int256(1) : -1;
+        }
+    }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      PRIVATE HELPERS                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev The low four bits of every byte.
+    uint256 private constant _LOW_NIBBLES =
+        0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f;
+
+    /// @dev The low seven bits of every byte.
+    uint256 private constant _LOW_BITS =
+        0x7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f;
+
+    /// @dev The top bit of every byte.
+    uint256 private constant _HIGH_BITS =
+        0x8080808080808080808080808080808080808080808080808080808080808080;
+
+    /// @dev The number that the digits at the top of `w` spell in base 256, which orders as
+    /// their decimal number does, and `w` after them.
+    /// @custom:solar-inline
+    function _number(uint256 w) private pure returns (uint256 r, uint256 rest) {
+        while (true) {
+            uint256 digit = (w >> 248) ^ 48;
+            if (digit > 9) break;
+            r = (r << 8) | digit;
+            w <<= 8;
+        }
+        rest = w;
+    }
+
+    /// @dev Parses the pre-release identifier at the top of `w`, which ends at a `\x00`, `.`
+    /// or `+`. Returns whether it has a byte that is not a digit; if it has, its bytes
+    /// left-aligned in a word, else the number its digits spell in base 256; and `w` after it.
+    /// @custom:solar-inline
+    function _identifier(uint256 w)
+        private
+        pure
+        returns (bool hasNonDigit, uint256 r, uint256 rest)
+    {
+        uint256 bits;
+        rest = w;
+        // Up to a `\x00`, `.` or `+`.
+        while ((1 << (rest >> 248)) & 0x480000000001 == 0) {
+            rest <<= 8;
+            bits += 8;
+        }
+        uint256 keep = ~(type(uint256).max >> bits);
+        r = w & keep;
+        // The top bit of each byte of `r` that is a digit: at least `0` and at most `9`,
+        // each byte apart, as no carry leaves a byte.
+        uint256 low = r & _LOW_BITS;
+        uint256 digits = (low + 0x5050505050505050505050505050505050505050505050505050505050505050)
+            & ~(low + 0x4646464646464646464646464646464646464646464646464646464646464646) & ~r
+            & _HIGH_BITS;
+        hasNonDigit = digits != keep & _HIGH_BITS;
+        if (!hasNonDigit) r = (r >> (256 - bits)) & _LOW_NIBBLES;
     }
 }
