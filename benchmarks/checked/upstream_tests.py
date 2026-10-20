@@ -41,6 +41,7 @@ LIBRARIES = [
     "LibString",
     "LibSort",
     "tokens/ERC20",
+    "tokens/WETH",
 ]
 
 

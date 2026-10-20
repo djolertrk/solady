@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.4;
+pragma solidity ^0.8.20;
 
 import {ERC20} from "./ERC20.sol";
 
@@ -7,6 +7,9 @@ import {ERC20} from "./ERC20.sol";
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/tokens/WETH.sol)
 /// @author Solmate (https://github.com/transmissions11/solmate/blob/main/src/tokens/WETH.sol)
 /// @author Inspired by WETH9 (https://github.com/dapphub/ds-weth/blob/master/src/weth9.sol)
+/// @dev The checked port sends withdrawn ETH with a plain call, which forwards all
+/// the gas and ignores what the recipient returns, as the assembly does.
+/// @custom:solar-safe memory arithmetic
 contract WETH is ERC20 {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                       CUSTOM ERRORS                        */
@@ -41,14 +44,8 @@ contract WETH is ERC20 {
     /// @dev Burns `amount` WETH of the caller and sends `amount` ETH to the caller.
     function withdraw(uint256 amount) public virtual {
         _burn(msg.sender, amount);
-        /// @solidity memory-safe-assembly
-        assembly {
-            // Transfer the ETH and check if it succeeded or not.
-            if iszero(call(gas(), caller(), amount, codesize(), 0x00, codesize(), 0x00)) {
-                mstore(0x00, 0xb12d13eb) // `ETHTransferFailed()`.
-                revert(0x1c, 0x04)
-            }
-        }
+        (bool success,) = msg.sender.call{value: amount}("");
+        if (!success) revert ETHTransferFailed();
     }
 
     /// @dev Equivalent to `deposit()`.
