@@ -37,6 +37,7 @@ CHECKED_LIBRARIES = (
     "Base64",
     "EfficientHashLib",
     "LibBit",
+    "LibBytes",
     "LibSort",
     "LibString",
     "MerkleProofLib",
@@ -278,6 +279,26 @@ def dispatch_gas(logs, code: bytes, selector: bytes) -> int | None:
     return None
 
 
+# LibBytes operations LibString's cases cover on their strings' bytes.
+SHARED_TEXT_APIS = frozenset(
+    {
+        "replace",
+        "indexOf",
+        "lastIndexOf",
+        "contains",
+        "startsWith",
+        "endsWith",
+        "repeat",
+        "slice",
+        "sliceCalldata",
+        "indicesOf",
+        "split",
+        "concat",
+        "eq",
+        "eqs",
+        "cmp",
+    }
+)
 # The most word arguments a harness wrapper can take; see `prepare`.
 MAX_WRAPPER_PARAMS = 12
 
@@ -518,6 +539,23 @@ def packed_words(value, base=None):
     for k, i in enumerate(range(start, n, 32)):
         words[1 + k] = value[i : i + 32].ljust(32, b"\0")
     return words
+
+
+class EncodedArguments(bytes):
+    """A case's arguments, already ABI-encoded.
+
+    A case gives these to lay calldata out in a way no encoder would, such as
+    one argument that points inside another.
+    """
+
+
+def as_bytes(value):
+    """A string case's bytes: each string encoded, through lists."""
+    if isinstance(value, str):
+        return value.encode()
+    if isinstance(value, list):
+        return [as_bytes(v) for v in value]
+    return value
 
 
 def storage_vectors(name, values, convert):
@@ -901,6 +939,9 @@ def test_vectors(row, rng):
         ]
         yield from storage_vectors(name, blobs, bytes)
         return
+    if row["library"] == "LibBytes":
+        yield from bytes_vectors(row, types, blobs, rng)
+        return
     if row["library"] == "LibString":
         NOT_FOUND = MAX
         words = ["", "a", "ab", "abc", "hello world", "aaa", "banana", "a" * 32, "a" * 33]
@@ -1174,6 +1215,114 @@ def test_vectors(row, rng):
                     yield [s], [s.isascii()]
         return
     raise ValueError(f"no oracle for {row}")
+
+
+def bytes_vectors(row, types, blobs, rng):
+    """Cases for LibBytes' operations on memory and calldata bytes."""
+    name = row["name"]
+
+    def word(value):
+        return value.to_bytes(32, "big")
+
+    def padded(data):
+        return data + bytes(-len(data) % 32)
+
+    def tail(data):
+        return word(len(data)) + padded(data)
+
+    if name in SHARED_TEXT_APIS or name == "directReturn" and types == ["bytes"]:
+        # LibString runs these on its strings' bytes, so its cases carry over.
+        shared = {**row, "library": "LibString", "name": name.removesuffix("Calldata")}
+        for args, expected in test_vectors(shared, rng):
+            yield as_bytes(args), as_bytes(expected)
+    elif name == "directReturn":
+        for items in [[], [b""], [b"a"], [b"hello", b"", b"x" * 33], [blobs[-1]] * 3]:
+            yield [items], [items]
+    elif name == "indexOfByte":
+        for subject in blobs + [b"no needle until here: a", b"a" * 33]:
+            for needle in [b"\x00", b"\x0b", b"a", b"\xff"]:
+                n = len(subject)
+                if len(types) == 2:
+                    froms = [None]
+                else:
+                    froms = sorted({0, 1, 31, 32, 33, max(n - 1, 0), n, n + 1, MAX})
+                for start in froms:
+                    f = start or 0
+                    hit = subject.find(needle, f) if f < n else -1
+                    args = [subject, needle] + ([] if start is None else [start])
+                    yield args, [MAX if hit < 0 else hit]
+    elif name in ("truncate", "truncatedCalldata"):
+        for subject in blobs:
+            n = len(subject)
+            for size in sorted({0, 1, 31, 32, 33, max(n - 1, 0), n, n + 1, MAX}):
+                yield [subject, size], [subject[:size]]
+    elif name in ("load", "loadCalldata"):
+        # A read past the end sees whatever follows the bytes, which differs
+        # between builds, so only whole words inside them are compared.
+        for subject in blobs:
+            for offset in sorted({0, 1, 31, 32, len(subject) - 32}):
+                if 0 <= offset <= len(subject) - 32:
+                    yield [subject, offset], [subject[offset : offset + 32]]
+    elif name in ("staticStructInCalldata", "dynamicStructInCalldata", "bytesInCalldata"):
+        payloads = [b"", b"z", b"y" * 32, b"x" * 33]
+        subjects = [b"", b"\x01" * 31, bytes(32), word(32), word(1 << 64), word(MAX)]
+        subjects += [encode(["uint256", "bytes", "uint256"], [7, p, 9]) for p in payloads]
+        # A relative offset whose bytes run past the end.
+        subjects += [word(0x20) + word(0x40) + b"short"]
+        for subject in subjects:
+            n = len(subject)
+            for offset in sorted(o for o in {0, 1, 0x20, 0x40, n - 32, n - 31, n, MAX} if o >= 0):
+                fits = n >= 32 and offset <= n - 32
+                s = int.from_bytes(subject[offset : offset + 32], "big") if fits else 0
+                if name == "staticStructInCalldata":
+                    yield [subject, offset], [subject[offset:]] if fits else b""
+                elif name == "dynamicStructInCalldata":
+                    if fits and s >> 64 == 0 and s > n:
+                        # The original's length wraps here, so its encoding
+                        # runs out of gas rather than reverting.
+                        continue
+                    yield [subject, offset], [subject[s:]] if fits and s >> 64 == 0 else b""
+                else:
+                    if fits and s >> 64 == 0 and s <= n - 32:
+                        size = int.from_bytes(subject[s : s + 32], "big")
+                        if size >> 64 == 0 and s + size <= n - 32:
+                            yield [subject, offset], [subject[s + 32 : s + 32 + size]]
+                            continue
+                    yield [subject, offset], b""
+    elif name == "checkInCalldata" and types[0] == "bytes":
+        # In ABI order the first argument comes first, outside the second.
+        for x, a in [(b"", b""), (b"ab", b"abc"), (b"x" * 33, b"x" * 64)]:
+            yield [x, a], b""
+        for a in [b"", b"z", b"y" * 32, b"x" * 33]:
+            # Both point at the same bytes.
+            yield EncodedArguments(word(0x40) + word(0x40) + tail(a)), [a]
+        for size, inner in [(0, b""), (3, b"abc"), (3, b"abcdef"), (40, b"q" * 40)]:
+            # `x` starts inside `a`, at `a`'s second word.
+            a = word(size) + inner
+            fits = 0x20 + size <= len(a)
+            x = (inner + bytes(64))[:size]
+            yield EncodedArguments(word(0x60) + word(0x40) + tail(a)), [x] if fits else b""
+        # `x` runs past `a` into the padding after it.
+        yield EncodedArguments(word(0x60) + word(0x40) + tail(word(5) + b"abc")), b""
+    elif name == "checkInCalldata":
+        for items in [[], [b"a"], [b"", b"xyz" * 20]]:
+            yield [items, encode(["bytes[]"], [items])], b""
+            # `x` is the array `a` holds the encoding of: its length word is
+            # `a`'s second word.
+            a = encode(["bytes[]"], [items])
+            yield EncodedArguments(word(0x80) + word(0x40) + tail(a)), [items]
+            if items:
+                # `a` ends a word early, cutting its last element off.
+                yield EncodedArguments(word(0x80) + word(0x40) + word(len(a) - 32) + a), b""
+    elif name == "emptyCalldata":
+        yield [], [b""]
+    elif name in ("msbToAddress", "lsbToAddress"):
+        for x in [0, 1, MAX, 1 << 255, (1 << 160) - 1] + [rng.getrandbits(256) for _ in range(4)]:
+            raw = word(x)
+            address = raw[:20] if name == "msbToAddress" else raw[12:]
+            yield [raw], ["0x" + address.hex()]
+    else:
+        raise ValueError(f"no oracle for {row}")
 
 
 def merkle_pair(a, b):
@@ -1848,7 +1997,9 @@ def run(args):
             for index, (values, expected, *extra) in enumerate(vectors):
                 types = [t for _, (t, _) in row["wrapper_params"]]
                 signature = row["wrapper"] + "(" + ",".join(types) + ")"
-                calldata = keccak(signature.encode())[:4] + encode(types, values)
+                calldata = keccak(signature.encode())[:4] + (
+                    values if isinstance(values, EncodedArguments) else encode(types, values)
+                )
                 # Storage the call starts from and must leave, and the code the
                 # accounts it calls hold, "0x" for none.
                 setup, final, accounts = (extra + [None, None, None])[:3]

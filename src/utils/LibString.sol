@@ -4,14 +4,18 @@ pragma solidity ^0.8.20;
 import {LibBytes} from "./LibBytes.sol";
 
 /// @notice Checked Solidity replacements for the LibString APIs.
-/// @dev `StringStorage` keeps the original's packed layout through the
-/// storage operations of `LibBytes`, and `directReturn` ends the call through
-/// the trusted `_directReturn`. `bytesStorage` is absent: it retypes a
-/// storage reference in a `pure` function, and reaching the nested
-/// `BytesStorage` without assembly is a storage access, so only a `view`
-/// function could return it.
+/// @dev As in the original, the byte operations are LibBytes', and
+/// `StringStorage` wraps a `BytesStorage`, whose storage operations keep the
+/// original's packed layout. `bytesStorage` and `directReturn` keep assembly
+/// in trusted declarations: Solidity reads a storage struct's member only in
+/// a `view` function, and a `return` statement leaves only the function it is
+/// in.
 /// @custom:solar-safe memory arithmetic
 library LibString {
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                          STRUCTS                           */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
     /// @dev Goated string storage struct that totally MOGs, no cap, fr.
     /// Uses less gas and bytecode than Solidity's native string storage. It's meta af.
     /// Packs length with the first 31 bytes if <255 bytes, so it’s mad tight.
@@ -19,10 +23,55 @@ library LibString {
         LibBytes.BytesStorage _spacer;
     }
 
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                        CUSTOM ERRORS                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev The length of the output is too small to contain all the hex digits.
     error HexLengthInsufficient();
+
+    /// @dev The length of the string is more than 32 bytes.
     error TooBigForSmallString();
+
+    /// @dev The input string must be a 7-bit ASCII.
     error StringNot7BitASCII();
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                         CONSTANTS                          */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev The constant returned when the `search` is not found in the string.
     uint256 internal constant NOT_FOUND = type(uint256).max;
+
+    /// @dev Lookup for '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'.
+    uint128 internal constant ALPHANUMERIC_7_BIT_ASCII = 0x7fffffe07fffffe03ff000000000000;
+
+    /// @dev Lookup for 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'.
+    uint128 internal constant LETTERS_7_BIT_ASCII = 0x7fffffe07fffffe0000000000000000;
+
+    /// @dev Lookup for 'abcdefghijklmnopqrstuvwxyz'.
+    uint128 internal constant LOWERCASE_7_BIT_ASCII = 0x7fffffe000000000000000000000000;
+
+    /// @dev Lookup for 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.
+    uint128 internal constant UPPERCASE_7_BIT_ASCII = 0x7fffffe0000000000000000;
+
+    /// @dev Lookup for '0123456789'.
+    uint128 internal constant DIGITS_7_BIT_ASCII = 0x3ff000000000000;
+
+    /// @dev Lookup for '0123456789abcdefABCDEF'.
+    uint128 internal constant HEXDIGITS_7_BIT_ASCII = 0x7e0000007e03ff000000000000;
+
+    /// @dev Lookup for '01234567'.
+    uint128 internal constant OCTDIGITS_7_BIT_ASCII = 0xff000000000000;
+
+    /// @dev Lookup for '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~ \t\n\r\x0b\x0c'.
+    uint128 internal constant PRINTABLE_7_BIT_ASCII = 0x7fffffffffffffffffffffff00003e00;
+
+    /// @dev Lookup for '!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~'.
+    uint128 internal constant PUNCTUATION_7_BIT_ASCII = 0x78000001f8000001fc00fffe00000000;
+
+    /// @dev Lookup for ' \t\n\r\x0b\x0c'.
+    uint128 internal constant WHITESPACE_7_BIT_ASCII = 0x100003e00;
 
     /// @dev Nibble-spreading masks, one per halving of the packing.
     uint256 private constant MASK_64 =
@@ -57,6 +106,19 @@ library LibString {
     /// @dev The top bit of every byte lane.
     uint256 private constant _HIGH_BITS =
         0x8080808080808080808080808080808080808080808080808080808080808080;
+
+    /// @dev Lowercase hexadecimal digits.
+    bytes16 private constant _DIGITS = "0123456789abcdef";
+
+    /// @dev Uppercase hexadecimal digits.
+    bytes16 private constant _UPPER_DIGITS = "0123456789ABCDEF";
+
+    /// @dev One bit per byte a URI component keeps: letters, digits and `-_.!~*'()`.
+    uint256 private constant _URI_UNRESERVED = 0x47fffffe87fffffe03ff678200000000;
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                 STRING STORAGE OPERATIONS                  */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     /// @dev Sets the value of the string storage `$` to `s`.
     function set(StringStorage storage $, string memory s) internal {
@@ -93,49 +155,44 @@ library LibString {
         return LibBytes.uint8At($._spacer, i);
     }
 
+    /// @dev Helper to cast `$` to a `BytesStorage`.
+    /// Solidity reads a struct member only in a view, so this keeps the
+    /// upstream assembly.
+    /// @custom:solar-trusted
+    function bytesStorage(StringStorage storage $)
+        internal
+        pure
+        returns (LibBytes.BytesStorage storage casted)
+    {
+        /// @solidity memory-safe-assembly
+        assembly {
+            casted.slot := $.slot
+        }
+    }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                     DECIMAL OPERATIONS                     */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev Returns the base 10 decimal representation of `value`.
     function toString(uint256 value) internal pure returns (string memory result) {
         return _toString(value);
     }
 
+    /// @dev Returns the base 10 decimal representation of `value`.
     function toString(int256 value) internal pure returns (string memory result) {
         return _toString(value);
     }
 
-    function toHexStringNoPrefix(uint256 value, uint256 byteCount)
-        internal
-        pure
-        returns (string memory result)
-    {
-        return _toHexStringNoPrefix(value, byteCount);
-    }
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                   HEXADECIMAL OPERATIONS                   */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
-    /// @dev The thirty-two hex characters of the sixteen bytes in `x`, which
-    /// must be below `2 ** 128`.
-    function _hexWord(uint256 x) private pure returns (bytes32) {
-        // Spread the thirty-two nibbles one to a byte, halving the packing
-        // each step: eight bytes, four, two, one, then one nibble.
-        x = (x | (x << 64)) & MASK_64;
-        x = (x | (x << 32)) & MASK_32;
-        x = (x | (x << 16)) & MASK_16;
-        x = (x | (x << 8)) & MASK_8;
-        x = (x | (x << 4)) & MASK_4;
-        // Adding six carries every nibble above nine into the next bit, which
-        // marks the ones that become letters rather than digits.
-        uint256 letters = ((x + SPREAD_6) >> 4) & SPREAD_1;
-        return bytes32(x + SPREAD_ASCII_0 + letters * 39);
-    }
-
-    /// @dev Spreads the thirty-two nibbles of the low sixteen bytes of `x` one to a byte,
-    /// the highest nibble first, as `_hexWord` does before it turns them into digits. Kept
-    /// apart from it so that the hex formatters' loops keep their inlined body.
-    function _nibbles(uint256 x) private pure returns (uint256) {
-        x = (x | (x << 64)) & MASK_64;
-        x = (x | (x << 32)) & MASK_32;
-        x = (x | (x << 16)) & MASK_16;
-        x = (x | (x << 8)) & MASK_8;
-        return (x | (x << 4)) & MASK_4;
-    }
-
+    /// @dev Returns the hexadecimal representation of `value`,
+    /// left-padded to an input length of `byteCount` bytes.
+    /// The output is prefixed with "0x" encoded using 2 hexadecimal digits per byte,
+    /// giving a total length of `byteCount * 2 + 2` bytes.
+    /// Reverts if `byteCount` is too small for the output to contain all the digits.
     function toHexString(uint256 value, uint256 byteCount)
         internal
         pure
@@ -144,14 +201,38 @@ library LibString {
         return _toHexString(value, byteCount);
     }
 
-    function toHexStringNoPrefix(uint256 value) internal pure returns (string memory result) {
-        return _toHexStringNoPrefix(value);
+    /// @dev Returns the hexadecimal representation of `value`,
+    /// left-padded to an input length of `byteCount` bytes.
+    /// The output is not prefixed with "0x" and is encoded using 2 hexadecimal digits per byte,
+    /// giving a total length of `byteCount * 2` bytes.
+    /// Reverts if `byteCount` is too small for the output to contain all the digits.
+    function toHexStringNoPrefix(uint256 value, uint256 byteCount)
+        internal
+        pure
+        returns (string memory result)
+    {
+        return _toHexStringNoPrefix(value, byteCount);
     }
 
+    /// @dev Returns the hexadecimal representation of `value`.
+    /// The output is prefixed with "0x" and encoded using 2 hexadecimal digits per byte.
+    /// As address are 20 bytes long, the output will left-padded to have
+    /// a length of `20 * 2 + 2` bytes.
     function toHexString(uint256 value) internal pure returns (string memory result) {
         return _toHexString(value);
     }
 
+    /// @dev Returns the hexadecimal representation of `value`.
+    /// The output is prefixed with "0x".
+    /// The output excludes leading "0" from the `toHexString` output.
+    /// `0x00: "0x0", 0x01: "0x1", 0x12: "0x12", 0x123: "0x123"`.
+    function toMinimalHexString(uint256 value) internal pure returns (string memory result) {
+        return _toMinimalHexString(value);
+    }
+
+    /// @dev Returns the hexadecimal representation of `value`.
+    /// The output excludes leading "0" from the `toHexStringNoPrefix` output.
+    /// `0x00: "0", 0x01: "1", 0x12: "12", 0x123: "123"`.
     function toMinimalHexStringNoPrefix(uint256 value)
         internal
         pure
@@ -160,26 +241,75 @@ library LibString {
         return _toMinimalHexStringNoPrefix(value);
     }
 
-    function toMinimalHexString(uint256 value) internal pure returns (string memory result) {
-        return _toMinimalHexString(value);
+    /// @dev Returns the hexadecimal representation of `value`.
+    /// The output is encoded using 2 hexadecimal digits per byte.
+    /// As address are 20 bytes long, the output will left-padded to have
+    /// a length of `20 * 2` bytes.
+    function toHexStringNoPrefix(uint256 value) internal pure returns (string memory result) {
+        return _toHexStringNoPrefix(value);
     }
 
-    function toHexStringNoPrefix(address value) internal pure returns (string memory result) {
-        return toHexStringNoPrefix(uint160(value), 20);
+    /// @dev Returns the hexadecimal representation of `value`.
+    /// The output is prefixed with "0x", encoded using 2 hexadecimal digits per byte,
+    /// and the alphabets are capitalized conditionally according to
+    /// https://eips.ethereum.org/EIPS/eip-55
+    function toHexStringChecksummed(address value) internal pure returns (string memory result) {
+        bytes memory out = new bytes(42);
+        out[0] = "0";
+        out[1] = "x";
+        // The top sixteen bytes make one word of characters; the low four make the top eight
+        // characters of another.
+        uint256 raw = uint160(value);
+        uint256 head = uint256(_hexWord(raw >> 32));
+        uint256 tail = uint256(_hexWord((raw & 0xffffffff) << 96));
+        _writeBytes32(out, 2, bytes32(head));
+        _writeBytes8(out, 34, bytes8(bytes32(tail)));
+        // A character is uppercased when it is a letter and its nibble of the hash of the
+        // lowercase digits is at least eight: nibble by nibble, the hash's top sixteen bytes
+        // line up with the head and the next four with the tail.
+        uint256 hash = uint256(_keccak256Range(out, 2, 40));
+        _writeBytes32(out, 2, bytes32(_checksumCase(head, _nibbles(hash >> 128))));
+        _writeBytes8(
+            out, 34, bytes8(bytes32(_checksumCase(tail, _nibbles(hash & type(uint128).max))))
+        );
+        return string(out);
     }
 
+    /// @dev Returns the hexadecimal representation of `value`.
+    /// The output is prefixed with "0x" and encoded using 2 hexadecimal digits per byte.
     function toHexString(address value) internal pure returns (string memory result) {
         return toHexString(uint160(value), 20);
     }
 
-    function toHexStringNoPrefix(bytes memory raw) internal pure returns (string memory result) {
-        return _hexEncode(raw);
+    /// @dev Returns the hexadecimal representation of `value`.
+    /// The output is encoded using 2 hexadecimal digits per byte.
+    function toHexStringNoPrefix(address value) internal pure returns (string memory result) {
+        return toHexStringNoPrefix(uint160(value), 20);
     }
 
+    /// @dev Returns the hex encoded string from the raw bytes.
+    /// The output is encoded using 2 hexadecimal digits per byte.
     function toHexString(bytes memory raw) internal pure returns (string memory result) {
         return _hexEncodePrefixed(raw);
     }
 
+    /// @dev Returns the hex encoded string from the raw bytes.
+    /// The output is encoded using 2 hexadecimal digits per byte.
+    function toHexStringNoPrefix(bytes memory raw) internal pure returns (string memory result) {
+        return _hexEncode(raw);
+    }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                   RUNE STRING OPERATIONS                   */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev Returns the number of UTF characters in the string.
+    function runeCount(string memory s) internal pure returns (uint256 result) {
+        return _runeCount(s);
+    }
+
+    /// @dev Returns if this string is a 7-bit ASCII string.
+    /// (i.e. all characters codes are in [0..127])
     function is7BitASCII(string memory s) internal pure returns (bool result) {
         // A word at a time: any byte with its top bit set fails the whole word.
         bytes memory b = bytes(s);
@@ -193,20 +323,18 @@ library LibString {
         return true;
     }
 
+    /// @dev Returns if this string is a 7-bit ASCII string,
+    /// AND all characters are in the `allowed` lookup.
+    /// Note: If `s` is empty, returns true regardless of `allowed`.
     function is7BitASCII(string memory s, uint128 allowed) internal pure returns (bool result) {
         // With every 7-bit byte allowed, only the high bits matter.
         if (allowed == type(uint128).max) return is7BitASCII(s);
         return _allowedBytes(bytes(s), allowed);
     }
 
-    /// @dev Whether every byte of `b` has its bit set in `allowed`.
-    function _allowedBytes(bytes memory b, uint256 allowed) private pure returns (bool) {
-        for (uint256 i; i < b.length; ++i) {
-            if (((allowed >> uint8(b[i])) & 1) == 0) return false;
-        }
-        return true;
-    }
-
+    /// @dev Converts the bytes in the 7-bit ASCII string `s` to
+    /// an allowed lookup for use in `is7BitASCII(s, allowed)`.
+    /// To save runtime gas, you can cache the result in an immutable variable.
     function to7BitASCIIAllowedLookup(string memory s) internal pure returns (uint128 result) {
         bytes memory b = bytes(s);
         if (b.length == 0) return 0;
@@ -218,18 +346,127 @@ library LibString {
         return uint128(lookup);
     }
 
-    function runeCount(string memory s) internal pure returns (uint256 result) {
-        return _runeCount(s);
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                   BYTE STRING OPERATIONS                   */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    // For performance and bytecode compactness, byte string operations are restricted
+    // to 7-bit ASCII strings. All offsets are byte offsets, not UTF character offsets.
+    // Usage of byte string operations on charsets with runes spanning two or more bytes
+    // can lead to undefined behavior.
+
+    /// @dev Returns `subject` all occurrences of `needle` replaced with `replacement`.
+    function replace(string memory subject, string memory needle, string memory replacement)
+        internal
+        pure
+        returns (string memory)
+    {
+        return string(LibBytes.replace(bytes(subject), bytes(needle), bytes(replacement)));
     }
 
+    /// @dev Returns the byte index of the first location of `needle` in `subject`,
+    /// needleing from left to right, starting from `from`.
+    /// Returns `NOT_FOUND` (i.e. `type(uint256).max`) if the `needle` is not found.
+    function indexOf(string memory subject, string memory needle, uint256 from)
+        internal
+        pure
+        returns (uint256)
+    {
+        return LibBytes.indexOf(bytes(subject), bytes(needle), from);
+    }
+
+    /// @dev Returns the byte index of the first location of `needle` in `subject`,
+    /// needleing from left to right.
+    /// Returns `NOT_FOUND` (i.e. `type(uint256).max`) if the `needle` is not found.
+    function indexOf(string memory subject, string memory needle) internal pure returns (uint256) {
+        return LibBytes.indexOf(bytes(subject), bytes(needle), 0);
+    }
+
+    /// @dev Returns the byte index of the first location of `needle` in `subject`,
+    /// needleing from right to left, starting from `from`.
+    /// Returns `NOT_FOUND` (i.e. `type(uint256).max`) if the `needle` is not found.
+    function lastIndexOf(string memory subject, string memory needle, uint256 from)
+        internal
+        pure
+        returns (uint256)
+    {
+        return LibBytes.lastIndexOf(bytes(subject), bytes(needle), from);
+    }
+
+    /// @dev Returns the byte index of the first location of `needle` in `subject`,
+    /// needleing from right to left.
+    /// Returns `NOT_FOUND` (i.e. `type(uint256).max`) if the `needle` is not found.
+    function lastIndexOf(string memory subject, string memory needle)
+        internal
+        pure
+        returns (uint256)
+    {
+        return LibBytes.lastIndexOf(bytes(subject), bytes(needle), type(uint256).max);
+    }
+
+    /// @dev Returns true if `needle` is found in `subject`, false otherwise.
+    function contains(string memory subject, string memory needle) internal pure returns (bool) {
+        return LibBytes.contains(bytes(subject), bytes(needle));
+    }
+
+    /// @dev Returns whether `subject` starts with `needle`.
+    function startsWith(string memory subject, string memory needle) internal pure returns (bool) {
+        return LibBytes.startsWith(bytes(subject), bytes(needle));
+    }
+
+    /// @dev Returns whether `subject` ends with `needle`.
+    function endsWith(string memory subject, string memory needle) internal pure returns (bool) {
+        return LibBytes.endsWith(bytes(subject), bytes(needle));
+    }
+
+    /// @dev Returns `subject` repeated `times`.
+    function repeat(string memory subject, uint256 times) internal pure returns (string memory) {
+        return string(LibBytes.repeat(bytes(subject), times));
+    }
+
+    /// @dev Returns a copy of `subject` sliced from `start` to `end` (exclusive).
+    /// `start` and `end` are byte offsets.
+    function slice(string memory subject, uint256 start, uint256 end)
+        internal
+        pure
+        returns (string memory)
+    {
+        return string(LibBytes.slice(bytes(subject), start, end));
+    }
+
+    /// @dev Returns a copy of `subject` sliced from `start` to the end of the string.
+    /// `start` is a byte offset.
+    function slice(string memory subject, uint256 start) internal pure returns (string memory) {
+        return string(LibBytes.slice(bytes(subject), start));
+    }
+
+    /// @dev Returns all the indices of `needle` in `subject`.
+    /// The indices are byte offsets.
+    function indicesOf(string memory subject, string memory needle)
+        internal
+        pure
+        returns (uint256[] memory)
+    {
+        return LibBytes.indicesOf(bytes(subject), bytes(needle));
+    }
+
+    /// @dev Returns an arrays of strings based on the `delimiter` inside of the `subject` string.
+    function split(string memory subject, string memory delimiter)
+        internal
+        pure
+        returns (string[] memory)
+    {
+        return _toStrings(LibBytes.split(bytes(subject), bytes(delimiter)));
+    }
+
+    /// @dev Returns a concatenated string of `a` and `b`.
+    /// Cheaper than `string.concat()` and does not de-align the free memory pointer.
     function concat(string memory a, string memory b) internal pure returns (string memory) {
-        return string.concat(a, b);
+        return string(LibBytes.concat(bytes(a), bytes(b)));
     }
 
-    function eq(string memory a, string memory b) internal pure returns (bool result) {
-        return keccak256(bytes(a)) == keccak256(bytes(b));
-    }
-
+    /// @dev Returns a copy of the string in either lowercase or UPPERCASE.
+    /// WARNING! This function is only compatible with 7-bit ASCII strings.
     function toCase(string memory subject, bool toUpper)
         internal
         pure
@@ -262,226 +499,6 @@ library LibString {
             _writeBytes32(out, n - 32, bytes32(word ^ _caseFlips(word, flip)));
         }
         return string(out);
-    }
-
-    /// @dev `0x20` in each byte of `word` that is a lowercase letter once
-    /// `flip` is applied. A byte's low seven bits plus `0x80 - x` reach its
-    /// high bit exactly when they are at least `x`, and never carry into the
-    /// next byte; bytes of `0x80` and above are no letters.
-    function _caseFlips(uint256 word, uint256 flip) private pure returns (uint256) {
-        uint256 low = (word ^ flip) & LANES_7F;
-        // `a` through `z` are 0x61 through 0x7a.
-        uint256 letters = (low + SPREAD_1F) ^ (low + SPREAD_5);
-        return (letters & ~word & _HIGH_BITS) >> 2;
-    }
-
-    function lower(string memory subject) internal pure returns (string memory result) {
-        return toCase(subject, false);
-    }
-
-    function upper(string memory subject) internal pure returns (string memory result) {
-        return toCase(subject, true);
-    }
-
-    /// @dev Returns the hexadecimal representation of `value`.
-    /// The output is prefixed with "0x", encoded using 2 hexadecimal digits per byte,
-    /// and the alphabets are capitalized conditionally according to
-    /// https://eips.ethereum.org/EIPS/eip-55
-    function toHexStringChecksummed(address value) internal pure returns (string memory result) {
-        bytes memory out = new bytes(42);
-        out[0] = "0";
-        out[1] = "x";
-        // The top sixteen bytes make one word of characters; the low four make the top eight
-        // characters of another.
-        uint256 raw = uint160(value);
-        uint256 head = uint256(_hexWord(raw >> 32));
-        uint256 tail = uint256(_hexWord((raw & 0xffffffff) << 96));
-        _writeBytes32(out, 2, bytes32(head));
-        _writeBytes8(out, 34, bytes8(bytes32(tail)));
-        // A character is uppercased when it is a letter and its nibble of the hash of the
-        // lowercase digits is at least eight: nibble by nibble, the hash's top sixteen bytes
-        // line up with the head and the next four with the tail.
-        uint256 hash = uint256(_keccak256Range(out, 2, 40));
-        _writeBytes32(out, 2, bytes32(_checksumCase(head, _nibbles(hash >> 128))));
-        _writeBytes8(
-            out, 34, bytes8(bytes32(_checksumCase(tail, _nibbles(hash & type(uint128).max))))
-        );
-        return string(out);
-    }
-
-    /// @dev Uppercases every letter of the hex `chars` whose lane of `nibbles` is at least
-    /// eight. Adding 0x1f sets the top bit of a letter's lane, 0x61 to 0x66, and of no digit's
-    /// or empty lane; the nibble's bit three shifted up is the other condition, and taking
-    /// 0x20 off a marked lane is the case change.
-    function _checksumCase(uint256 chars, uint256 nibbles) private pure returns (uint256) {
-        uint256 letters = (chars + SPREAD_1F) & _HIGH_BITS;
-        uint256 marked = letters & ((nibbles << 4) & _HIGH_BITS);
-        return chars - (marked >> 2);
-    }
-
-    /// @dev Returns `subject` all occurrences of `needle` replaced with `replacement`.
-    function replace(string memory subject, string memory needle, string memory replacement)
-        internal
-        pure
-        returns (string memory)
-    {
-        return _replace(subject, needle, replacement);
-    }
-
-    /// @dev Returns the byte index of the first location of `needle` in `subject`,
-    /// needleing from left to right, starting from `from`.
-    /// Returns `NOT_FOUND` (i.e. `type(uint256).max`) if the `needle` is not found.
-    function indexOf(string memory subject, string memory needle, uint256 from)
-        internal
-        pure
-        returns (uint256)
-    {
-        return _indexOf(subject, needle, from);
-    }
-
-    /// @dev Returns the byte index of the first location of `needle` in `subject`,
-    /// needleing from left to right.
-    /// Returns `NOT_FOUND` (i.e. `type(uint256).max`) if the `needle` is not found.
-    function indexOf(string memory subject, string memory needle) internal pure returns (uint256) {
-        return indexOf(subject, needle, 0);
-    }
-
-    /// @dev Returns the byte index of the first location of `needle` in `subject`,
-    /// needleing from right to left, starting from `from`.
-    /// Returns `NOT_FOUND` (i.e. `type(uint256).max`) if the `needle` is not found.
-    function lastIndexOf(string memory subject, string memory needle, uint256 from)
-        internal
-        pure
-        returns (uint256)
-    {
-        return _lastIndexOf(subject, needle, from);
-    }
-
-    /// @dev Returns the byte index of the first location of `needle` in `subject`,
-    /// needleing from right to left.
-    /// Returns `NOT_FOUND` (i.e. `type(uint256).max`) if the `needle` is not found.
-    function lastIndexOf(string memory subject, string memory needle)
-        internal
-        pure
-        returns (uint256)
-    {
-        return lastIndexOf(subject, needle, NOT_FOUND);
-    }
-
-    /// @dev Returns true if `needle` is found in `subject`, false otherwise.
-    function contains(string memory subject, string memory needle) internal pure returns (bool) {
-        return indexOf(subject, needle) != NOT_FOUND;
-    }
-
-    /// @dev Returns whether `subject` starts with `needle`.
-    function startsWith(string memory subject, string memory needle) internal pure returns (bool) {
-        bytes memory s = bytes(subject);
-        bytes memory n = bytes(needle);
-        // The range's hash against the needle's, equal exactly when the bytes
-        // are, barring a keccak collision.
-        return n.length <= s.length && _keccak256Range(s, 0, n.length) == keccak256(n);
-    }
-
-    /// @dev Returns whether `subject` ends with `needle`.
-    function endsWith(string memory subject, string memory needle) internal pure returns (bool) {
-        bytes memory s = bytes(subject);
-        bytes memory n = bytes(needle);
-        return n.length <= s.length
-            && _keccak256Range(s, s.length - n.length, n.length) == keccak256(n);
-    }
-
-    /// @dev Returns `subject` repeated `times`.
-    function repeat(string memory subject, uint256 times) internal pure returns (string memory) {
-        return _repeat(subject, times);
-    }
-
-    /// @dev Returns a copy of `subject` sliced from `start` to `end` (exclusive).
-    /// `start` and `end` are byte offsets.
-    function slice(string memory subject, uint256 start, uint256 end)
-        internal
-        pure
-        returns (string memory)
-    {
-        bytes memory s = bytes(subject);
-        if (end > s.length) end = s.length;
-        if (start > s.length) start = s.length;
-        if (start >= end) return "";
-        bytes memory out = new bytes(end - start);
-        _copyFresh(out, 0, s, start, end - start);
-        return string(out);
-    }
-
-    /// @dev Returns a copy of `subject` sliced from `start` to the end of the string.
-    /// `start` is a byte offset.
-    function slice(string memory subject, uint256 start) internal pure returns (string memory) {
-        // The end is the length itself, so only the start needs a bound.
-        bytes memory s = bytes(subject);
-        if (start >= s.length) return "";
-        bytes memory out = new bytes(s.length - start);
-        _copyFresh(out, 0, s, start, s.length - start);
-        return string(out);
-    }
-
-    /// @dev Returns all the indices of `needle` in `subject`.
-    /// The indices are byte offsets.
-    function indicesOf(string memory subject, string memory needle)
-        internal
-        pure
-        returns (uint256[] memory)
-    {
-        return _indicesOf(subject, needle);
-    }
-
-    /// @dev Returns an arrays of strings based on the `delimiter` inside of the `subject` string.
-    function split(string memory subject, string memory delimiter)
-        internal
-        pure
-        returns (string[] memory)
-    {
-        return _split(subject, delimiter);
-    }
-
-    /// @dev Returns the length of a small string up to its first null byte,
-    /// from the string's `_nullTail` marks.
-    function _smallStringLength(uint256 tail) private pure returns (uint256) {
-        // One mark for each byte from the first zero byte on; the bytes before
-        // it are the string. Multiplying the marks, one per byte, by a one in
-        // every byte sums them into the top byte, modulo `2**256` on purpose:
-        // no byte of the product exceeds 32, so no sum carries into another.
-        return 32 - (_rawMul(tail >> 7, LANES_01) >> 248);
-    }
-
-    /// @dev `0x80` in every byte of `s` from its first zero byte on. A byte
-    /// carries into its own high bit exactly when it is not zero, so the kept
-    /// high bits mark the zero bytes; each mark then spreads to every lower
-    /// byte, which the first zero byte's mark reaches first.
-    function _nullTail(bytes32 s) private pure returns (uint256 marks) {
-        uint256 x = uint256(s);
-        marks = ~(x | ((x & LANES_7F) + LANES_7F) | LANES_7F);
-        marks |= marks >> 8;
-        marks |= marks >> 16;
-        marks |= marks >> 32;
-        marks |= marks >> 64;
-        marks |= marks >> 128;
-    }
-
-    /// @dev Keeps the bytes before the first null byte, from the string's
-    /// `_nullTail` marks: a marked byte minus its mark shifted to the byte's
-    /// low bit leaves the seven bits below the mark, which the mark completes
-    /// to the whole byte. A shift never exceeds its operand, so the difference
-    /// cannot wrap.
-    function _smallStringMask(uint256 tail) private pure returns (uint256) {
-        return ~((tail - (tail >> 7)) | tail);
-    }
-
-    /// @dev The index of the first null byte of `s`, or 32 without one.
-    function _nullIndex(bytes32 s) private pure returns (uint256 n) {
-        while (n < 32 && s[n] != 0) ++n;
-    }
-
-    /// @dev The first `n` bytes of `s`, with the rest cleared.
-    function _smallStringPrefix(bytes32 s, uint256 n) private pure returns (bytes32) {
-        return s & ~bytes32(type(uint256).max >> (n << 3));
     }
 
     /// @dev Returns a string from a small bytes32 string.
@@ -544,6 +561,18 @@ library LibString {
         return bytes32(b);
     }
 
+    /// @dev Returns a lowercased copy of the string.
+    /// WARNING! This function is only compatible with 7-bit ASCII strings.
+    function lower(string memory subject) internal pure returns (string memory result) {
+        return toCase(subject, false);
+    }
+
+    /// @dev Returns an UPPERCASED copy of the string.
+    /// WARNING! This function is only compatible with 7-bit ASCII strings.
+    function upper(string memory subject) internal pure returns (string memory result) {
+        return toCase(subject, true);
+    }
+
     /// @dev Escapes the string to be used within HTML tags.
     function escapeHTML(string memory s) internal pure returns (string memory result) {
         return _escapeHTML(s);
@@ -573,6 +602,11 @@ library LibString {
         return _encodeURIComponent(s);
     }
 
+    /// @dev Returns whether `a` equals `b`.
+    function eq(string memory a, string memory b) internal pure returns (bool result) {
+        return keccak256(bytes(a)) == keccak256(bytes(b));
+    }
+
     /// @dev Returns whether `a` equals `b`, where `b` is a null-terminated small string.
     function eqs(string memory a, bytes32 b) internal pure returns (bool result) {
         bytes memory s = bytes(a);
@@ -587,31 +621,7 @@ library LibString {
     /// @dev Returns 0 if `a == b`, -1 if `a < b`, +1 if `a > b`.
     /// If `a` == b[:a.length]`, and `a.length < b.length`, returns -1.
     function cmp(string memory a, string memory b) internal pure returns (int256) {
-        bytes memory x = bytes(a);
-        bytes memory y = bytes(b);
-        uint256 n = x.length < y.length ? x.length : y.length;
-        // Words compare as big-endian integers, so the first differing word
-        // orders the strings. A common prefix shorter than a word is masked to
-        // its length; a longer one ends with the word ending at its end, whose
-        // bytes already compared are equal.
-        uint256 u;
-        uint256 v;
-        if (n < 32) {
-            uint256 mask = ~(type(uint256).max >> (n << 3));
-            u = uint256(bytes32(x)) & mask;
-            v = uint256(bytes32(y)) & mask;
-        } else {
-            for (uint256 i; i + 32 < n; i += 32) {
-                uint256 p = uint256(_readBytes32(x, i));
-                uint256 q = uint256(_readBytes32(y, i));
-                if (p != q) return p < q ? int256(-1) : int256(1);
-            }
-            u = uint256(_readBytes32(x, n - 32));
-            v = uint256(_readBytes32(y, n - 32));
-        }
-        if (u != v) return u < v ? int256(-1) : int256(1);
-        if (x.length == y.length) return 0;
-        return x.length < y.length ? int256(-1) : int256(1);
+        return LibBytes.cmp(bytes(a), bytes(b));
     }
 
     /// @dev Packs a single string with its length into a single word.
@@ -649,14 +659,98 @@ library LibString {
         _directReturn(a);
     }
 
-    /// @dev Lowercase hexadecimal digits.
-    bytes16 private constant _DIGITS = "0123456789abcdef";
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      PRIVATE HELPERS                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
-    /// @dev Uppercase hexadecimal digits.
-    bytes16 private constant _UPPER_DIGITS = "0123456789ABCDEF";
+    /// @dev The thirty-two hex characters of the sixteen bytes in `x`, which
+    /// must be below `2 ** 128`.
+    function _hexWord(uint256 x) private pure returns (bytes32) {
+        // Spread the thirty-two nibbles one to a byte, halving the packing
+        // each step: eight bytes, four, two, one, then one nibble.
+        x = (x | (x << 64)) & MASK_64;
+        x = (x | (x << 32)) & MASK_32;
+        x = (x | (x << 16)) & MASK_16;
+        x = (x | (x << 8)) & MASK_8;
+        x = (x | (x << 4)) & MASK_4;
+        // Adding six carries every nibble above nine into the next bit, which
+        // marks the ones that become letters rather than digits.
+        uint256 letters = ((x + SPREAD_6) >> 4) & SPREAD_1;
+        return bytes32(x + SPREAD_ASCII_0 + letters * 39);
+    }
 
-    /// @dev One bit per byte a URI component keeps: letters, digits and `-_.!~*'()`.
-    uint256 private constant _URI_UNRESERVED = 0x47fffffe87fffffe03ff678200000000;
+    /// @dev Spreads the thirty-two nibbles of the low sixteen bytes of `x` one to a byte,
+    /// the highest nibble first, as `_hexWord` does before it turns them into digits. Kept
+    /// apart from it so that the hex formatters' loops keep their inlined body.
+    function _nibbles(uint256 x) private pure returns (uint256) {
+        x = (x | (x << 64)) & MASK_64;
+        x = (x | (x << 32)) & MASK_32;
+        x = (x | (x << 16)) & MASK_16;
+        x = (x | (x << 8)) & MASK_8;
+        return (x | (x << 4)) & MASK_4;
+    }
+
+    /// @dev Whether every byte of `b` has its bit set in `allowed`.
+    function _allowedBytes(bytes memory b, uint256 allowed) private pure returns (bool) {
+        for (uint256 i; i < b.length; ++i) {
+            if (((allowed >> uint8(b[i])) & 1) == 0) return false;
+        }
+        return true;
+    }
+
+    /// @dev `0x20` in each byte of `word` that is a lowercase letter once
+    /// `flip` is applied. A byte's low seven bits plus `0x80 - x` reach its
+    /// high bit exactly when they are at least `x`, and never carry into the
+    /// next byte; bytes of `0x80` and above are no letters.
+    function _caseFlips(uint256 word, uint256 flip) private pure returns (uint256) {
+        uint256 low = (word ^ flip) & LANES_7F;
+        // `a` through `z` are 0x61 through 0x7a.
+        uint256 letters = (low + SPREAD_1F) ^ (low + SPREAD_5);
+        return (letters & ~word & _HIGH_BITS) >> 2;
+    }
+
+    /// @dev Uppercases every letter of the hex `chars` whose lane of `nibbles` is at least
+    /// eight. Adding 0x1f sets the top bit of a letter's lane, 0x61 to 0x66, and of no digit's
+    /// or empty lane; the nibble's bit three shifted up is the other condition, and taking
+    /// 0x20 off a marked lane is the case change.
+    function _checksumCase(uint256 chars, uint256 nibbles) private pure returns (uint256) {
+        uint256 letters = (chars + SPREAD_1F) & _HIGH_BITS;
+        uint256 marked = letters & ((nibbles << 4) & _HIGH_BITS);
+        return chars - (marked >> 2);
+    }
+
+    /// @dev Returns the length of a small string up to its first null byte,
+    /// from the string's `_nullTail` marks.
+    function _smallStringLength(uint256 tail) private pure returns (uint256) {
+        // One mark for each byte from the first zero byte on; the bytes before
+        // it are the string. Multiplying the marks, one per byte, by a one in
+        // every byte sums them into the top byte, modulo `2**256` on purpose:
+        // no byte of the product exceeds 32, so no sum carries into another.
+        return 32 - (_rawMul(tail >> 7, LANES_01) >> 248);
+    }
+
+    /// @dev `0x80` in every byte of `s` from its first zero byte on. A byte
+    /// carries into its own high bit exactly when it is not zero, so the kept
+    /// high bits mark the zero bytes; each mark then spreads to every lower
+    /// byte, which the first zero byte's mark reaches first.
+    function _nullTail(bytes32 s) private pure returns (uint256 marks) {
+        uint256 x = uint256(s);
+        marks = ~(x | ((x & LANES_7F) + LANES_7F) | LANES_7F);
+        marks |= marks >> 8;
+        marks |= marks >> 16;
+        marks |= marks >> 32;
+        marks |= marks >> 64;
+        marks |= marks >> 128;
+    }
+
+    /// @dev Keeps the bytes before the first null byte, from the string's
+    /// `_nullTail` marks: a marked byte minus its mark shifted to the byte's
+    /// low bit leaves the seven bits below the mark, which the mark completes
+    /// to the whole byte. A shift never exceeds its operand, so the difference
+    /// cannot wrap.
+    function _smallStringMask(uint256 tail) private pure returns (uint256) {
+        return ~((tail - (tail >> 7)) | tail);
+    }
 
     /// @dev `value` in decimal. Halving the remaining magnitude finds the
     /// length in at most seven steps, where dividing by ten once per digit
@@ -849,155 +943,6 @@ library LibString {
         return string(out);
     }
 
-    /// @dev `subject` with each non-overlapping occurrence of `needle`
-    /// replaced by `replacement`.
-    function _replace(string memory subject, string memory needle, string memory replacement)
-        private
-        pure
-        returns (string memory)
-    {
-        bytes memory s = bytes(subject);
-        bytes memory n = bytes(needle);
-        bytes memory r = bytes(replacement);
-        if (n.length > s.length) return subject;
-        if (n.length == 0) {
-            bytes memory expanded = new bytes(s.length + (s.length + 1) * r.length);
-            uint256 o;
-            for (uint256 i; i <= s.length; ++i) {
-                _copyFresh(expanded, o, r, 0, r.length);
-                o += r.length;
-                if (i < s.length) expanded[o++] = s[i];
-            }
-            return string(expanded);
-        }
-        uint256 last = s.length - n.length;
-        bytes32 head = _head(n);
-        // A replacement no longer than the needle never grows the subject. A
-        // longer one grows it by at most `growth` per needle-length piece; while
-        // that bound stays within a few times the subject, it sizes the result
-        // and saves counting the matches first.
-        uint256 size = s.length;
-        if (r.length > n.length) {
-            uint256 growth = r.length - n.length;
-            uint256 most = s.length / n.length;
-            if (most * growth > 4 * s.length + 1024) {
-                most = _count(s, last, n, head);
-                if (most == 0) return subject;
-            }
-            size += most * growth;
-        }
-        bytes memory out = new bytes(size);
-        uint256 copied;
-        uint256 o;
-        uint256 at = _find(s, 0, last, n, head);
-        while (at != NOT_FOUND) {
-            _copyFresh(out, o, s, copied, at - copied);
-            o += at - copied;
-            // The match at `at`, then each match right after the previous one.
-            do {
-                _copyFresh(out, o, r, 0, r.length);
-                o += r.length;
-                copied = at + n.length;
-                at = copied;
-            } while (copied <= last && _matchAt(s, copied, n, head));
-            at = copied > last ? NOT_FOUND : _scan(s, copied + 1, last, n, head);
-        }
-        _copyFresh(out, o, s, copied, s.length - copied);
-        o += s.length - copied;
-        if (o != out.length) _truncate(out, o);
-        return string(out);
-    }
-
-    /// @dev The first bytes of `needle`, up to a word, left-aligned.
-    /// @custom:solar-inline
-    function _head(bytes memory needle) private pure returns (bytes32) {
-        return _readBytesN(needle, 0, needle.length < 32 ? needle.length : 32);
-    }
-
-    /// @dev Whether `needle` occurs in `subject` at `at`, where `at + needle.length`
-    /// fits the subject. `head` is the needle's first bytes, up to a word: the
-    /// word of the subject at `at` decides a needle of up to a word, and the
-    /// rest of a longer one is compared a word at a time. Upstream compares the
-    /// hashes of the two ranges; equal bytes are equal hashes, and a different
-    /// range with the needle's hash is a keccak-256 collision.
-    /// @custom:solar-inline
-    function _matchAt(bytes memory subject, uint256 at, bytes memory needle, bytes32 head)
-        private
-        pure
-        returns (bool)
-    {
-        uint256 width = needle.length < 32 ? needle.length : 32;
-        if (_readBytesN(subject, at, width) != head) return false;
-        return needle.length <= 32 || _tailMatchesAt(subject, at, needle);
-    }
-
-    /// @dev Whether the bytes of `needle` past its first word occur in `subject`
-    /// past `at + 32`, where `at + needle.length` fits the subject.
-    function _tailMatchesAt(bytes memory subject, uint256 at, bytes memory needle)
-        private
-        pure
-        returns (bool)
-    {
-        for (uint256 i = 32; i < needle.length; i += 32) {
-            uint256 count = needle.length - i < 32 ? needle.length - i : 32;
-            if (_readBytesN(subject, at + i, count) != _readBytesN(needle, i, count)) return false;
-        }
-        return true;
-    }
-
-    /// @dev The first offset in `[from, last]` at which `needle` occurs in
-    /// `subject`, or `NOT_FOUND`; `last + needle.length` fits the subject and
-    /// `head` is as `_matchAt` takes it. The offset `from`
-    /// itself, where the next match of a run is, is tried before any scan.
-    /// @custom:solar-inline
-    function _find(
-        bytes memory subject,
-        uint256 from,
-        uint256 last,
-        bytes memory needle,
-        bytes32 head
-    ) private pure returns (uint256) {
-        if (_matchAt(subject, from, needle, head)) return from;
-        return _scan(subject, from + 1, last, needle, head);
-    }
-
-    /// @dev `_find` past its first offset. Thirty-two offsets go at once: the
-    /// needle's first byte is compared with every byte of a word, a longer
-    /// needle's second byte with every byte of the word one byte further on,
-    /// and only the offsets where both occur are matched.
-    function _scan(
-        bytes memory subject,
-        uint256 from,
-        uint256 last,
-        bytes memory needle,
-        bytes32 head
-    ) private pure returns (uint256) {
-        uint256 first = (uint256(head) >> 248) * LANES_01;
-        uint256 second = ((uint256(head) >> 240) & 0xff) * LANES_01;
-        bool pair = needle.length > 1;
-        for (uint256 i = from; i <= last; i += 32) {
-            uint256 hits = _zeroBytes(_wordAt(subject, i) ^ first);
-            // `i + 1 <= last + 1 < subject.length` for a needle of two bytes or more.
-            if (pair) hits &= _zeroBytes(_wordAt(subject, i + 1) ^ second);
-            // Offsets past `last` do not count.
-            if (last - i < 31) hits &= ~(type(uint256).max >> (8 * (last - i + 1)));
-            while (hits != 0) {
-                uint256 lane = _leadingByte(hits);
-                if (_matchAt(subject, i + lane, needle, head)) return i + lane;
-                hits &= ~(uint256(1) << (255 - 8 * lane));
-            }
-        }
-        return NOT_FOUND;
-    }
-
-    /// @dev The bytes of `b` from `i`, up to a word, left-aligned: the word at
-    /// `i` zero-padded past the end of `b`, where `i < b.length`.
-    /// @custom:solar-inline
-    function _wordAt(bytes memory b, uint256 i) private pure returns (uint256) {
-        uint256 rest = b.length - i;
-        return rest < 32 ? uint256(_readBytesN(b, i, rest)) : uint256(_readBytes32(b, i));
-    }
-
     /// @dev `0x80` in each byte of `z` that is zero, and zero in every other
     /// byte: the low seven bits of a byte plus `0x7f` carry into its top bit
     /// unless they are all clear, and never into the next byte.
@@ -1023,116 +968,6 @@ library LibString {
             | (~(((w & LANES_7F) + 0x60 * LANES_01) | w) & _HIGH_BITS);
     }
 
-    /// @dev The number of non-overlapping occurrences of `needle` in `subject`
-    /// at offsets up to `last`, as `_find` takes them.
-    function _count(bytes memory subject, uint256 last, bytes memory needle, bytes32 head)
-        private
-        pure
-        returns (uint256 count)
-    {
-        uint256 at = _find(subject, 0, last, needle, head);
-        while (at != NOT_FOUND) {
-            do {
-                ++count;
-                at += needle.length;
-            } while (at <= last && _matchAt(subject, at, needle, head));
-            at = at > last ? NOT_FOUND : _scan(subject, at + 1, last, needle, head);
-        }
-    }
-
-    /// @dev The index, from the top, of the first nonzero byte of `x`, which
-    /// must not be zero.
-    function _leadingByte(uint256 x) private pure returns (uint256 r) {
-        if (x >> 128 == 0) {
-            r = 16;
-            x <<= 128;
-        }
-        if (x >> 192 == 0) {
-            r += 8;
-            x <<= 64;
-        }
-        if (x >> 224 == 0) {
-            r += 4;
-            x <<= 32;
-        }
-        if (x >> 240 == 0) {
-            r += 2;
-            x <<= 16;
-        }
-        if (x >> 248 == 0) ++r;
-    }
-
-    /// @dev The byte offsets of each non-overlapping occurrence of `needle`.
-    function _indicesOf(string memory subject, string memory needle)
-        private
-        pure
-        returns (uint256[] memory found)
-    {
-        bytes memory s = bytes(subject);
-        bytes memory n = bytes(needle);
-        if (n.length > s.length) return new uint256[](0);
-        if (n.length == 0) {
-            uint256[] memory every = new uint256[](s.length + 1);
-            for (uint256 i; i <= s.length; ++i) every[i] = i;
-            return every;
-        }
-        uint256 last = s.length - n.length;
-        bytes32 head = _head(n);
-        // At most `last / n.length + 1` matches fit. A bound of a few words
-        // sizes the result, which is cut down after; a larger one is counted.
-        uint256 most = last / n.length + 1;
-        if (most > 64) most = _count(s, last, n, head);
-        found = new uint256[](most);
-        uint256 count;
-        uint256 at = _find(s, 0, last, n, head);
-        while (at != NOT_FOUND) {
-            // The match at `at`, then each match right after the previous one.
-            do {
-                found[count++] = at;
-                at += n.length;
-            } while (at <= last && _matchAt(s, at, n, head));
-            at = at > last ? NOT_FOUND : _scan(s, at + 1, last, n, head);
-        }
-        if (count != most) _truncateWords(found, count);
-    }
-
-    /// @dev The byte offset of the first occurrence of `needle` at or after
-    /// `from`, or `NOT_FOUND`. An empty needle is found at `from`, or at the
-    /// end of a subject shorter than `from`.
-    function _indexOf(string memory subject, string memory needle, uint256 from)
-        private
-        pure
-        returns (uint256)
-    {
-        bytes memory s = bytes(subject);
-        bytes memory n = bytes(needle);
-        if (n.length == 0) return from > s.length ? s.length : from;
-        if (n.length > s.length) return NOT_FOUND;
-        uint256 last = s.length - n.length;
-        if (from > last) return NOT_FOUND;
-        return _find(s, from, last, n, _head(n));
-    }
-
-    /// @dev The byte offset of the last occurrence of `needle` at or before
-    /// `from`, or `NOT_FOUND`.
-    function _lastIndexOf(string memory subject, string memory needle, uint256 from)
-        private
-        pure
-        returns (uint256)
-    {
-        bytes memory s = bytes(subject);
-        bytes memory n = bytes(needle);
-        if (n.length > s.length) return NOT_FOUND;
-        uint256 last = s.length - n.length;
-        if (from > last) from = last;
-        bytes32 head = _head(n);
-        for (uint256 i = from + 1; i != 0;) {
-            --i;
-            if (_matchAt(s, i, n, head)) return i;
-        }
-        return NOT_FOUND;
-    }
-
     /// @dev The number of UTF-8 runes in `subject`. Each rune is stepped over by
     /// the length its lead byte declares from the byte's top six bits: one below
     /// 0x80, two up to 0xdf (a stray continuation byte included), then three,
@@ -1150,77 +985,6 @@ library LibString {
             if (i == s.length) break;
             i += (lengths >> (uint8(s[i]) & 0xfc)) & 15;
         }
-    }
-
-    /// @dev `subject` repeated `times` times, or the empty string when either
-    /// is zero: one copy of the subject, then the filled prefix doubled in
-    /// place, each copy reading only bytes already written.
-    function _repeat(string memory subject, uint256 times) private pure returns (string memory) {
-        bytes memory s = bytes(subject);
-        if (times == 0 || s.length == 0) return "";
-        uint256 total = s.length * times;
-        bytes memory out = new bytes(total);
-        _copyFresh(out, 0, s, 0, s.length);
-        uint256 filled = s.length;
-        while (filled < total) {
-            uint256 rest = total - filled;
-            uint256 step = filled < rest ? filled : rest;
-            _copyInto(out, filled, out, 0, step);
-            filled += step;
-        }
-        return string(out);
-    }
-
-    /// @dev `subject` split at each non-overlapping `delimiter` occurrence.
-    function _split(string memory subject, string memory delimiter)
-        private
-        pure
-        returns (string[] memory result)
-    {
-        bytes memory s = bytes(subject);
-        bytes memory d = bytes(delimiter);
-        if (d.length == 0) {
-            result = new string[](s.length);
-            for (uint256 i; i < s.length; ++i) {
-                bytes memory part = new bytes(1);
-                part[0] = s[i];
-                result[i] = string(part);
-            }
-            return result;
-        }
-        if (d.length > s.length) {
-            result = new string[](1);
-            result[0] = string(_sliceFresh(s, 0, s.length));
-            return result;
-        }
-        uint256 last = s.length - d.length;
-        bytes32 head = _head(d);
-        // At most one part more than `last / d.length + 1` delimiters. A bound
-        // of a few words sizes the result, which is cut down after; a larger
-        // one is counted.
-        uint256 most = last / d.length + 2;
-        if (most > 64) most = _count(s, last, d, head) + 1;
-        result = new string[](most);
-        uint256 count;
-        uint256 previous;
-        for (uint256 at = _find(s, 0, last, d, head); at != NOT_FOUND;) {
-            result[count++] = string(_sliceFresh(s, previous, at));
-            previous = at + d.length;
-            at = previous > last ? NOT_FOUND : _find(s, previous, last, d, head);
-        }
-        result[count++] = string(_sliceFresh(s, previous, s.length));
-        if (count != most) _truncateStrings(result, count);
-    }
-
-    /// @dev A new buffer holding the bytes of `s` from `start` to `end`.
-    /// @custom:solar-inline
-    function _sliceFresh(bytes memory s, uint256 start, uint256 end)
-        private
-        pure
-        returns (bytes memory part)
-    {
-        part = new bytes(end - start);
-        _copyFresh(part, 0, s, start, end - start);
     }
 
     /// @dev The low `byteCount` bytes of `value` as lowercase hexadecimal, two
@@ -1456,26 +1220,6 @@ library LibString {
         }
     }
 
-    /// @dev Shrinks `a` to its first `n` words in place. Solidity cannot spell
-    /// a shorter length for an existing array.
-    /// @custom:solar-trusted
-    function _truncateWords(uint256[] memory a, uint256 n) private pure {
-        if (n > a.length) n = new uint256[](0)[0];
-        assembly ("memory-safe") {
-            mstore(a, n)
-        }
-    }
-
-    /// @dev Shrinks `a` to its first `n` strings in place. Solidity cannot spell
-    /// a shorter length for an existing array.
-    /// @custom:solar-trusted
-    function _truncateStrings(string[] memory a, uint256 n) private pure {
-        if (n > a.length) n = new uint256[](0)[0];
-        assembly ("memory-safe") {
-            mstore(a, n)
-        }
-    }
-
     /// @dev Ends the call, returning `s` ABI-encoded as the single result of a
     /// function that returns `string`. A `return` statement leaves only the
     /// function it is in.
@@ -1484,51 +1228,6 @@ library LibString {
         bytes memory data = abi.encode(s);
         assembly ("memory-safe") {
             return(add(data, 0x20), mload(data))
-        }
-    }
-
-    /// @dev Copies `count` bytes from `src` at `srcOffset` to `dst` at
-    /// `dstOffset`. The ranges may overlap: the result is as if the source
-    /// were read in full before the first write.
-    function _copyInto(
-        bytes memory dst,
-        uint256 dstOffset,
-        bytes memory src,
-        uint256 srcOffset,
-        uint256 count
-    ) private pure {
-        // Both ranges are validated before anything is written, so a copy
-        // running downwards fails on its range the way one running upwards
-        // does, rather than on the arithmetic reaching its far end.
-        if (
-            count > dst.length || dstOffset > dst.length - count || count > src.length
-                || srcOffset > src.length - count
-        ) count = _outOfBounds();
-        if (dstOffset > srcOffset) {
-            for (uint256 k = count; k > 0; --k) {
-                dst[dstOffset + k - 1] = src[srcOffset + k - 1];
-            }
-        } else {
-            for (uint256 k; k < count; ++k) {
-                dst[dstOffset + k] = src[srcOffset + k];
-            }
-        }
-    }
-
-    /// @dev Copies `count` bytes from `src` at `srcOffset` to `dst` at
-    /// `dstOffset`, front to back. Callers pass a `dst` they have just
-    /// allocated; Solar inlines the loop into them and copies with `mcopy`,
-    /// behind a test that keeps the loop if `src` reaches into `dst`.
-    /// @custom:solar-inline
-    function _copyFresh(
-        bytes memory dst,
-        uint256 dstOffset,
-        bytes memory src,
-        uint256 srcOffset,
-        uint256 count
-    ) private pure {
-        for (uint256 k; k < count; ++k) {
-            dst[dstOffset + k] = src[srcOffset + k];
         }
     }
 
@@ -1612,6 +1311,15 @@ library LibString {
     {
         for (uint256 k; k < count; ++k) {
             b[offset + k] = value[k];
+        }
+    }
+
+    /// @dev `a` as strings: the same words, each a pointer to bytes, which
+    /// Solidity cannot convert in place.
+    /// @custom:solar-trusted
+    function _toStrings(bytes[] memory a) private pure returns (string[] memory result) {
+        assembly ("memory-safe") {
+            result := a
         }
     }
 }

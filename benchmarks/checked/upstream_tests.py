@@ -37,6 +37,8 @@ LIBRARIES = [
     "SignatureCheckerLib",
     "MerkleProofLib",
     "EfficientHashLib",
+    "LibBytes",
+    "LibString",
     "tokens/ERC20",
 ]
 
