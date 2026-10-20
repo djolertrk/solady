@@ -16,7 +16,9 @@ pragma solidity ^0.8.4;
 /// the source would write anyway, and the compiler decides where the words live: one or two
 /// words go to scratch space, more are built at the free pointer without moving it. A range is
 /// copied into a new buffer and hashed there. `free` rewinds the free-memory pointer as
-/// upstream does, in trusted assembly, since checked Solidity cannot move it.
+/// upstream does, in trusted assembly, since checked Solidity cannot move it. `malloc` returns
+/// zeroed words from `new`, and `set` reverts with `Panic(0x32)` for an index past the buffer,
+/// where upstream writes past it. `set`, `hash` and `free` of a buffer are tagged for inlining.
 /// @custom:solar-safe memory arithmetic
 library EfficientHashLib {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -368,12 +370,14 @@ library EfficientHashLib {
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     /// @dev Returns `keccak256(abi.encode(buffer[0], .., buffer[buffer.length - 1]))`.
+    /// @custom:solar-inline
     function hash(bytes32[] memory buffer) internal pure returns (bytes32) {
         return keccak256(abi.encodePacked(buffer));
     }
 
     /// @dev Sets `buffer[i]` to `value`, without a bounds check.
     /// Returns the `buffer` for function chaining.
+    /// @custom:solar-inline
     function set(bytes32[] memory buffer, uint256 i, bytes32 value)
         internal
         pure
@@ -385,6 +389,7 @@ library EfficientHashLib {
 
     /// @dev Sets `buffer[i]` to `value`, without a bounds check.
     /// Returns the `buffer` for function chaining.
+    /// @custom:solar-inline
     function set(bytes32[] memory buffer, uint256 i, uint256 value)
         internal
         pure
@@ -403,6 +408,7 @@ library EfficientHashLib {
     /// No-op if `buffer.length` is zero, or if new memory has been allocated after `buffer`.
     /// Solidity cannot move the free memory pointer, so this keeps the upstream assembly.
     /// @custom:solar-trusted
+    /// @custom:solar-inline
     function free(bytes32[] memory buffer) internal pure {
         /// @solidity memory-safe-assembly
         assembly {
