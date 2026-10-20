@@ -29,7 +29,9 @@ pragma solidity ^0.8.5;
 /// assembly does. An ERC6492 signature ends with the 32-byte magic suffix. Its inner signature
 /// is the third field of the wrapped encoding; one whose range lies past the signature counts
 /// as rejected by ERC1271, where the assembly reads whatever memory follows. Only the length of
-/// a verifier's answer is read.
+/// a verifier's answer is read. An inner signature too long for memory, which only wrapper
+/// offsets that wrap around can describe, makes the encoding of the ERC1271 call panic with
+/// `Panic(0x41)`, where the assembly runs out of gas copying it.
 /// @custom:solar-safe memory arithmetic
 library SignatureCheckerLib {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
