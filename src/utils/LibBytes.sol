@@ -174,9 +174,18 @@ library LibBytes {
         pure
         returns (uint256 result)
     {
-        if (from >= subject.length) return NOT_FOUND;
-        bytes memory n = abi.encodePacked(needle);
-        return _find(subject, from, subject.length - 1, n, _head(n));
+        uint256 n = subject.length;
+        // The needle in every byte: a word of the subject XOR it has a zero
+        // byte exactly where the needle occurs.
+        uint256 h = uint256(uint8(needle)) * LANES_01;
+        for (uint256 i = from; i < n; i += 32) {
+            uint256 hits = _zeroBytes(_wordAt(subject, i) ^ h);
+            // `_wordAt` pads with zeros past the end, which a zero needle
+            // would match.
+            if (n - i < 32) hits &= ~(type(uint256).max >> (8 * (n - i)));
+            if (hits != 0) return i + _leadingByte(hits);
+        }
+        return NOT_FOUND;
     }
 
     /// @dev Returns the byte index of the first location of `needle` in `subject`,
@@ -627,62 +636,100 @@ library LibBytes {
     }
 
     /// @dev `subject` with each non-overlapping occurrence of `needle`
-    /// replaced by `replacement`.
+    /// replaced by `replacement`. The result is built in a buffer with a word
+    /// of slack, so a piece of up to a word is stored as one word, whose bytes
+    /// past the piece the next piece or the final length covers.
     function _replace(bytes memory subject, bytes memory needle, bytes memory replacement)
         private
         pure
         returns (bytes memory)
     {
-        bytes memory s = bytes(subject);
-        bytes memory n = bytes(needle);
-        bytes memory r = bytes(replacement);
-        if (n.length > s.length) return subject;
-        if (n.length == 0) {
-            bytes memory expanded = new bytes(s.length + (s.length + 1) * r.length);
+        if (needle.length > subject.length) return subject;
+        bytes32 rhead = _head(replacement);
+        if (needle.length == 0) {
+            bytes memory expanded =
+                new bytes(subject.length + (subject.length + 1) * replacement.length + 32);
             uint256 o;
-            for (uint256 i; i <= s.length; ++i) {
-                _copyFresh(expanded, o, r, 0, r.length);
-                o += r.length;
-                if (i < s.length) expanded[o++] = s[i];
+            for (uint256 i; i <= subject.length; ++i) {
+                o = _putReplacement(expanded, o, replacement, rhead);
+                if (i < subject.length) expanded[o++] = subject[i];
             }
+            _truncate(expanded, o);
             return expanded;
         }
-        uint256 last = s.length - n.length;
-        bytes32 head = _head(n);
         // A replacement no longer than the needle never grows the subject. A
         // longer one grows it by at most `growth` per needle-length piece; while
         // that bound stays within a few times the subject, it sizes the result
         // and saves counting the matches first.
-        uint256 size = s.length;
-        if (r.length > n.length) {
-            uint256 growth = r.length - n.length;
-            uint256 most = s.length / n.length;
-            if (most * growth > 4 * s.length + 1024) {
-                most = _count(s, last, n, head);
+        uint256 size = subject.length;
+        if (replacement.length > needle.length) {
+            uint256 growth = replacement.length - needle.length;
+            uint256 most = subject.length / needle.length;
+            if (most * growth > 4 * subject.length + 1024) {
+                most = _count(subject, subject.length - needle.length, needle, _head(needle));
                 if (most == 0) return subject;
             }
             size += most * growth;
         }
-        bytes memory out = new bytes(size);
+        bytes memory out = new bytes(size + 32);
+        _truncate(out, _replaceInto(out, subject, needle, replacement, rhead));
+        return out;
+    }
+
+    /// @dev Writes `_replace`'s result into `out`, which has room for it and a
+    /// word of slack, and returns its length. `rhead` is the replacement's
+    /// first word.
+    function _replaceInto(
+        bytes memory out,
+        bytes memory subject,
+        bytes memory needle,
+        bytes memory replacement,
+        bytes32 rhead
+    ) private pure returns (uint256 o) {
+        uint256 last = subject.length - needle.length;
+        bytes32 head = _head(needle);
         uint256 copied;
-        uint256 o;
-        uint256 at = _find(s, 0, last, n, head);
+        uint256 at = _find(subject, 0, last, needle, head);
         while (at != NOT_FOUND) {
-            _copyFresh(out, o, s, copied, at - copied);
-            o += at - copied;
+            o = _copyPiece(out, o, subject, copied, at - copied);
             // The match at `at`, then each match right after the previous one.
             do {
-                _copyFresh(out, o, r, 0, r.length);
-                o += r.length;
-                copied = at + n.length;
+                o = _putReplacement(out, o, replacement, rhead);
+                copied = at + needle.length;
                 at = copied;
-            } while (copied <= last && _matchAt(s, copied, n, head));
-            at = copied > last ? NOT_FOUND : _scan(s, copied + 1, last, n, head);
+            } while (copied <= last && _matchAt(subject, copied, needle, head));
+            at = copied > last ? NOT_FOUND : _scan(subject, copied + 1, last, needle, head);
         }
-        _copyFresh(out, o, s, copied, s.length - copied);
-        o += s.length - copied;
-        if (o != out.length) _truncate(out, o);
-        return out;
+        o = _copyPiece(out, o, subject, copied, subject.length - copied);
+    }
+
+    /// @dev Stores `replacement` into `out` at `o`, and returns the offset
+    /// after it. Up to a word goes as its first word `rhead`, which also writes
+    /// the bytes after it: `out` needs a word of slack.
+    /// @custom:solar-inline
+    function _putReplacement(bytes memory out, uint256 o, bytes memory replacement, bytes32 rhead)
+        private
+        pure
+        returns (uint256)
+    {
+        if (replacement.length <= 32) _writeBytes32(out, o, rhead);
+        else _copyFresh(out, o, replacement, 0, replacement.length);
+        return o + replacement.length;
+    }
+
+    /// @dev Copies the `count` bytes of `src` at `from` into `dst` at `o`, and
+    /// returns the offset after them. Up to a word goes as one word, which also
+    /// writes the bytes after the copied ones: `dst` needs a word of slack.
+    /// @custom:solar-inline
+    function _copyPiece(bytes memory dst, uint256 o, bytes memory src, uint256 from, uint256 count)
+        private
+        pure
+        returns (uint256)
+    {
+        if (count == 0) return o;
+        if (count <= 32) _writeBytes32(dst, o, bytes32(_wordAt(src, from)));
+        else _copyFresh(dst, o, src, from, count);
+        return o + count;
     }
 
     /// @dev The byte offset of the first occurrence of `needle` at or after
