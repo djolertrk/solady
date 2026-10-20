@@ -4,6 +4,13 @@ pragma solidity ^0.8.4;
 /// @notice Initializable mixin for the upgradeable contracts.
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/utils/Initializable.sol)
 /// @author Modified from OpenZeppelin (https://github.com/OpenZeppelin/openzeppelin-contracts/tree/master/contracts/proxy/utils/Initializable.sol)
+/// @dev The checked port keeps upstream's slot and its packed word, the initializing bit below
+/// the initialized version, with the same checks, stores and {Initialized} events. The
+/// `initializer` guard checks the word it read before it stores the new one, where upstream
+/// stores first; a failed check reverts the store either way. Solidity cannot name the slot,
+/// so two trusted helpers read and write it. Private functions carry the contract's name, so
+/// that the mixin combines with other mixins.
+/// @custom:solar-safe memory arithmetic
 abstract contract Initializable {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                       CUSTOM ERRORS                        */
@@ -70,31 +77,22 @@ abstract contract Initializable {
     /// Emits an {Initialized} event.
     modifier initializer() virtual {
         bytes32 s = _initializableSlot();
-        /// @solidity memory-safe-assembly
-        assembly {
-            let i := sload(s)
-            // Set `initializing` to 1, `initializedVersion` to 1.
-            sstore(s, 3)
-            // If `!(initializing == 0 && initializedVersion == 0)`.
-            if i {
-                // If `!(address(this).code.length == 0 && initializedVersion == 1)`.
-                if iszero(lt(extcodesize(address()), eq(shr(1, i), 1))) {
-                    mstore(0x00, 0xf92ee8a9) // `InvalidInitialization()`.
-                    revert(0x1c, 0x04)
-                }
-                s := shl(shl(255, i), s) // Skip initializing if `initializing == 1`.
-            }
+        uint256 i = _initializableSload(s);
+        // If `!(initializing == 0 && initializedVersion == 0)`.
+        if (i != 0) {
+            // If `!(address(this).code.length == 0 && initializedVersion == 1)`.
+            if (address(this).code.length != 0 || i >> 1 != 1) revert InvalidInitialization();
         }
+        // Set `initializing` to 1, `initializedVersion` to 1.
+        _initializableSstore(s, 3);
+        // Skip initializing if `initializing == 1`.
+        if (i & 1 != 0) s = bytes32(0);
         _;
-        /// @solidity memory-safe-assembly
-        assembly {
-            if s {
-                // Set `initializing` to 0, `initializedVersion` to 1.
-                sstore(s, 2)
-                // Emit the {Initialized} event.
-                mstore(0x20, 1)
-                log1(0x20, 0x20, _INITIALIZED_EVENT_SIGNATURE)
-            }
+        if (s != bytes32(0)) {
+            // Set `initializing` to 0, `initializedVersion` to 1.
+            _initializableSstore(s, 2);
+            // Emit the {Initialized} event.
+            emit Initialized(1);
         }
     }
 
@@ -106,28 +104,18 @@ abstract contract Initializable {
     /// Emits an {Initialized} event.
     modifier reinitializer(uint64 version) virtual {
         bytes32 s = _initializableSlot();
-        /// @solidity memory-safe-assembly
-        assembly {
-            // Clean upper bits, and shift left by 1 to make space for the initializing bit.
-            version := shl(1, and(version, 0xffffffffffffffff))
-            let i := sload(s)
-            // If `initializing == 1 || initializedVersion >= version`.
-            if iszero(lt(and(i, 1), lt(i, version))) {
-                mstore(0x00, 0xf92ee8a9) // `InvalidInitialization()`.
-                revert(0x1c, 0x04)
-            }
-            // Set `initializing` to 1, `initializedVersion` to `version`.
-            sstore(s, or(1, version))
-        }
+        // Shift left by 1 to make space for the initializing bit.
+        uint256 shifted = uint256(version) << 1;
+        uint256 i = _initializableSload(s);
+        // If `initializing == 1 || initializedVersion >= version`.
+        if (i & 1 != 0 || i >= shifted) revert InvalidInitialization();
+        // Set `initializing` to 1, `initializedVersion` to `version`.
+        _initializableSstore(s, shifted | 1);
         _;
-        /// @solidity memory-safe-assembly
-        assembly {
-            // Set `initializing` to 0, `initializedVersion` to `version`.
-            sstore(s, version)
-            // Emit the {Initialized} event.
-            mstore(0x20, shr(1, version))
-            log1(0x20, 0x20, _INITIALIZED_EVENT_SIGNATURE)
-        }
+        // Set `initializing` to 0, `initializedVersion` to `version`.
+        _initializableSstore(s, shifted);
+        // Emit the {Initialized} event.
+        emit Initialized(version);
     }
 
     /// @dev Guards a function such that it can only be called in the scope
@@ -139,14 +127,7 @@ abstract contract Initializable {
 
     /// @dev Reverts if the contract is not initializing.
     function _checkInitializing() internal view virtual {
-        bytes32 s = _initializableSlot();
-        /// @solidity memory-safe-assembly
-        assembly {
-            if iszero(and(1, sload(s))) {
-                mstore(0x00, 0xd7e6bcf8) // `NotInitializing()`.
-                revert(0x1c, 0x04)
-            }
-        }
+        if (_initializableSload(_initializableSlot()) & 1 == 0) revert NotInitializing();
     }
 
     /// @dev Locks any future initializations by setting the initialized version to `2**64 - 1`.
@@ -158,39 +139,45 @@ abstract contract Initializable {
     /// Emits an {Initialized} event the first time it is successfully called.
     function _disableInitializers() internal virtual {
         bytes32 s = _initializableSlot();
-        /// @solidity memory-safe-assembly
-        assembly {
-            let i := sload(s)
-            if and(i, 1) {
-                mstore(0x00, 0xf92ee8a9) // `InvalidInitialization()`.
-                revert(0x1c, 0x04)
-            }
-            let uint64max := 0xffffffffffffffff
-            if iszero(eq(shr(1, i), uint64max)) {
-                // Set `initializing` to 0, `initializedVersion` to `2**64 - 1`.
-                sstore(s, shl(1, uint64max))
-                // Emit the {Initialized} event.
-                mstore(0x20, uint64max)
-                log1(0x20, 0x20, _INITIALIZED_EVENT_SIGNATURE)
-            }
+        uint256 i = _initializableSload(s);
+        if (i & 1 != 0) revert InvalidInitialization();
+        if (i >> 1 != type(uint64).max) {
+            // Set `initializing` to 0, `initializedVersion` to `2**64 - 1`.
+            _initializableSstore(s, uint256(type(uint64).max) << 1);
+            // Emit the {Initialized} event.
+            emit Initialized(type(uint64).max);
         }
     }
 
     /// @dev Returns the highest version that has been initialized.
     function _getInitializedVersion() internal view virtual returns (uint64 version) {
-        bytes32 s = _initializableSlot();
-        /// @solidity memory-safe-assembly
-        assembly {
-            version := shr(1, sload(s))
-        }
+        version = uint64(_initializableSload(_initializableSlot()) >> 1);
     }
 
     /// @dev Returns whether the contract is currently initializing.
     function _isInitializing() internal view virtual returns (bool result) {
-        bytes32 s = _initializableSlot();
+        result = _initializableSload(_initializableSlot()) & 1 != 0;
+    }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      PRIVATE HELPERS                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev The word in storage slot `slot`. Solidity cannot name a slot it did not allocate.
+    /// @custom:solar-trusted
+    function _initializableSload(bytes32 slot) private view returns (uint256 value) {
         /// @solidity memory-safe-assembly
         assembly {
-            result := and(1, sload(s))
+            value := sload(slot)
+        }
+    }
+
+    /// @dev Stores `value` in storage slot `slot`.
+    /// @custom:solar-trusted
+    function _initializableSstore(bytes32 slot, uint256 value) private {
+        /// @solidity memory-safe-assembly
+        assembly {
+            sstore(slot, value)
         }
     }
 }
