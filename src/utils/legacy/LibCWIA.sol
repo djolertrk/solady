@@ -11,6 +11,14 @@ pragma solidity ^0.8.4;
 /// `ReceiveETH(uint256)` event. This skips the `DELEGATECALL` when there is no calldata,
 /// enabling us to accept hard gas-capped `sends` & `transfers` for maximum backwards
 /// composability. The minimal proxy implementation does not offer this feature.
+///
+/// The checked port assembles the creation code the assembly writes around `data` with
+/// `abi.encodePacked` in new memory, and deploys it with the trusted `_createDeploy` and
+/// `_createDeploy2`, which Solidity cannot express and which fail with `DeploymentFailed()`.
+/// Data too long for the clone's two-byte sizes gets a creation code of the same length that
+/// starts with a `REVERT` that underflows the stack, as upstream's does. Where the assembly
+/// runs out of gas on purpose, `initCode` and `initCodeHash` revert without data.
+/// @custom:solar-safe memory arithmetic
 library LibCWIA {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                       CUSTOM ERRORS                        */
@@ -43,131 +51,88 @@ library LibCWIA {
         internal
         returns (address instance)
     {
-        assembly {
-            // Compute the boundaries of the data and cache the memory slots around it.
-            let mBefore3 := mload(sub(data, 0x60))
-            let mBefore2 := mload(sub(data, 0x40))
-            let mBefore1 := mload(sub(data, 0x20))
-            let dataLength := mload(data)
-            let dataEnd := add(add(data, 0x20), dataLength)
-            let mAfter1 := mload(dataEnd)
+        // The `creationSize` is `extraLength + 108`
+        // The `runSize` is `creationSize - 10`.
 
-            // +2 bytes for telling how much data there is appended to the call.
-            let extraLength := add(dataLength, 2)
-            // The `creationSize` is `extraLength + 108`
-            // The `runSize` is `creationSize - 10`.
-
-            /**
-             * ---------------------------------------------------------------------------------------------------+
-             * CREATION (10 bytes)                                                                                |
-             * ---------------------------------------------------------------------------------------------------|
-             * Opcode     | Mnemonic          | Stack     | Memory                                                |
-             * ---------------------------------------------------------------------------------------------------|
-             * 61 runSize | PUSH2 runSize     | r         |                                                       |
-             * 3d         | RETURNDATASIZE    | 0 r       |                                                       |
-             * 81         | DUP2              | r 0 r     |                                                       |
-             * 60 offset  | PUSH1 offset      | o r 0 r   |                                                       |
-             * 3d         | RETURNDATASIZE    | 0 o r 0 r |                                                       |
-             * 39         | CODECOPY          | 0 r       | [0..runSize): runtime code                            |
-             * f3         | RETURN            |           | [0..runSize): runtime code                            |
-             * ---------------------------------------------------------------------------------------------------|
-             * RUNTIME (98 bytes + extraLength)                                                                   |
-             * ---------------------------------------------------------------------------------------------------|
-             * Opcode   | Mnemonic       | Stack                    | Memory                                      |
-             * ---------------------------------------------------------------------------------------------------|
-             *                                                                                                    |
-             * ::: if no calldata, emit event & return w/o `DELEGATECALL` ::::::::::::::::::::::::::::::::::::::: |
-             * 36       | CALLDATASIZE   | cds                      |                                             |
-             * 60 0x2c  | PUSH1 0x2c     | 0x2c cds                 |                                             |
-             * 57       | JUMPI          |                          |                                             |
-             * 34       | CALLVALUE      | cv                       |                                             |
-             * 3d       | RETURNDATASIZE | 0 cv                     |                                             |
-             * 52       | MSTORE         |                          | [0..0x20): callvalue                        |
-             * 7f sig   | PUSH32 0x9e..  | sig                      | [0..0x20): callvalue                        |
-             * 59       | MSIZE          | 0x20 sig                 | [0..0x20): callvalue                        |
-             * 3d       | RETURNDATASIZE | 0 0x20 sig               | [0..0x20): callvalue                        |
-             * a1       | LOG1           |                          | [0..0x20): callvalue                        |
-             * 00       | STOP           |                          | [0..0x20): callvalue                        |
-             * 5b       | JUMPDEST       |                          |                                             |
-             *                                                                                                    |
-             * ::: copy calldata to memory :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: |
-             * 36       | CALLDATASIZE   | cds                      |                                             |
-             * 3d       | RETURNDATASIZE | 0 cds                    |                                             |
-             * 3d       | RETURNDATASIZE | 0 0 cds                  |                                             |
-             * 37       | CALLDATACOPY   |                          | [0..cds): calldata                          |
-             *                                                                                                    |
-             * ::: keep some values in stack :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: |
-             * 3d       | RETURNDATASIZE | 0                        | [0..cds): calldata                          |
-             * 3d       | RETURNDATASIZE | 0 0                      | [0..cds): calldata                          |
-             * 3d       | RETURNDATASIZE | 0 0 0                    | [0..cds): calldata                          |
-             * 3d       | RETURNDATASIZE | 0 0 0 0                  | [0..cds): calldata                          |
-             * 61 extra | PUSH2 extra    | e 0 0 0 0                | [0..cds): calldata                          |
-             *                                                                                                    |
-             * ::: copy extra data to memory :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: |
-             * 80       | DUP1           | e e 0 0 0 0              | [0..cds): calldata                          |
-             * 60 0x62  | PUSH1 0x62     | 0x62 e e 0 0 0 0         | [0..cds): calldata                          |
-             * 36       | CALLDATASIZE   | cds 0x62 e e 0 0 0 0     | [0..cds): calldata                          |
-             * 39       | CODECOPY       | e 0 0 0 0                | [0..cds): calldata, [cds..cds+e): extraData |
-             *                                                                                                    |
-             * ::: delegate call to the implementation contract ::::::::::::::::::::::::::::::::::::::::::::::::: |
-             * 36       | CALLDATASIZE   | cds e 0 0 0 0            | [0..cds): calldata, [cds..cds+e): extraData |
-             * 01       | ADD            | cds+e 0 0 0 0            | [0..cds): calldata, [cds..cds+e): extraData |
-             * 3d       | RETURNDATASIZE | 0 cds+e 0 0 0 0          | [0..cds): calldata, [cds..cds+e): extraData |
-             * 73 addr  | PUSH20 addr    | addr 0 cds+e 0 0 0 0     | [0..cds): calldata, [cds..cds+e): extraData |
-             * 5a       | GAS            | gas addr 0 cds+e 0 0 0 0 | [0..cds): calldata, [cds..cds+e): extraData |
-             * f4       | DELEGATECALL   | success 0 0              | [0..cds): calldata, [cds..cds+e): extraData |
-             *                                                                                                    |
-             * ::: copy return data to memory ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: |
-             * 3d       | RETURNDATASIZE | rds success 0 0          | [0..cds): calldata, [cds..cds+e): extraData |
-             * 3d       | RETURNDATASIZE | rds rds success 0 0      | [0..cds): calldata, [cds..cds+e): extraData |
-             * 93       | SWAP4          | 0 rds success 0 rds      | [0..cds): calldata, [cds..cds+e): extraData |
-             * 80       | DUP1           | 0 0 rds success 0 rds    | [0..cds): calldata, [cds..cds+e): extraData |
-             * 3e       | RETURNDATACOPY | success 0 rds            | [0..rds): returndata                        |
-             *                                                                                                    |
-             * 60 0x60  | PUSH1 0x60     | 0x60 success 0 rds       | [0..rds): returndata                        |
-             * 57       | JUMPI          | 0 rds                    | [0..rds): returndata                        |
-             *                                                                                                    |
-             * ::: revert ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: |
-             * fd       | REVERT         |                          | [0..rds): returndata                        |
-             *                                                                                                    |
-             * ::: return ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: |
-             * 5b       | JUMPDEST       | 0 rds                    | [0..rds): returndata                        |
-             * f3       | RETURN         |                          | [0..rds): returndata                        |
-             * ---------------------------------------------------------------------------------------------------+
-             */
-            mstore(data, 0x5af43d3d93803e606057fd5bf3) // Write the bytecode before the data.
-            mstore(sub(data, 0x0d), implementation) // Write the address of the implementation.
-            // Write the rest of the bytecode.
-            mstore(
-                sub(data, 0x21),
-                or(shl(0x48, extraLength), 0x593da1005b363d3d373d3d3d3d610000806062363936013d73)
-            )
-            // `keccak256("ReceiveETH(uint256)")`
-            mstore(
-                sub(data, 0x3a),
-                0x9e4ac34f21c619cefc926c8bd93b54bf5a39c7ab2127a895af1cc0691d7e3dff
-            )
-            mstore(
-                // Do a out-of-gas revert if `extraLength` is too big. 0xffff - 0x62 + 0x01 = 0xff9e.
-                // The actual EVM limit may be smaller and may change over time.
-                sub(data, add(0x59, lt(extraLength, 0xff9e))),
-                or(shl(0x78, add(extraLength, 0x62)), 0xfd6100003d81600a3d39f336602c57343d527f)
-            )
-            mstore(dataEnd, shl(0xf0, extraLength))
-
-            instance := create(value, sub(data, 0x4c), add(extraLength, 0x6c))
-            if iszero(instance) {
-                mstore(0x00, 0x30116425) // `DeploymentFailed()`.
-                revert(0x1c, 0x04)
-            }
-
-            // Restore the overwritten memory surrounding `data`.
-            mstore(dataEnd, mAfter1)
-            mstore(data, dataLength)
-            mstore(sub(data, 0x20), mBefore1)
-            mstore(sub(data, 0x40), mBefore2)
-            mstore(sub(data, 0x60), mBefore3)
-        }
+        /**
+         * ---------------------------------------------------------------------------------------------------+
+         * CREATION (10 bytes)                                                                                |
+         * ---------------------------------------------------------------------------------------------------|
+         * Opcode     | Mnemonic          | Stack     | Memory                                                |
+         * ---------------------------------------------------------------------------------------------------|
+         * 61 runSize | PUSH2 runSize     | r         |                                                       |
+         * 3d         | RETURNDATASIZE    | 0 r       |                                                       |
+         * 81         | DUP2              | r 0 r     |                                                       |
+         * 60 offset  | PUSH1 offset      | o r 0 r   |                                                       |
+         * 3d         | RETURNDATASIZE    | 0 o r 0 r |                                                       |
+         * 39         | CODECOPY          | 0 r       | [0..runSize): runtime code                            |
+         * f3         | RETURN            |           | [0..runSize): runtime code                            |
+         * ---------------------------------------------------------------------------------------------------|
+         * RUNTIME (98 bytes + extraLength)                                                                   |
+         * ---------------------------------------------------------------------------------------------------|
+         * Opcode   | Mnemonic       | Stack                    | Memory                                      |
+         * ---------------------------------------------------------------------------------------------------|
+         *                                                                                                    |
+         * ::: if no calldata, emit event & return w/o `DELEGATECALL` ::::::::::::::::::::::::::::::::::::::: |
+         * 36       | CALLDATASIZE   | cds                      |                                             |
+         * 60 0x2c  | PUSH1 0x2c     | 0x2c cds                 |                                             |
+         * 57       | JUMPI          |                          |                                             |
+         * 34       | CALLVALUE      | cv                       |                                             |
+         * 3d       | RETURNDATASIZE | 0 cv                     |                                             |
+         * 52       | MSTORE         |                          | [0..0x20): callvalue                        |
+         * 7f sig   | PUSH32 0x9e..  | sig                      | [0..0x20): callvalue                        |
+         * 59       | MSIZE          | 0x20 sig                 | [0..0x20): callvalue                        |
+         * 3d       | RETURNDATASIZE | 0 0x20 sig               | [0..0x20): callvalue                        |
+         * a1       | LOG1           |                          | [0..0x20): callvalue                        |
+         * 00       | STOP           |                          | [0..0x20): callvalue                        |
+         * 5b       | JUMPDEST       |                          |                                             |
+         *                                                                                                    |
+         * ::: copy calldata to memory :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: |
+         * 36       | CALLDATASIZE   | cds                      |                                             |
+         * 3d       | RETURNDATASIZE | 0 cds                    |                                             |
+         * 3d       | RETURNDATASIZE | 0 0 cds                  |                                             |
+         * 37       | CALLDATACOPY   |                          | [0..cds): calldata                          |
+         *                                                                                                    |
+         * ::: keep some values in stack :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: |
+         * 3d       | RETURNDATASIZE | 0                        | [0..cds): calldata                          |
+         * 3d       | RETURNDATASIZE | 0 0                      | [0..cds): calldata                          |
+         * 3d       | RETURNDATASIZE | 0 0 0                    | [0..cds): calldata                          |
+         * 3d       | RETURNDATASIZE | 0 0 0 0                  | [0..cds): calldata                          |
+         * 61 extra | PUSH2 extra    | e 0 0 0 0                | [0..cds): calldata                          |
+         *                                                                                                    |
+         * ::: copy extra data to memory :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: |
+         * 80       | DUP1           | e e 0 0 0 0              | [0..cds): calldata                          |
+         * 60 0x62  | PUSH1 0x62     | 0x62 e e 0 0 0 0         | [0..cds): calldata                          |
+         * 36       | CALLDATASIZE   | cds 0x62 e e 0 0 0 0     | [0..cds): calldata                          |
+         * 39       | CODECOPY       | e 0 0 0 0                | [0..cds): calldata, [cds..cds+e): extraData |
+         *                                                                                                    |
+         * ::: delegate call to the implementation contract ::::::::::::::::::::::::::::::::::::::::::::::::: |
+         * 36       | CALLDATASIZE   | cds e 0 0 0 0            | [0..cds): calldata, [cds..cds+e): extraData |
+         * 01       | ADD            | cds+e 0 0 0 0            | [0..cds): calldata, [cds..cds+e): extraData |
+         * 3d       | RETURNDATASIZE | 0 cds+e 0 0 0 0          | [0..cds): calldata, [cds..cds+e): extraData |
+         * 73 addr  | PUSH20 addr    | addr 0 cds+e 0 0 0 0     | [0..cds): calldata, [cds..cds+e): extraData |
+         * 5a       | GAS            | gas addr 0 cds+e 0 0 0 0 | [0..cds): calldata, [cds..cds+e): extraData |
+         * f4       | DELEGATECALL   | success 0 0              | [0..cds): calldata, [cds..cds+e): extraData |
+         *                                                                                                    |
+         * ::: copy return data to memory ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: |
+         * 3d       | RETURNDATASIZE | rds success 0 0          | [0..cds): calldata, [cds..cds+e): extraData |
+         * 3d       | RETURNDATASIZE | rds rds success 0 0      | [0..cds): calldata, [cds..cds+e): extraData |
+         * 93       | SWAP4          | 0 rds success 0 rds      | [0..cds): calldata, [cds..cds+e): extraData |
+         * 80       | DUP1           | 0 0 rds success 0 rds    | [0..cds): calldata, [cds..cds+e): extraData |
+         * 3e       | RETURNDATACOPY | success 0 rds            | [0..rds): returndata                        |
+         *                                                                                                    |
+         * 60 0x60  | PUSH1 0x60     | 0x60 success 0 rds       | [0..rds): returndata                        |
+         * 57       | JUMPI          | 0 rds                    | [0..rds): returndata                        |
+         *                                                                                                    |
+         * ::: revert ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: |
+         * fd       | REVERT         |                          | [0..rds): returndata                        |
+         *                                                                                                    |
+         * ::: return ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::: |
+         * 5b       | JUMPDEST       | 0 rds                    | [0..rds): returndata                        |
+         * f3       | RETURN         |                          | [0..rds): returndata                        |
+         * ---------------------------------------------------------------------------------------------------+
+         */
+        instance = _createDeploy(_creationCode(implementation, data), value);
     }
 
     /// @dev Deploys a deterministic clone of `implementation`
@@ -187,51 +152,7 @@ library LibCWIA {
         bytes memory data,
         bytes32 salt
     ) internal returns (address instance) {
-        assembly {
-            // Compute the boundaries of the data and cache the memory slots around it.
-            let mBefore3 := mload(sub(data, 0x60))
-            let mBefore2 := mload(sub(data, 0x40))
-            let mBefore1 := mload(sub(data, 0x20))
-            let dataLength := mload(data)
-            let dataEnd := add(add(data, 0x20), dataLength)
-            let mAfter1 := mload(dataEnd)
-
-            // +2 bytes for telling how much data there is appended to the call.
-            let extraLength := add(dataLength, 2)
-
-            mstore(data, 0x5af43d3d93803e606057fd5bf3) // Write the bytecode before the data.
-            mstore(sub(data, 0x0d), implementation) // Write the address of the implementation.
-            // Write the rest of the bytecode.
-            mstore(
-                sub(data, 0x21),
-                or(shl(0x48, extraLength), 0x593da1005b363d3d373d3d3d3d610000806062363936013d73)
-            )
-            // `keccak256("ReceiveETH(uint256)")`
-            mstore(
-                sub(data, 0x3a),
-                0x9e4ac34f21c619cefc926c8bd93b54bf5a39c7ab2127a895af1cc0691d7e3dff
-            )
-            mstore(
-                // Do a out-of-gas revert if `extraLength` is too big. 0xffff - 0x62 + 0x01 = 0xff9e.
-                // The actual EVM limit may be smaller and may change over time.
-                sub(data, add(0x59, lt(extraLength, 0xff9e))),
-                or(shl(0x78, add(extraLength, 0x62)), 0xfd6100003d81600a3d39f336602c57343d527f)
-            )
-            mstore(dataEnd, shl(0xf0, extraLength))
-
-            instance := create2(value, sub(data, 0x4c), add(extraLength, 0x6c), salt)
-            if iszero(instance) {
-                mstore(0x00, 0x30116425) // `DeploymentFailed()`.
-                revert(0x1c, 0x04)
-            }
-
-            // Restore the overwritten memory surrounding `data`.
-            mstore(dataEnd, mAfter1)
-            mstore(data, dataLength)
-            mstore(sub(data, 0x20), mBefore1)
-            mstore(sub(data, 0x40), mBefore2)
-            mstore(sub(data, 0x60), mBefore3)
-        }
+        instance = _createDeploy2(_creationCode(implementation, data), salt, value);
     }
 
     /// @dev Returns the initialization code hash of the clone of `implementation`
@@ -241,49 +162,10 @@ library LibCWIA {
         pure
         returns (bytes memory result)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := mload(0x40)
-            let dataLength := mload(data)
-
-            // Do a out-of-gas revert if `dataLength` is too big. 0xffff - 0x02 - 0x62 = 0xff9b.
-            // The actual EVM limit may be smaller and may change over time.
-            returndatacopy(returndatasize(), returndatasize(), gt(dataLength, 0xff9b))
-
-            let o := add(result, 0x8c)
-            let end := add(o, dataLength)
-
-            // Copy the `data` into `result`.
-            for { let d := sub(add(data, 0x20), o) } 1 {} {
-                mstore(o, mload(add(o, d)))
-                o := add(o, 0x20)
-                if iszero(lt(o, end)) { break }
-            }
-
-            // +2 bytes for telling how much data there is appended to the call.
-            let extraLength := add(dataLength, 2)
-
-            mstore(add(result, 0x6c), 0x5af43d3d93803e606057fd5bf3) // Write the bytecode before the data.
-            mstore(add(result, 0x5f), implementation) // Write the address of the implementation.
-            // Write the rest of the bytecode.
-            mstore(
-                add(result, 0x4b),
-                or(shl(0x48, extraLength), 0x593da1005b363d3d373d3d3d3d610000806062363936013d73)
-            )
-            // `keccak256("ReceiveETH(uint256)")`
-            mstore(
-                add(result, 0x32),
-                0x9e4ac34f21c619cefc926c8bd93b54bf5a39c7ab2127a895af1cc0691d7e3dff
-            )
-            mstore(
-                add(result, 0x12),
-                or(shl(0x78, add(extraLength, 0x62)), 0x6100003d81600a3d39f336602c57343d527f)
-            )
-            mstore(end, shl(0xf0, extraLength))
-            mstore(add(end, 0x02), 0) // Zeroize the slot after the result.
-            mstore(result, add(extraLength, 0x6c)) // Store the length.
-            mstore(0x40, add(0x22, end)) // Allocate memory.
-        }
+        // Revert, as running out of gas does upstream, if `dataLength` is too big.
+        // 0xffff - 0x02 - 0x62 = 0xff9b.
+        if (data.length > 0xff9b) revert();
+        result = _creationCode(implementation, data);
     }
 
     /// @dev Returns the initialization code hash of the clone of `implementation`
@@ -294,49 +176,10 @@ library LibCWIA {
         pure
         returns (bytes32 hash)
     {
-        assembly {
-            // Compute the boundaries of the data and cache the memory slots around it.
-            let mBefore3 := mload(sub(data, 0x60))
-            let mBefore2 := mload(sub(data, 0x40))
-            let mBefore1 := mload(sub(data, 0x20))
-            let dataLength := mload(data)
-            let dataEnd := add(add(data, 0x20), dataLength)
-            let mAfter1 := mload(dataEnd)
-
-            // Do a out-of-gas revert if `dataLength` is too big. 0xffff - 0x02 - 0x62 = 0xff9b.
-            // The actual EVM limit may be smaller and may change over time.
-            returndatacopy(returndatasize(), returndatasize(), gt(dataLength, 0xff9b))
-
-            // +2 bytes for telling how much data there is appended to the call.
-            let extraLength := add(dataLength, 2)
-
-            mstore(data, 0x5af43d3d93803e606057fd5bf3) // Write the bytecode before the data.
-            mstore(sub(data, 0x0d), implementation) // Write the address of the implementation.
-            // Write the rest of the bytecode.
-            mstore(
-                sub(data, 0x21),
-                or(shl(0x48, extraLength), 0x593da1005b363d3d373d3d3d3d610000806062363936013d73)
-            )
-            // `keccak256("ReceiveETH(uint256)")`
-            mstore(
-                sub(data, 0x3a),
-                0x9e4ac34f21c619cefc926c8bd93b54bf5a39c7ab2127a895af1cc0691d7e3dff
-            )
-            mstore(
-                sub(data, 0x5a),
-                or(shl(0x78, add(extraLength, 0x62)), 0x6100003d81600a3d39f336602c57343d527f)
-            )
-            mstore(dataEnd, shl(0xf0, extraLength))
-
-            hash := keccak256(sub(data, 0x4c), add(extraLength, 0x6c))
-
-            // Restore the overwritten memory surrounding `data`.
-            mstore(dataEnd, mAfter1)
-            mstore(data, dataLength)
-            mstore(sub(data, 0x20), mBefore1)
-            mstore(sub(data, 0x40), mBefore2)
-            mstore(sub(data, 0x60), mBefore3)
-        }
+        // Revert, as running out of gas does upstream, if `dataLength` is too big.
+        // 0xffff - 0x02 - 0x62 = 0xff9b.
+        if (data.length > 0xff9b) revert();
+        hash = keccak256(_creationCode(implementation, data));
     }
 
     /// @dev Returns the address of the deterministic clone of
@@ -364,27 +207,74 @@ library LibCWIA {
         pure
         returns (address predicted)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            // Compute and store the bytecode hash.
-            mstore8(0x00, 0xff) // Write the prefix.
-            mstore(0x35, hash)
-            mstore(0x01, shl(96, deployer))
-            mstore(0x15, salt)
-            predicted := keccak256(0x00, 0x55)
-            mstore(0x35, 0) // Restore the overwritten part of the free memory pointer.
-        }
+        predicted = address(
+            uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), deployer, salt, hash))))
+        );
     }
 
     /// @dev Requires that `salt` starts with either the zero address or `by`.
     function checkStartsWith(bytes32 salt, address by) internal pure {
+        // If the salt does not start with the zero address or `by`.
+        uint256 prefix = uint256(salt) >> 96;
+        if (prefix != 0 && prefix != uint160(by)) revert SaltDoesNotStartWith();
+    }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      PRIVATE HELPERS                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev The creation code of the clone of `implementation` with the immutable arguments
+    /// `data`, 0x6e bytes longer than `data`, laid out in the table of `clone`.
+    /// @custom:solar-inline
+    function _creationCode(address implementation, bytes memory data)
+        private
+        pure
+        returns (bytes memory)
+    {
+        // +2 bytes for telling how much data there is appended to the call.
+        uint256 extraLength = data.length + 2;
+        return abi.encodePacked(
+            // Start with a `REVERT` if `extraLength` is too big. 0xffff - 0x62 + 0x01 = 0xff9e.
+            extraLength < 0xff9e ? bytes1(0x61) : bytes1(0xfd),
+            uint16(extraLength + 0x62),
+            hex"3d81600a3d39f336602c57343d527f",
+            // `keccak256("ReceiveETH(uint256)")`
+            bytes32(0x9e4ac34f21c619cefc926c8bd93b54bf5a39c7ab2127a895af1cc0691d7e3dff),
+            hex"593da1005b363d3d373d3d3d3d61",
+            uint16(extraLength),
+            hex"806062363936013d73",
+            implementation,
+            hex"5af43d3d93803e606057fd5bf3",
+            data,
+            uint16(extraLength)
+        );
+    }
+
+    /// @dev Deploys `initcode` with `value` wei and returns the new address. Solidity creates
+    /// only contracts it compiles.
+    /// @custom:solar-trusted
+    function _createDeploy(bytes memory initcode, uint256 value)
+        private
+        returns (address deployed)
+    {
         /// @solidity memory-safe-assembly
         assembly {
-            // If the salt does not start with the zero address or `by`.
-            if iszero(or(iszero(shr(96, salt)), eq(shr(96, shl(96, by)), shr(96, salt)))) {
-                mstore(0x00, 0x0c4549ef) // `SaltDoesNotStartWith()`.
-                revert(0x1c, 0x04)
-            }
+            deployed := create(value, add(initcode, 0x20), mload(initcode))
         }
+        if (deployed == address(0)) revert DeploymentFailed();
+    }
+
+    /// @dev Deploys `initcode` with `value` wei at the address `salt` selects. Solidity creates
+    /// only contracts it compiles.
+    /// @custom:solar-trusted
+    function _createDeploy2(bytes memory initcode, bytes32 salt, uint256 value)
+        private
+        returns (address deployed)
+    {
+        /// @solidity memory-safe-assembly
+        assembly {
+            deployed := create2(value, add(initcode, 0x20), mload(initcode), salt)
+        }
+        if (deployed == address(0)) revert DeploymentFailed();
     }
 }
