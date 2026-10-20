@@ -305,7 +305,7 @@ library FixedPointMathLib {
     /// Note: This function is an approximation. Monotonically increasing.
     function lambertW0Wad(int256 x) internal pure returns (int256 w) {
         if ((w = x) <= -367879441171442322) revert OutOfDomain(); // `x` less than `-1/e`.
-        (int256 wad, int256 p) = (int256(WAD), x);
+        int256 p = x;
         uint256 c; // Whether we need to avoid catastrophic cancellation.
         uint256 i = 4; // Number of iterations.
         if (w <= 0x1ffffffffffff) {
@@ -343,11 +343,11 @@ library FixedPointMathLib {
         do {
             // Otherwise, use Halley's for faster convergence.
             int256 e = expWad(w);
-            int256 t = rawAdd(w, wad);
-            int256 s = rawSub(rawMul(w, e), rawMul(x, wad));
-            // forgefmt: disable-next-item
-            w = rawSub(w, rawSDiv(rawMul(s, wad), rawSub(rawMul(e, t),
-                rawSDiv(rawMul(rawAdd(t, wad), s), rawAdd(t, t)))));
+            int256 t = rawAdd(w, int256(WAD));
+            int256 s = rawSub(rawMul(w, e), rawMul(x, int256(WAD)));
+            // `e` becomes the step's denominator: a new local overflows the legacy stack.
+            e = rawSub(rawMul(e, t), rawSDiv(rawMul(rawAdd(t, int256(WAD)), s), rawAdd(t, t)));
+            w = rawSub(w, rawSDiv(rawMul(s, int256(WAD)), e));
             if (p <= w) break;
             p = w;
         } while (--i != c);
@@ -356,9 +356,9 @@ library FixedPointMathLib {
         // R. Iacono and J.P. Boyd for the last iteration, to avoid catastrophic cancellation.
         if (c == 0) return w;
         int256 u = w | 1;
-        x = rawSDiv(rawMul(x, wad), u);
-        x = rawMul(u, rawAdd(wad, lnWad(x)));
-        w = rawSDiv(x, rawAdd(wad, u));
+        x = rawSDiv(rawMul(x, int256(WAD)), u);
+        x = rawMul(u, rawAdd(int256(WAD), lnWad(x)));
+        w = rawSDiv(x, rawAdd(int256(WAD), u));
     }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
