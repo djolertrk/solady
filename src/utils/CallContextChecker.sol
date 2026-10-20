@@ -3,6 +3,13 @@ pragma solidity ^0.8.4;
 
 /// @notice Call context checker mixin.
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/utils/CallContextChecker.sol)
+///
+/// The checked port reads the first word of the current account's code, zero-padded past
+/// its end as the assembly reads it, with a trusted helper, since Solidity can only copy all
+/// of an account's code. The checks compare it and the immutable in Solidity, and revert
+/// with the custom error. The helper's name carries a `_callContextChecker` prefix, so that a
+/// contract can inherit this alongside other ports.
+/// @custom:solar-safe memory arithmetic
 contract CallContextChecker {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                       CUSTOM ERRORS                        */
@@ -32,13 +39,9 @@ contract CallContextChecker {
     /// @dev Returns whether the current call context is on a EIP7702 authority
     /// (i.e. externally owned account).
     function _onEIP7702Authority() internal view virtual returns (bool result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            extcodecopy(address(), 0x00, 0x00, 0x20)
-            // Note: Checking that it starts with hex"ef01" is the most general and futureproof.
-            // 7702 bytecode is `abi.encodePacked(hex"ef01", uint8(version), address(delegation))`.
-            result := eq(0xef01, shr(240, mload(0x00)))
-        }
+        // Note: Checking that it starts with hex"ef01" is the most general and futureproof.
+        // 7702 bytecode is `abi.encodePacked(hex"ef01", uint8(version), address(delegation))`.
+        result = bytes2(_callContextCheckerCodeWord(address(this))) == 0xef01;
     }
 
     /// @dev Returns the implementation of this contract.
@@ -90,11 +93,19 @@ contract CallContextChecker {
     /*                      PRIVATE HELPERS                       */
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
+    /// @custom:solar-terminates
     function _revertUnauthorizedCallContext() private pure {
+        revert UnauthorizedCallContext();
+    }
+
+    /// @dev The first 32 bytes of `target`'s code, zero-padded past its end as `EXTCODECOPY`
+    /// pads them. Solidity can only copy all of an account's code.
+    /// @custom:solar-trusted
+    function _callContextCheckerCodeWord(address target) private view returns (bytes32 word) {
         /// @solidity memory-safe-assembly
         assembly {
-            mstore(0x00, 0x9f03a026) // `UnauthorizedCallContext()`.
-            revert(0x1c, 0x04)
+            extcodecopy(target, 0x00, 0x00, 0x20)
+            word := mload(0x00)
         }
     }
 }
