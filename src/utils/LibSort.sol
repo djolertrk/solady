@@ -698,7 +698,7 @@ library LibSort {
         uint256 n = keys.length;
         if (values.length != n) n = _outOfBounds();
         if (n < 2) return;
-        _sortAll(keys, values, n);
+        if (_sortAll(keys, values, n)) return;
         uint256 kept;
         uint256 sum = values[0];
         // The last kept key, which `keys[kept]` holds.
@@ -977,7 +977,7 @@ library LibSort {
         uint256 n = keys.length;
         if (values.length != n) n = _outOfBounds();
         if (n < 2) return;
-        _sortAll(keys, values, n);
+        if (_sortAll(keys, values, n)) return;
         uint256 kept;
         uint256 sum = values[0];
         // The last kept key, which `keys[kept]` holds.
@@ -1240,7 +1240,7 @@ library LibSort {
         uint256 n = keys.length;
         if (values.length != n) n = _outOfBounds();
         if (n < 2) return;
-        _sortAll(keys, values, n);
+        if (_sortAll(keys, values, n)) return;
         uint256 kept;
         uint256 sum = values[0];
         // The last kept key, which `keys[kept]` holds.
@@ -1517,7 +1517,7 @@ library LibSort {
         uint256 n = keys.length;
         if (values.length != n) n = _outOfBounds();
         if (n < 2) return;
-        _sortAll(keys, values, n);
+        if (_sortAll(keys, values, n)) return;
         uint256 kept;
         uint256 sum = values[0];
         // The last kept key, which `keys[kept]` holds.
@@ -1571,8 +1571,14 @@ library LibSort {
 
     /// @dev Sorts the `n >= 2` keys with each value moved alongside, as
     /// `_sortAll` sorts: keys already in order stay, keys in reverse order are
-    /// reversed with their values, and any others go through the quicksort.
-    function _sortAll(uint256[] memory keys, uint256[] memory values, uint256 n) private pure {
+    /// reversed with their values, and any others go through the quicksort,
+    /// unless they hold at most three distinct keys: those `_groupFew`
+    /// groups without a sort, and `grouped` is true.
+    function _sortAll(uint256[] memory keys, uint256[] memory values, uint256 n)
+        private
+        pure
+        returns (bool grouped)
+    {
         uint256 j = n - 1;
         uint256 next = keys[j];
         while (j != 0) {
@@ -1581,7 +1587,7 @@ library LibSort {
             next = x;
             --j;
         }
-        if (j == 0) return;
+        if (j == 0) return false;
         j = n - 1;
         next = keys[j];
         while (j != 0) {
@@ -1594,9 +1600,64 @@ library LibSort {
             for (uint256 i; i < n / 2; ++i) {
                 _swap(keys, values, i, n - 1 - i);
             }
-            return;
+            return false;
         }
+        if (_groupFew(keys, values, n)) return true;
         _sort(keys, values, 0, n);
+    }
+
+    /// @dev Groups `n` keys of at most three distinct values in one read of
+    /// the arrays, keeping each key and its sum on the stack, and writes the
+    /// groups in key order. Returns false, with the arrays unchanged, at the
+    /// first key past those. Keys order as `_sort` orders them.
+    function _groupFew(uint256[] memory keys, uint256[] memory values, uint256 n)
+        private
+        pure
+        returns (bool)
+    {
+        uint256 k0 = keys[0];
+        uint256 s0 = values[0];
+        uint256 k1;
+        uint256 s1;
+        uint256 k2;
+        uint256 s2;
+        uint256 u = 1;
+        for (uint256 i = 1; i < n; ++i) {
+            uint256 key = keys[i];
+            if (key == k0) {
+                s0 += values[i];
+            } else if (u > 1 && key == k1) {
+                s1 += values[i];
+            } else if (u > 2 && key == k2) {
+                s2 += values[i];
+            } else if (u == 1) {
+                (k1, s1, u) = (key, values[i], 2);
+            } else if (u == 2) {
+                (k2, s2, u) = (key, values[i], 3);
+            } else {
+                return false;
+            }
+        }
+        if (u > 1) {
+            if (k1 < k0) (k0, s0, k1, s1) = (k1, s1, k0, s0);
+        }
+        if (u > 2) {
+            if (k2 < k1) (k1, s1, k2, s2) = (k2, s2, k1, s1);
+            if (k1 < k0) (k0, s0, k1, s1) = (k1, s1, k0, s0);
+        }
+        keys[0] = k0;
+        values[0] = s0;
+        if (u > 1) {
+            keys[1] = k1;
+            values[1] = s1;
+        }
+        if (u > 2) {
+            keys[2] = k2;
+            values[2] = s2;
+        }
+        _truncate(keys, u);
+        _truncate(values, u);
+        return true;
     }
 
     /// @dev Sorts all of `a`, as the assembly does: an array already in order
@@ -1621,9 +1682,15 @@ library LibSort {
 
     /// @dev Sorts the `n >= 2` keys with each value moved alongside, as
     /// `_sortAll` sorts: keys already in order stay, keys in reverse order are
-    /// reversed with their values, and any others go through the quicksort.
+    /// reversed with their values, and any others go through the quicksort,
+    /// unless they hold at most three distinct keys: those `_groupFew`
+    /// groups without a sort, and `grouped` is true.
     /// Keys order by their two's-complement words, as `_sort` orders them.
-    function _sortAll(int256[] memory keys, uint256[] memory values, uint256 n) private pure {
+    function _sortAll(int256[] memory keys, uint256[] memory values, uint256 n)
+        private
+        pure
+        returns (bool grouped)
+    {
         uint256 j = n - 1;
         uint256 next = uint256(keys[j]);
         while (j != 0) {
@@ -1632,7 +1699,7 @@ library LibSort {
             next = x;
             --j;
         }
-        if (j == 0) return;
+        if (j == 0) return false;
         j = n - 1;
         next = uint256(keys[j]);
         while (j != 0) {
@@ -1645,9 +1712,65 @@ library LibSort {
             for (uint256 i; i < n / 2; ++i) {
                 _swap(keys, values, i, n - 1 - i);
             }
-            return;
+            return false;
         }
+        if (_groupFew(keys, values, n)) return true;
         _sort(keys, values, 0, n);
+    }
+
+    /// @dev Groups `n` keys of at most three distinct values in one read of
+    /// the arrays, keeping each key and its sum on the stack, and writes the
+    /// groups in key order. Returns false, with the arrays unchanged, at the
+    /// first key past those. Keys order by their two's-complement words, as
+    /// `_sort` orders them.
+    function _groupFew(int256[] memory keys, uint256[] memory values, uint256 n)
+        private
+        pure
+        returns (bool)
+    {
+        int256 k0 = keys[0];
+        uint256 s0 = values[0];
+        int256 k1;
+        uint256 s1;
+        int256 k2;
+        uint256 s2;
+        uint256 u = 1;
+        for (uint256 i = 1; i < n; ++i) {
+            int256 key = keys[i];
+            if (key == k0) {
+                s0 += values[i];
+            } else if (u > 1 && key == k1) {
+                s1 += values[i];
+            } else if (u > 2 && key == k2) {
+                s2 += values[i];
+            } else if (u == 1) {
+                (k1, s1, u) = (key, values[i], 2);
+            } else if (u == 2) {
+                (k2, s2, u) = (key, values[i], 3);
+            } else {
+                return false;
+            }
+        }
+        if (u > 1) {
+            if (uint256(k1) < uint256(k0)) (k0, s0, k1, s1) = (k1, s1, k0, s0);
+        }
+        if (u > 2) {
+            if (uint256(k2) < uint256(k1)) (k1, s1, k2, s2) = (k2, s2, k1, s1);
+            if (uint256(k1) < uint256(k0)) (k0, s0, k1, s1) = (k1, s1, k0, s0);
+        }
+        keys[0] = k0;
+        values[0] = s0;
+        if (u > 1) {
+            keys[1] = k1;
+            values[1] = s1;
+        }
+        if (u > 2) {
+            keys[2] = k2;
+            values[2] = s2;
+        }
+        _truncate(keys, u);
+        _truncate(values, u);
+        return true;
     }
 
     /// @dev Sorts all of `a`, as the assembly does: an array already in order
@@ -1684,8 +1807,14 @@ library LibSort {
 
     /// @dev Sorts the `n >= 2` keys with each value moved alongside, as
     /// `_sortAll` sorts: keys already in order stay, keys in reverse order are
-    /// reversed with their values, and any others go through the quicksort.
-    function _sortAll(address[] memory keys, uint256[] memory values, uint256 n) private pure {
+    /// reversed with their values, and any others go through the quicksort,
+    /// unless they hold at most three distinct keys: those `_groupFew`
+    /// groups without a sort, and `grouped` is true.
+    function _sortAll(address[] memory keys, uint256[] memory values, uint256 n)
+        private
+        pure
+        returns (bool grouped)
+    {
         uint256 j = n - 1;
         address next = keys[j];
         while (j != 0) {
@@ -1694,7 +1823,7 @@ library LibSort {
             next = x;
             --j;
         }
-        if (j == 0) return;
+        if (j == 0) return false;
         j = n - 1;
         next = keys[j];
         while (j != 0) {
@@ -1707,9 +1836,64 @@ library LibSort {
             for (uint256 i; i < n / 2; ++i) {
                 _swap(keys, values, i, n - 1 - i);
             }
-            return;
+            return false;
         }
+        if (_groupFew(keys, values, n)) return true;
         _sort(keys, values, 0, n);
+    }
+
+    /// @dev Groups `n` keys of at most three distinct values in one read of
+    /// the arrays, keeping each key and its sum on the stack, and writes the
+    /// groups in key order. Returns false, with the arrays unchanged, at the
+    /// first key past those. Keys order as `_sort` orders them.
+    function _groupFew(address[] memory keys, uint256[] memory values, uint256 n)
+        private
+        pure
+        returns (bool)
+    {
+        address k0 = keys[0];
+        uint256 s0 = values[0];
+        address k1;
+        uint256 s1;
+        address k2;
+        uint256 s2;
+        uint256 u = 1;
+        for (uint256 i = 1; i < n; ++i) {
+            address key = keys[i];
+            if (key == k0) {
+                s0 += values[i];
+            } else if (u > 1 && key == k1) {
+                s1 += values[i];
+            } else if (u > 2 && key == k2) {
+                s2 += values[i];
+            } else if (u == 1) {
+                (k1, s1, u) = (key, values[i], 2);
+            } else if (u == 2) {
+                (k2, s2, u) = (key, values[i], 3);
+            } else {
+                return false;
+            }
+        }
+        if (u > 1) {
+            if (k1 < k0) (k0, s0, k1, s1) = (k1, s1, k0, s0);
+        }
+        if (u > 2) {
+            if (k2 < k1) (k1, s1, k2, s2) = (k2, s2, k1, s1);
+            if (k1 < k0) (k0, s0, k1, s1) = (k1, s1, k0, s0);
+        }
+        keys[0] = k0;
+        values[0] = s0;
+        if (u > 1) {
+            keys[1] = k1;
+            values[1] = s1;
+        }
+        if (u > 2) {
+            keys[2] = k2;
+            values[2] = s2;
+        }
+        _truncate(keys, u);
+        _truncate(values, u);
+        return true;
     }
 
     /// @dev Sorts all of `a`, as the assembly does: an array already in order
@@ -1734,8 +1918,14 @@ library LibSort {
 
     /// @dev Sorts the `n >= 2` keys with each value moved alongside, as
     /// `_sortAll` sorts: keys already in order stay, keys in reverse order are
-    /// reversed with their values, and any others go through the quicksort.
-    function _sortAll(bytes32[] memory keys, uint256[] memory values, uint256 n) private pure {
+    /// reversed with their values, and any others go through the quicksort,
+    /// unless they hold at most three distinct keys: those `_groupFew`
+    /// groups without a sort, and `grouped` is true.
+    function _sortAll(bytes32[] memory keys, uint256[] memory values, uint256 n)
+        private
+        pure
+        returns (bool grouped)
+    {
         uint256 j = n - 1;
         bytes32 next = keys[j];
         while (j != 0) {
@@ -1744,7 +1934,7 @@ library LibSort {
             next = x;
             --j;
         }
-        if (j == 0) return;
+        if (j == 0) return false;
         j = n - 1;
         next = keys[j];
         while (j != 0) {
@@ -1757,9 +1947,64 @@ library LibSort {
             for (uint256 i; i < n / 2; ++i) {
                 _swap(keys, values, i, n - 1 - i);
             }
-            return;
+            return false;
         }
+        if (_groupFew(keys, values, n)) return true;
         _sort(keys, values, 0, n);
+    }
+
+    /// @dev Groups `n` keys of at most three distinct values in one read of
+    /// the arrays, keeping each key and its sum on the stack, and writes the
+    /// groups in key order. Returns false, with the arrays unchanged, at the
+    /// first key past those. Keys order as `_sort` orders them.
+    function _groupFew(bytes32[] memory keys, uint256[] memory values, uint256 n)
+        private
+        pure
+        returns (bool)
+    {
+        bytes32 k0 = keys[0];
+        uint256 s0 = values[0];
+        bytes32 k1;
+        uint256 s1;
+        bytes32 k2;
+        uint256 s2;
+        uint256 u = 1;
+        for (uint256 i = 1; i < n; ++i) {
+            bytes32 key = keys[i];
+            if (key == k0) {
+                s0 += values[i];
+            } else if (u > 1 && key == k1) {
+                s1 += values[i];
+            } else if (u > 2 && key == k2) {
+                s2 += values[i];
+            } else if (u == 1) {
+                (k1, s1, u) = (key, values[i], 2);
+            } else if (u == 2) {
+                (k2, s2, u) = (key, values[i], 3);
+            } else {
+                return false;
+            }
+        }
+        if (u > 1) {
+            if (k1 < k0) (k0, s0, k1, s1) = (k1, s1, k0, s0);
+        }
+        if (u > 2) {
+            if (k2 < k1) (k1, s1, k2, s2) = (k2, s2, k1, s1);
+            if (k1 < k0) (k0, s0, k1, s1) = (k1, s1, k0, s0);
+        }
+        keys[0] = k0;
+        values[0] = s0;
+        if (u > 1) {
+            keys[1] = k1;
+            values[1] = s1;
+        }
+        if (u > 2) {
+            keys[2] = k2;
+            values[2] = s2;
+        }
+        _truncate(keys, u);
+        _truncate(values, u);
+        return true;
     }
 
     /// @dev Raises the `Panic(0x32)` an out-of-range index raises.
