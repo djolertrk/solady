@@ -98,6 +98,10 @@ LIBRARIES = [
     "WebAuthn",
     "MerkleTreeLib",
     "GasBurnerLib",
+    "LibZip",
+    "accounts/ERC4337",
+    "accounts/ERC6551",
+    "accounts/ERC6551Proxy",
 ]
 
 

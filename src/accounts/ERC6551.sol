@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.4;
+pragma solidity ^0.8.5;
 
 import {Receiver} from "./Receiver.sol";
 import {ERC1271} from "./ERC1271.sol";
@@ -36,6 +36,21 @@ import {UUPSUpgradeable} from "../utils/UUPSUpgradeable.sol";
 ///   user operation validation functionality (and use ERC6551's execution functionality).
 /// - Please refer to the official [ERC6551](https://github.com/erc6551/reference) reference
 ///   for latest updates on the ERC6551 standard, as well as canonical registry information.
+///
+/// The checked port reads the account's footer, the chain ID, token contract and token ID words
+/// at the end of its code, with the trusted `_erc6551CodeCopyInto`, which copies the bytes into a
+/// buffer it checks they fit, and the implementation word with the trusted `_erc6551CodeWord`,
+/// both with zeros past the end of the code as the assembly reads them. It asks token contracts
+/// with trusted static calls that copy at most the words the assembly reads of an answer:
+/// `_erc6551StaticCallWord` through the scratch space, `_erc6551StaticCallInto` into a buffer.
+/// Calls are Solidity's `call`, with a revert bubbled up by the trusted `_erc6551RevertRaw`.
+/// `executeBatch` reads each call with Solidity's calldata access, which follows the same
+/// offsets and checks the call and its `data` lie in calldata, where the assembly reads past
+/// them, and reads `target` as the word it is stored as at the offset the trusted
+/// `_erc6551Offset` gives. Trusted helpers also read and write the state slot, which Solidity
+/// cannot name, and answer a token callback with `msg.sig` as the call's whole return data,
+/// which a fallback cannot return in Solidity.
+/// @custom:solar-safe memory arithmetic
 abstract contract ERC6551 is UUPSUpgradeable, Receiver, ERC1271 {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                          STRUCTS                           */
@@ -89,37 +104,19 @@ abstract contract ERC6551 is UUPSUpgradeable, Receiver, ERC1271 {
         virtual
         returns (uint256 chainId, address tokenContract, uint256 tokenId)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let m := mload(0x40) // Cache the free memory pointer.
-            extcodecopy(address(), 0x00, 0x4d, 0x60)
-            chainId := mload(0x00)
-            tokenContract := mload(0x20) // Upper 96 bits will be clean.
-            tokenId := mload(0x40)
-            mstore(0x40, m) // Restore the free memory pointer.
-        }
+        uint256 tokenContractWord;
+        (chainId, tokenContractWord, tokenId) = _erc6551Footer();
+        tokenContract = address(uint160(tokenContractWord)); // Upper 96 bits will be clean.
     }
 
     /// @dev Returns the owner of the contract.
     function owner() public view virtual returns (address result) {
         uint256 cachedChainId = _cachedChainId;
-        /// @solidity memory-safe-assembly
-        assembly {
-            let m := mload(0x40) // Cache the free memory pointer.
-            extcodecopy(address(), 0x00, 0x4d, 0x60)
-            if eq(mload(0x00), cachedChainId) {
-                let tokenContract := mload(0x20)
-                // `tokenId` is already at 0x40.
-                mstore(0x20, 0x6352211e) // `ownerOf(uint256)`.
-                result := mul( // Returns `address(0)` on failure or if contract does not exist.
-                    mload(0x20),
-                    and(
-                        gt(returndatasize(), 0x1f),
-                        staticcall(gas(), tokenContract, 0x3c, 0x24, 0x20, 0x20)
-                    )
-                )
-            }
-            mstore(0x40, m) // Restore the free memory pointer.
+        (uint256 chainId, uint256 tokenContract, uint256 tokenId) = _erc6551Footer();
+        if (chainId == cachedChainId) {
+            // Returns `address(0)` on failure or if contract does not exist.
+            (bool answered, uint256 word) = _erc6551OwnerOf(tokenContract, tokenId);
+            if (answered) result = address(uint160(word));
         }
     }
 
@@ -147,20 +144,14 @@ abstract contract ERC6551 is UUPSUpgradeable, Receiver, ERC1271 {
         returns (bytes4 result)
     {
         bool isValid = _isValidSigner(signer, bytes32(0), context);
-        /// @solidity memory-safe-assembly
-        assembly {
-            // `isValid ? bytes4(keccak256("isValidSigner(address,bytes)")) : 0x00000000`.
-            // We use `0x00000000` for invalid, in convention with the reference implementation.
-            result := shl(224, mul(0x523e3260, iszero(iszero(isValid))))
-        }
+        // `isValid ? bytes4(keccak256("isValidSigner(address,bytes)")) : 0x00000000`.
+        // We use `0x00000000` for invalid, in convention with the reference implementation.
+        result = isValid ? bytes4(0x523e3260) : bytes4(0);
     }
 
     /// @dev Returns empty calldata bytes.
     function _emptyContext() internal pure returns (bytes calldata context) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            context.length := 0
-        }
+        context = msg.data[:0];
     }
 
     /// @dev Requires that the caller is a valid signer (i.e. the owner).
@@ -175,25 +166,14 @@ abstract contract ERC6551 is UUPSUpgradeable, Receiver, ERC1271 {
 
     /// @dev Returns the current value of the state.
     function state() public view virtual returns (bytes32 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := sload(_ERC6551_STATE_SLOT)
-        }
+        result = bytes32(_erc6551Sload(_ERC6551_STATE_SLOT));
     }
 
     /// @dev Mutates the state. This function is required to be called in every
     /// public / external function that may modify storage or emit events.
     function _updateState() internal virtual {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let s := _ERC6551_STATE_SLOT
-            let m := mload(0x40)
-            mstore(m, sload(s))
-            mstore(add(0x20, m), 0x40)
-            mstore(add(0x40, m), calldatasize())
-            calldatacopy(add(0x60, m), 0x00, add(0x20, calldatasize()))
-            sstore(s, keccak256(m, and(add(0x7f, calldatasize()), not(0x1f))))
-        }
+        uint256 s = _ERC6551_STATE_SLOT;
+        _erc6551Sstore(s, uint256(keccak256(abi.encode(_erc6551Sload(s), msg.data))));
     }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -220,20 +200,7 @@ abstract contract ERC6551 is UUPSUpgradeable, Receiver, ERC1271 {
         returns (bytes memory result)
     {
         if (operation != 0) revert OperationNotSupported();
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := mload(0x40)
-            calldatacopy(result, data.offset, data.length)
-            if iszero(call(gas(), target, value, result, data.length, codesize(), 0x00)) {
-                // Bubble up the revert if the call reverts.
-                returndatacopy(result, 0x00, returndatasize())
-                revert(result, returndatasize())
-            }
-            mstore(result, returndatasize()) // Store the length.
-            let o := add(result, 0x20)
-            returndatacopy(o, 0x00, returndatasize()) // Copy the returndata.
-            mstore(0x40, add(o, returndatasize())) // Allocate the memory.
-        }
+        result = _erc6551Call(target, value, data);
         _updateState();
     }
 
@@ -250,31 +217,12 @@ abstract contract ERC6551 is UUPSUpgradeable, Receiver, ERC1271 {
         returns (bytes[] memory results)
     {
         if (operation != 0) revert OperationNotSupported();
-        /// @solidity memory-safe-assembly
-        assembly {
-            results := mload(0x40)
-            mstore(results, calls.length)
-            let r := add(0x20, results)
-            let m := add(r, shl(5, calls.length))
-            calldatacopy(r, calls.offset, shl(5, calls.length))
-            for { let end := m } iszero(eq(r, end)) { r := add(r, 0x20) } {
-                let e := add(calls.offset, mload(r))
-                let o := add(e, calldataload(add(e, 0x40)))
-                calldatacopy(m, add(o, 0x20), calldataload(o))
-                // forgefmt: disable-next-item
-                if iszero(call(gas(), calldataload(e), calldataload(add(e, 0x20)),
-                    m, calldataload(o), codesize(), 0x00)) {
-                    // Bubble up the revert if the call reverts.
-                    returndatacopy(m, 0x00, returndatasize())
-                    revert(m, returndatasize())
-                }
-                mstore(r, m) // Append `m` into `results`.
-                mstore(m, returndatasize()) // Store the length,
-                let p := add(m, 0x20)
-                returndatacopy(p, 0x00, returndatasize()) // and copy the returndata.
-                m := add(p, returndatasize()) // Advance `m`.
-            }
-            mstore(0x40, m) // Allocate the memory.
+        results = new bytes[](calls.length);
+        for (uint256 i; i < calls.length; ++i) {
+            Call calldata c = calls[i];
+            results[i] = _erc6551Call(
+                address(uint160(_erc6551Load(msg.data, _erc6551Offset(c)))), c.value, c.data
+            );
         }
         _updateState();
     }
@@ -287,12 +235,8 @@ abstract contract ERC6551 is UUPSUpgradeable, Receiver, ERC1271 {
     /// See: https://eips.ethereum.org/EIPS/eip-165
     /// This function call must use less than 30000 gas.
     function supportsInterface(bytes4 interfaceId) public view virtual returns (bool result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let s := shr(224, interfaceId)
-            // ERC165: 0x01ffc9a7, ERC6551: 0x6faff5f1, ERC6551Executable: 0x51945447.
-            result := or(or(eq(s, 0x01ffc9a7), eq(s, 0x6faff5f1)), eq(s, 0x51945447))
-        }
+        // ERC165: 0x01ffc9a7, ERC6551: 0x6faff5f1, ERC6551Executable: 0x51945447.
+        result = interfaceId == 0x01ffc9a7 || interfaceId == 0x6faff5f1 || interfaceId == 0x51945447;
     }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -302,36 +246,20 @@ abstract contract ERC6551 is UUPSUpgradeable, Receiver, ERC1271 {
     /// @dev Returns whether there is an ownership cycle.
     function _hasOwnershipCycle() internal view virtual returns (bool result) {
         uint256 cachedChainId = _cachedChainId;
-        /// @solidity memory-safe-assembly
-        assembly {
-            let m := mload(0x40) // Cache the free memory pointer.
-            extcodecopy(address(), 0x00, 0x4d, 0x60) // `(chainId, tokenContract, tokenId)`.
-            mstore(0x60, 0xfc0c546a) // `token()`.
-            for {} 1 {} {
-                let tokenContract := mload(0x20)
-                mstore(0x20, 0x6352211e) // `ownerOf(uint256)`.
-                let currentOwner :=
-                    mul( // `chainId == cachedChainId ? tokenContract.ownerOf(tokenId) : address(0)`.
-                        mload(0x20),
-                        and(
-                            and(gt(returndatasize(), 0x1f), eq(mload(0x00), cachedChainId)),
-                            staticcall(gas(), tokenContract, 0x3c, 0x24, 0x20, 0x20)
-                        )
-                    )
-                if iszero(eq(currentOwner, address())) {
-                    if iszero(
-                        and( // `(chainId, tokenContract, tokenId) = currentOwner.token()`.
-                            gt(returndatasize(), 0x5f),
-                            staticcall(gas(), currentOwner, 0x7c, 0x04, 0x00, 0x60)
-                        )
-                    ) { break }
-                    continue
-                }
-                result := 1
-                break
-            }
-            mstore(0x40, m) // Restore the free memory pointer.
-            mstore(0x60, 0) // Restore the zero pointer.
+        (uint256 chainId, uint256 tokenContract, uint256 tokenId) = _erc6551Footer();
+        bytes memory tokenCall = abi.encodeWithSelector(0xfc0c546a);
+        bytes memory tokenAnswer = new bytes(0x60);
+        while (true) {
+            // `chainId == cachedChainId ? tokenContract.ownerOf(tokenId) : address(0)`, where
+            // the call is made either way.
+            (bool answered, uint256 currentOwner) = _erc6551OwnerOf(tokenContract, tokenId);
+            if (!answered || chainId != cachedChainId) currentOwner = 0;
+            if (currentOwner == uint256(uint160(address(this)))) return true;
+            // `(chainId, tokenContract, tokenId) = currentOwner.token()`.
+            (bool success, uint256 answerSize) =
+                _erc6551StaticCallInto(address(uint160(currentOwner)), tokenCall, tokenAnswer);
+            if (!success || answerSize < 0x60) return false;
+            (chainId, tokenContract, tokenId) = abi.decode(tokenAnswer, (uint256, uint256, uint256));
         }
     }
 
@@ -354,14 +282,9 @@ abstract contract ERC6551 is UUPSUpgradeable, Receiver, ERC1271 {
     /// @dev Guards `_authorizeUpgrade` such that it must be used via an ERC6551Proxy.
     modifier onlyViaERC6551Proxy() virtual {
         address selfImplementation = _selfImplementation();
-        /// @solidity memory-safe-assembly
-        assembly {
-            extcodecopy(address(), 0x2c, 0x0a, 0x14) // Assumes the upper 20 bytes at 0x40 are zero.
-            // Revert if the implementation is the same as the self implementation.
-            if eq(mload(0x2c), shl(96, selfImplementation)) {
-                mstore(0x00, 0x9f03a026) // `UnauthorizedCallContext()`.
-                revert(0x1c, 0x04)
-            }
+        // Revert if the implementation is the same as the self implementation.
+        if (address(bytes20(_erc6551CodeWord(0x0a))) == selfImplementation) {
+            revert UnauthorizedCallContext();
         }
         _;
     }
@@ -377,27 +300,13 @@ abstract contract ERC6551 is UUPSUpgradeable, Receiver, ERC1271 {
         uint256 s = uint256(bytes32(msg.sig)) >> 224;
         // 0x150b7a02: `onERC721Received(address,address,uint256,bytes)`.
         if (s == 0x150b7a02) {
-            if (!_hasOwnershipCycle()) {
-                /// @solidity memory-safe-assembly
-                assembly {
-                    mstore(0x20, s) // Store `msg.sig`.
-                    return(0x3c, 0x20) // Return `msg.sig`.
-                }
-            }
-            /// @solidity memory-safe-assembly
-            assembly {
-                mstore(0x00, 0xaed146d3) // `SelfOwnDetected()`.
-                revert(0x1c, 0x04)
-            }
+            if (!_hasOwnershipCycle()) _erc6551ReturnWord(bytes32(msg.sig)); // Return `msg.sig`.
+            revert SelfOwnDetected();
         }
-        /// @solidity memory-safe-assembly
-        assembly {
-            // 0xf23a6e61: `onERC1155Received(address,address,uint256,uint256,bytes)`.
-            // 0xbc197c81: `onERC1155BatchReceived(address,address,uint256[],uint256[],bytes)`.
-            if or(eq(s, 0xf23a6e61), eq(s, 0xbc197c81)) {
-                mstore(0x20, s) // Store `msg.sig`.
-                return(0x3c, 0x20) // Return `msg.sig`.
-            }
+        // 0xf23a6e61: `onERC1155Received(address,address,uint256,uint256,bytes)`.
+        // 0xbc197c81: `onERC1155BatchReceived(address,address,uint256[],uint256[],bytes)`.
+        if (s == 0xf23a6e61 || s == 0xbc197c81) {
+            _erc6551ReturnWord(bytes32(msg.sig)); // Return `msg.sig`.
         }
         _;
     }
@@ -417,5 +326,175 @@ abstract contract ERC6551 is UUPSUpgradeable, Receiver, ERC1271 {
         } else {
             revert FnSelectorNotRecognized();
         }
+    }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      PRIVATE HELPERS                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev The chain ID, token contract and token ID words at the end of the account's code.
+    function _erc6551Footer()
+        private
+        view
+        returns (uint256 chainId, uint256 tokenContract, uint256 tokenId)
+    {
+        bytes memory footer = new bytes(0x60);
+        _erc6551CodeCopyInto(footer, 0, address(this), 0x4d, 0x60);
+        return abi.decode(footer, (uint256, uint256, uint256));
+    }
+
+    /// @dev Calls `target` with `data` and `value`, and returns its return data.
+    /// Reverts and bubbles up error if the call fails.
+    function _erc6551Call(address target, uint256 value, bytes calldata data)
+        private
+        returns (bytes memory result)
+    {
+        bool success;
+        (success, result) = target.call{value: value}(data);
+        if (!success) _erc6551RevertRaw(result);
+    }
+
+    /// @dev `tokenContract.ownerOf(tokenId)`: whether the call succeeded with a word at least,
+    /// and its first word.
+    function _erc6551OwnerOf(uint256 tokenContract, uint256 tokenId)
+        private
+        view
+        returns (bool answered, uint256 word)
+    {
+        // `ownerOf(uint256)`.
+        (bool success, uint256 answerSize, bytes32 first) = _erc6551StaticCallWord(
+            address(uint160(tokenContract)), abi.encodeWithSelector(0x6352211e, tokenId)
+        );
+        if (success && answerSize > 0x1f) return (true, uint256(first));
+    }
+
+    /// @dev The word at `offset` in `b`.
+    /// @custom:solar-inline
+    function _erc6551Load(bytes calldata b, uint256 offset) private pure returns (uint256) {
+        return uint256(bytes32(b[offset:offset + 0x20]));
+    }
+
+    /// @dev The word in storage slot `slot`. Solidity cannot name a slot it did not allocate.
+    /// @custom:solar-trusted
+    function _erc6551Sload(uint256 slot) private view returns (uint256 value) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            value := sload(slot)
+        }
+    }
+
+    /// @dev Stores `value` in storage slot `slot`.
+    /// @custom:solar-trusted
+    function _erc6551Sstore(uint256 slot, uint256 value) private {
+        /// @solidity memory-safe-assembly
+        assembly {
+            sstore(slot, value)
+        }
+    }
+
+    /// @dev Copies `count` bytes of `target`'s code from `start` into `dst` at `dstOffset`, with
+    /// zeros for the bytes past the end of the code. Solidity can only copy a whole account's code.
+    /// @custom:solar-trusted
+    function _erc6551CodeCopyInto(
+        bytes memory dst,
+        uint256 dstOffset,
+        address target,
+        uint256 start,
+        uint256 count
+    ) private view {
+        if (count > dst.length || dstOffset > dst.length - count) {
+            count = _erc6551OutOfBounds();
+        }
+        /// @solidity memory-safe-assembly
+        assembly {
+            extcodecopy(target, add(add(dst, 0x20), dstOffset), start, count)
+        }
+    }
+
+    /// @dev The 32 bytes of the account's code from `start`, with zeros past the end of the code,
+    /// read through the scratch space. Solidity can only copy a whole account's code.
+    /// @custom:solar-trusted
+    function _erc6551CodeWord(uint256 start) private view returns (bytes32 result) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            extcodecopy(address(), 0x00, start, 0x20)
+            result := mload(0x00)
+        }
+    }
+
+    /// @dev Static-calls `target` with `payload` and all the gas left, and copies at most
+    /// `out.length` bytes of the answer into `out`. `totalSize` is how many bytes there were.
+    /// @custom:solar-trusted
+    function _erc6551StaticCallInto(address target, bytes memory payload, bytes memory out)
+        private
+        view
+        returns (bool success, uint256 totalSize)
+    {
+        /// @solidity memory-safe-assembly
+        assembly {
+            success := staticcall(
+                gas(),
+                target,
+                add(payload, 0x20),
+                mload(payload),
+                add(out, 0x20),
+                mload(out)
+            )
+            totalSize := returndatasize()
+        }
+    }
+
+    /// @dev Static-calls `target` with `payload` and all the gas left, and returns the size and
+    /// the first word of the answer, read through the scratch space; past the size, the word
+    /// holds what the scratch space held.
+    /// @custom:solar-trusted
+    function _erc6551StaticCallWord(address target, bytes memory payload)
+        private
+        view
+        returns (bool success, uint256 totalSize, bytes32 first)
+    {
+        /// @solidity memory-safe-assembly
+        assembly {
+            success := staticcall(gas(), target, add(payload, 0x20), mload(payload), 0x00, 0x20)
+            totalSize := returndatasize()
+            first := mload(0x00)
+        }
+    }
+
+    /// @dev The calldata offset at which `c` starts, where its `target` word lies. Solidity
+    /// cannot read where a calldata struct lies, nor read an address word without checking it is
+    /// clean.
+    /// @custom:solar-trusted
+    function _erc6551Offset(Call calldata c) private pure returns (uint256 o) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            o := c
+        }
+    }
+
+    /// @dev Reverts the current call with exactly `data`.
+    /// @custom:solar-trusted
+    function _erc6551RevertRaw(bytes memory data) private pure {
+        /// @solidity memory-safe-assembly
+        assembly {
+            revert(add(data, 0x20), mload(data))
+        }
+    }
+
+    /// @dev Ends the call, returning `word` as its whole return data. Solidity returns data only
+    /// from a function that declares it.
+    /// @custom:solar-trusted
+    function _erc6551ReturnWord(bytes32 word) private pure {
+        /// @solidity memory-safe-assembly
+        assembly {
+            mstore(0x00, word)
+            return(0x00, 0x20)
+        }
+    }
+
+    /// @dev Raises the `Panic(0x32)` an out-of-range index raises, which is the
+    /// portable spelling of a failed range check.
+    function _erc6551OutOfBounds() private pure returns (uint256) {
+        return new uint256[](0)[0];
     }
 }
