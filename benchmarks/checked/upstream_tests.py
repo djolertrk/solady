@@ -94,6 +94,10 @@ LIBRARIES = [
     "EIP712",
     "accounts/ERC1271",
     "accounts/ERC4337Factory",
+    "P256",
+    "WebAuthn",
+    "MerkleTreeLib",
+    "GasBurnerLib",
 ]
 
 
@@ -164,12 +168,19 @@ def run(args):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(source["content"])
                 hashes[name] = digest(source["content"].encode())
+        # Test data the suites read, such as P256's Wycheproof vectors, as the pinned
+        # release has it.
+        for data in sorted((ROOT / "test/data").glob("*")):
+            target = folder / "test/data" / data.name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data.read_bytes())
         (folder / "foundry.toml").write_text(
             '[profile.default]\nsrc = "src"\ntest = "test"\nlibs = []\n'
             'evm_version = "cancun"\noptimizer = true\noptimizer_runs = 200\n'
             f'via_ir = {"false" if args.legacy else "true"}\nbytecode_hash = "none"\n'
             'cbor_metadata = false\n'
             'gas_limit = 100000000\nremappings = ["forge-std/=test/utils/forge-std/"]\n'
+            'fs_permissions = [{ access = "read", path = "./test/data" }]\n'
             f'[profile.default.fuzz]\nruns = {args.fuzz_runs}\nseed = "0x20260910"\n'
         )
         env = os.environ.copy()
