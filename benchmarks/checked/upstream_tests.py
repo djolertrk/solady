@@ -7,9 +7,11 @@
 
 Original test helpers remain test oracles, including their assembly. Only the
 selected production sources are replaced in the safe legs, which also receive
-the compiler's core modules. A library is named by its path below `src/`, or by
-its bare name for `src/utils/`; its suite is `test/<name>.t.sol`. This is an
-additional correctness check, not the gas benchmark or safety audit.
+the compiler's core modules; `--ported` also replaces every other ported source
+the suites import. A library is named by its path below `src/`, or by
+its bare name for `src/utils/`; its suite is `test/<name>.t.sol` unless
+`SUITES` names another. This is an additional correctness check, not the gas
+benchmark or safety audit.
 """
 
 import argparse
@@ -61,12 +63,22 @@ LIBRARIES = [
 ]
 
 
+# Suites not named after the library they test.
+SUITES = {
+    "RedBlackTreeLib": "test/RedBlackTree.t.sol",
+    "ERC1967FactoryConstants": "test/ERC1967Factory.t.sol",
+    "accounts/ERC6551Proxy": "test/ERC6551.t.sol",
+    "utils/legacy/CWIA": "test/LibCWIA.t.sol",
+    "utils/ext/delegatexyz/DelegateCheckerLib": "test/ext/delegatexyz/DelegateCheckerLib.t.sol",
+}
+
+
 def source_path(library):
     return f"src/{library}.sol" if "/" in library else f"src/utils/{library}.sol"
 
 
 def test_path(library):
-    return f"test/{library.rsplit('/', 1)[-1]}.t.sol"
+    return SUITES.get(library, f"test/{library.rsplit('/', 1)[-1]}.t.sol")
 
 
 def run(args):
@@ -74,8 +86,16 @@ def run(args):
     output.mkdir(parents=True, exist_ok=False)
     libraries = args.library or LIBRARIES
     archive = json.loads(gzip.decompress(ARCHIVE.read_bytes()))
-    sources = closure(archive["sources"], [test_path(name) for name in libraries])
+    sources = closure(archive["sources"], sorted({test_path(name) for name in libraries}))
     replaced = {source_path(name) for name in libraries}
+    if args.ported:
+        replaced |= {
+            name
+            for name in sources
+            if name.startswith("src/")
+            and (ROOT / name).exists()
+            and "@custom:solar-safe" in (ROOT / name).read_text()
+        }
     results = {}
     for label, compiler, safe in [
         ("solc-upstream", args.solc, False),
@@ -102,7 +122,8 @@ def run(args):
         (folder / "foundry.toml").write_text(
             '[profile.default]\nsrc = "src"\ntest = "test"\nlibs = []\n'
             'evm_version = "cancun"\noptimizer = true\noptimizer_runs = 200\n'
-            'via_ir = true\nbytecode_hash = "none"\ncbor_metadata = false\n'
+            f'via_ir = {"false" if args.legacy else "true"}\nbytecode_hash = "none"\n'
+            'cbor_metadata = false\n'
             'gas_limit = 100000000\nremappings = ["forge-std/=test/utils/forge-std/"]\n'
             f'[profile.default.fuzz]\nruns = {args.fuzz_runs}\nseed = "0x20260910"\n'
         )
@@ -171,5 +192,13 @@ if __name__ == "__main__":
     )
     parser.add_argument("--core-modules", type=Path, default=DEFAULT_CORE_MODULES)
     parser.add_argument("--fuzz-runs", type=int, default=256)
+    parser.add_argument(
+        "--legacy", action="store_true", help="build solc's legs without via-IR"
+    )
+    parser.add_argument(
+        "--ported",
+        action="store_true",
+        help="also swap in every other ported source the suites import",
+    )
     parser.add_argument("--output", type=Path, required=True)
     raise SystemExit(run(parser.parse_args()))
