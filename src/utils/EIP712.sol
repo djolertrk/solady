@@ -12,6 +12,11 @@ pragma solidity ^0.8.4;
 /// - Does NOT use any EIP-712 extensions.
 /// This is for simplicity and to save gas.
 /// If you need to customize, please fork / modify accordingly.
+///
+/// The checked port hashes the domain separators and digests with `keccak256` of
+/// `abi.encode` and `abi.encodePacked`, which lay out the words and the "\x19\x01" prefix
+/// the assembly writes, so it needs no trusted helpers.
+/// @custom:solar-safe memory arithmetic
 abstract contract EIP712 {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                  CONSTANTS AND IMMUTABLES                  */
@@ -65,16 +70,9 @@ abstract contract EIP712 {
 
         bytes32 separator;
         if (!_domainNameAndVersionMayChange()) {
-            /// @solidity memory-safe-assembly
-            assembly {
-                let m := mload(0x40) // Load the free memory pointer.
-                mstore(m, _DOMAIN_TYPEHASH)
-                mstore(add(m, 0x20), nameHash)
-                mstore(add(m, 0x40), versionHash)
-                mstore(add(m, 0x60), chainid())
-                mstore(add(m, 0x80), address())
-                separator := keccak256(m, 0xa0)
-            }
+            separator = keccak256(
+                abi.encode(_DOMAIN_TYPEHASH, nameHash, versionHash, block.chainid, address(this))
+            );
         }
         _cachedDomainSeparator = separator;
     }
@@ -144,16 +142,8 @@ abstract contract EIP712 {
             digest = _cachedDomainSeparator;
             if (_cachedDomainSeparatorInvalidated()) digest = _buildDomainSeparator();
         }
-        /// @solidity memory-safe-assembly
-        assembly {
-            // Compute the digest.
-            mstore(0x00, 0x1901000000000000) // Store "\x19\x01".
-            mstore(0x1a, digest) // Store the domain separator.
-            mstore(0x3a, structHash) // Store the struct hash.
-            digest := keccak256(0x18, 0x42)
-            // Restore the part of the free memory slot that was overwritten.
-            mstore(0x3a, 0)
-        }
+        // Compute the digest.
+        digest = keccak256(abi.encodePacked(hex"1901", digest, structHash));
     }
 
     /// @dev Variant of `_hashTypedData` that excludes the chain ID.
@@ -165,21 +155,16 @@ abstract contract EIP712 {
         returns (bytes32 digest)
     {
         (string memory name, string memory version) = _domainNameAndVersion();
-        /// @solidity memory-safe-assembly
-        assembly {
-            let m := mload(0x40) // Load the free memory pointer.
-            mstore(0x00, _DOMAIN_TYPEHASH_SANS_CHAIN_ID)
-            mstore(0x20, keccak256(add(name, 0x20), mload(name)))
-            mstore(0x40, keccak256(add(version, 0x20), mload(version)))
-            mstore(0x60, address())
-            // Compute the digest.
-            mstore(0x20, keccak256(0x00, 0x80)) // Store the domain separator.
-            mstore(0x00, 0x1901) // Store "\x19\x01".
-            mstore(0x40, structHash) // Store the struct hash.
-            digest := keccak256(0x1e, 0x42)
-            mstore(0x40, m) // Restore the free memory pointer.
-            mstore(0x60, 0) // Restore the zero pointer.
-        }
+        bytes32 separator = keccak256(
+            abi.encode(
+                _DOMAIN_TYPEHASH_SANS_CHAIN_ID,
+                keccak256(bytes(name)),
+                keccak256(bytes(version)),
+                address(this)
+            )
+        );
+        // Compute the digest.
+        digest = keccak256(abi.encodePacked(hex"1901", separator, structHash));
     }
 
     /// @dev Variant of `_hashTypedData` that excludes the chain ID and verifying contract.
@@ -191,20 +176,15 @@ abstract contract EIP712 {
         returns (bytes32 digest)
     {
         (string memory name, string memory version) = _domainNameAndVersion();
-        /// @solidity memory-safe-assembly
-        assembly {
-            let m := mload(0x40) // Load the free memory pointer.
-            mstore(0x00, _DOMAIN_TYPEHASH_SANS_CHAIN_ID_AND_VERIFYING_CONTRACT)
-            mstore(0x20, keccak256(add(name, 0x20), mload(name)))
-            mstore(0x40, keccak256(add(version, 0x20), mload(version)))
-            // Compute the digest.
-            mstore(0x20, keccak256(0x00, 0x60)) // Store the domain separator.
-            mstore(0x00, 0x1901) // Store "\x19\x01".
-            mstore(0x40, structHash) // Store the struct hash.
-            digest := keccak256(0x1e, 0x42)
-            mstore(0x40, m) // Restore the free memory pointer.
-            mstore(0x60, 0) // Restore the zero pointer.
-        }
+        bytes32 separator = keccak256(
+            abi.encode(
+                _DOMAIN_TYPEHASH_SANS_CHAIN_ID_AND_VERIFYING_CONTRACT,
+                keccak256(bytes(name)),
+                keccak256(bytes(version))
+            )
+        );
+        // Compute the digest.
+        digest = keccak256(abi.encodePacked(hex"1901", separator, structHash));
     }
 
     /// @dev Variant of `_hashTypedData` that excludes the chain ID and verifying contract.
@@ -216,21 +196,16 @@ abstract contract EIP712 {
         returns (bytes32 digest)
     {
         (string memory name, string memory version) = _domainNameAndVersion();
-        /// @solidity memory-safe-assembly
-        assembly {
-            let m := mload(0x40) // Load the free memory pointer.
-            mstore(0x00, _DOMAIN_TYPEHASH_SANS_VERIFYING_CONTRACT)
-            mstore(0x20, keccak256(add(name, 0x20), mload(name)))
-            mstore(0x40, keccak256(add(version, 0x20), mload(version)))
-            mstore(0x60, chainid())
-            // Compute the digest.
-            mstore(0x20, keccak256(0x00, 0x80)) // Store the domain separator.
-            mstore(0x00, 0x1901) // Store "\x19\x01".
-            mstore(0x40, structHash) // Store the struct hash.
-            digest := keccak256(0x1e, 0x42)
-            mstore(0x40, m) // Restore the free memory pointer.
-            mstore(0x60, 0) // Restore the zero pointer.
-        }
+        bytes32 separator = keccak256(
+            abi.encode(
+                _DOMAIN_TYPEHASH_SANS_VERIFYING_CONTRACT,
+                keccak256(bytes(name)),
+                keccak256(bytes(version)),
+                block.chainid
+            )
+        );
+        // Compute the digest.
+        digest = keccak256(abi.encodePacked(hex"1901", separator, structHash));
     }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -276,25 +251,21 @@ abstract contract EIP712 {
             separator = _cachedNameHash;
             versionHash = _cachedVersionHash;
         }
-        /// @solidity memory-safe-assembly
-        assembly {
-            let m := mload(0x40) // Load the free memory pointer.
-            mstore(m, _DOMAIN_TYPEHASH)
-            mstore(add(m, 0x20), separator) // Name hash.
-            mstore(add(m, 0x40), versionHash)
-            mstore(add(m, 0x60), chainid())
-            mstore(add(m, 0x80), address())
-            separator := keccak256(m, 0xa0)
-        }
+        separator = keccak256(
+            abi.encode(
+                _DOMAIN_TYPEHASH,
+                separator, // Name hash.
+                versionHash,
+                block.chainid,
+                address(this)
+            )
+        );
     }
 
     /// @dev Returns if the cached domain separator has been invalidated.
     function _cachedDomainSeparatorInvalidated() private view returns (bool result) {
         uint256 cachedChainId = _cachedChainId;
         uint256 cachedThis = _cachedThis;
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := iszero(and(eq(chainid(), cachedChainId), eq(address(), cachedThis)))
-        }
+        result = block.chainid != cachedChainId || uint256(uint160(address(this))) != cachedThis;
     }
 }
