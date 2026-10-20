@@ -5,6 +5,13 @@ pragma solidity ^0.8.4;
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/utils/CREATE3.sol)
 /// @author Modified from Solmate (https://github.com/transmissions11/solmate/blob/main/src/utils/CREATE3.sol)
 /// @author Modified from 0xSequence (https://github.com/0xSequence/create3/blob/master/contracts/Create3.sol)
+/// @dev The checked port creates the proxy from the sixteen bytes of `_PROXY_INITCODE` with
+/// the trusted `_createDeploy2`, which fails with `DeploymentFailed()` as the assembly does,
+/// and calls it with `initCode` and `value` through a plain call. Both addresses are derived in
+/// Solidity, as hashes of `abi.encodePacked` bytes: the proxy's from the CREATE2 preimage, and
+/// the deployment's from the RLP encoding of the proxy's address and its nonce, one. The
+/// returned addresses are clean, where upstream leaves their upper 96 bits dirty.
+/// @custom:solar-safe memory arithmetic
 library CREATE3 {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                        CUSTOM ERRORS                       */
@@ -71,30 +78,12 @@ library CREATE3 {
         internal
         returns (address deployed)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x00, _PROXY_INITCODE) // Store the `_PROXY_INITCODE`.
-            let proxy := create2(0, 0x10, 0x10, salt)
-            if iszero(proxy) {
-                mstore(0x00, 0x30116425) // `DeploymentFailed()`.
-                revert(0x1c, 0x04)
-            }
-            mstore(0x14, proxy) // Store the proxy's address.
-            // 0xd6 = 0xc0 (short RLP prefix) + 0x16 (length of: 0x94 ++ proxy ++ 0x01).
-            // 0x94 = 0x80 + 0x14 (0x14 = the length of an address, 20 bytes, in hex).
-            mstore(0x00, 0xd694)
-            mstore8(0x34, 0x01) // Nonce of the proxy contract (1).
-            deployed := keccak256(0x1e, 0x17)
-            if iszero(
-                mul( // The arguments of `mul` are evaluated last to first.
-                    extcodesize(deployed),
-                    call(gas(), proxy, value, add(initCode, 0x20), mload(initCode), 0x00, 0x00)
-                )
-            ) {
-                mstore(0x00, 0x30116425) // `DeploymentFailed()`.
-                revert(0x1c, 0x04)
-            }
-        }
+        // The proxy's initialization code is the low sixteen bytes of `_PROXY_INITCODE`.
+        address proxy = _createDeploy2(abi.encodePacked(uint128(_PROXY_INITCODE)), salt, 0);
+        deployed = _proxyDeployment(proxy);
+        // The proxy creates a contract from its calldata and returns nothing.
+        (bool success,) = proxy.call{value: value}(initCode);
+        if (!success || deployed.code.length == 0) revert DeploymentFailed();
     }
 
     /// @dev Returns the deterministic address for `salt`.
@@ -108,21 +97,46 @@ library CREATE3 {
         pure
         returns (address deployed)
     {
+        deployed = _proxyDeployment(_createPredict2(deployer, salt, PROXY_INITCODE_HASH));
+    }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      PRIVATE HELPERS                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev The address a CREATE3 proxy's one deployment gets: its first
+    /// CREATE, at nonce one.
+    function _proxyDeployment(address proxy) private pure returns (address) {
+        // 0xd6 = 0xc0 (short RLP prefix) + 0x16 (length of: 0x94 ++ proxy ++ 0x01).
+        // 0x94 = 0x80 + 0x14 (0x14 = the length of an address, 20 bytes, in hex).
+        return address(uint160(uint256(keccak256(abi.encodePacked(hex"d694", proxy, hex"01")))));
+    }
+
+    /// @dev The address `deploy2` gives `deployer` for `salt` and initcode
+    /// hashing to `initcodeHash`. Computes only; deploys nothing.
+    function _createPredict2(address deployer, bytes32 salt, bytes32 initcodeHash)
+        private
+        pure
+        returns (address)
+    {
+        return address(
+            uint160(
+                uint256(keccak256(abi.encodePacked(bytes1(0xff), deployer, salt, initcodeHash)))
+            )
+        );
+    }
+
+    /// @dev Deploys `initcode` with `value` wei at the address `salt` selects.
+    /// Solidity creates contracts only from their source.
+    /// @custom:solar-trusted
+    function _createDeploy2(bytes memory initcode, bytes32 salt, uint256 value)
+        private
+        returns (address deployed)
+    {
         /// @solidity memory-safe-assembly
         assembly {
-            let m := mload(0x40) // Cache the free memory pointer.
-            mstore(0x00, deployer) // Store `deployer`.
-            mstore8(0x0b, 0xff) // Store the prefix.
-            mstore(0x20, salt) // Store the salt.
-            mstore(0x40, PROXY_INITCODE_HASH) // Store the bytecode hash.
-
-            mstore(0x14, keccak256(0x0b, 0x55)) // Store the proxy's address.
-            mstore(0x40, m) // Restore the free memory pointer.
-            // 0xd6 = 0xc0 (short RLP prefix) + 0x16 (length of: 0x94 ++ proxy ++ 0x01).
-            // 0x94 = 0x80 + 0x14 (0x14 = the length of an address, 20 bytes, in hex).
-            mstore(0x00, 0xd694)
-            mstore8(0x34, 0x01) // Nonce of the proxy contract (1).
-            deployed := keccak256(0x1e, 0x17)
+            deployed := create2(value, add(initcode, 0x20), mload(initcode), salt)
         }
+        if (deployed == address(0)) revert DeploymentFailed();
     }
 }
