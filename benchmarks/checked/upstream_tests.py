@@ -47,6 +47,7 @@ LIBRARIES = [
     "FixedPointMathLib",
     "tokens/ERC20",
     "tokens/WETH",
+    "tokens/ERC4626",
     "auth/Ownable",
     "auth/OwnableRoles",
 ]

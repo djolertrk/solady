@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.4;
+pragma solidity ^0.8.20;
 
 import {ERC20} from "./ERC20.sol";
 import {FixedPointMathLib} from "../utils/FixedPointMathLib.sol";
@@ -9,6 +9,12 @@ import {SafeTransferLib} from "../utils/SafeTransferLib.sol";
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/tokens/ERC4626.sol)
 /// @author Modified from Solmate (https://github.com/transmissions11/solmate/blob/main/src/mixins/ERC4626.sol)
 /// @author Modified from OpenZeppelin (https://github.com/OpenZeppelin/openzeppelin-contracts/blob/master/contracts/token/ERC20/extensions/ERC4626.sol)
+/// @dev The checked port converts, limits and moves as the assembly does, with the
+/// same custom errors and events. The asset's `decimals()` answer is read with a
+/// plain static call. The denominators that add one to the total assets or supply
+/// wrap to zero through `FixedPointMathLib.rawAdd`, as upstream's `_inc` does, so
+/// the full-precision division reports the overflow with its own error.
+/// @custom:solar-safe memory arithmetic
 abstract contract ERC4626 is ERC20 {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                         CONSTANTS                          */
@@ -51,14 +57,6 @@ abstract contract ERC4626 is ERC20 {
         uint256 assets,
         uint256 shares
     );
-
-    /// @dev `keccak256(bytes("Deposit(address,address,uint256,uint256)"))`.
-    uint256 private constant _DEPOSIT_EVENT_SIGNATURE =
-        0xdcbc1c05240f31ff3ad067ef1ee35ce4997762752e3a095284754544f4c709d7;
-
-    /// @dev `keccak256(bytes("Withdraw(address,address,address,uint256,uint256)"))`.
-    uint256 private constant _WITHDRAW_EVENT_SIGNATURE =
-        0xfbde797d201c681b91056529119e0b02407c7bb96a4a2c75c01fc9667232c8db;
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                     ERC4626 CONSTANTS                      */
@@ -124,18 +122,12 @@ abstract contract ERC4626 is ERC20 {
         view
         returns (bool success, uint8 result)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            // Store the function selector of `decimals()`.
-            mstore(0x00, 0x313ce567)
-            // Arguments are evaluated last to first.
-            success := and(
-                // Returned value is less than 256, at left-padded to 32 bytes.
-                and(lt(mload(0x00), 0x100), gt(returndatasize(), 0x1f)),
-                // The staticcall succeeds.
-                staticcall(gas(), underlying, 0x1c, 0x04, 0x00, 0x20)
-            )
-            result := mul(mload(0x00), success)
+        // The call succeeds, and answers with a word whose value is less than 256.
+        (bool answered, bytes memory answer) =
+            underlying.staticcall(abi.encodeWithSelector(0x313ce567));
+        if (answered && answer.length >= 32) {
+            uint256 word = abi.decode(answer, (uint256));
+            if (word < 0x100) (success, result) = (true, uint8(word));
         }
     }
 
@@ -296,10 +288,7 @@ abstract contract ERC4626 is ERC20 {
 
     /// @dev Private helper to return if either value is zero.
     function _eitherIsZero(uint256 a, uint256 b) private pure returns (bool result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := or(iszero(a), iszero(b))
-        }
+        result = a == 0 || b == 0;
     }
 
     /// @dev Private helper to return `x + 1` without the overflow check.
@@ -307,9 +296,7 @@ abstract contract ERC4626 is ERC20 {
     /// When `x == type(uint256).max`, we get `x + 1 == 0` (mod 2**256 - 1),
     /// and `FixedPointMathLib.fullMulDiv` will revert as the denominator is zero.
     function _inc(uint256 x) private pure returns (uint256) {
-        unchecked {
-            return x + 1;
-        }
+        return FixedPointMathLib.rawAdd(x, 1);
     }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -373,7 +360,7 @@ abstract contract ERC4626 is ERC20 {
     /// Note: Most implementations will require pre-approval of the Vault with the
     /// Vault's underlying `asset` token.
     function deposit(uint256 assets, address to) public virtual returns (uint256 shares) {
-        if (assets > maxDeposit(to)) _revert(0xb3c61a83); // `DepositMoreThanMax()`.
+        if (assets > maxDeposit(to)) revert DepositMoreThanMax();
         shares = previewDeposit(assets);
         _deposit(msg.sender, to, assets, shares);
     }
@@ -390,7 +377,7 @@ abstract contract ERC4626 is ERC20 {
     /// Note: Most implementations will require pre-approval of the Vault with the
     /// Vault's underlying `asset` token.
     function mint(uint256 shares, address to) public virtual returns (uint256 assets) {
-        if (shares > maxMint(to)) _revert(0x6a695959); // `MintMoreThanMax()`.
+        if (shares > maxMint(to)) revert MintMoreThanMax();
         assets = previewMint(shares);
         _deposit(msg.sender, to, assets, shares);
     }
@@ -410,7 +397,7 @@ abstract contract ERC4626 is ERC20 {
         virtual
         returns (uint256 shares)
     {
-        if (assets > maxWithdraw(owner)) _revert(0x936941fc); // `WithdrawMoreThanMax()`.
+        if (assets > maxWithdraw(owner)) revert WithdrawMoreThanMax();
         shares = previewWithdraw(assets);
         _withdraw(msg.sender, to, owner, assets, shares);
     }
@@ -430,18 +417,9 @@ abstract contract ERC4626 is ERC20 {
         virtual
         returns (uint256 assets)
     {
-        if (shares > maxRedeem(owner)) _revert(0x4656425a); // `RedeemMoreThanMax()`.
+        if (shares > maxRedeem(owner)) revert RedeemMoreThanMax();
         assets = previewRedeem(shares);
         _withdraw(msg.sender, to, owner, assets, shares);
-    }
-
-    /// @dev Internal helper for reverting efficiently.
-    function _revert(uint256 s) private pure {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x00, s)
-            revert(0x1c, 0x04)
-        }
     }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -454,14 +432,7 @@ abstract contract ERC4626 is ERC20 {
     function _deposit(address by, address to, uint256 assets, uint256 shares) internal virtual {
         SafeTransferLib.safeTransferFrom(asset(), by, address(this), assets);
         _mint(to, shares);
-        /// @solidity memory-safe-assembly
-        assembly {
-            // Emit the {Deposit} event.
-            mstore(0x00, assets)
-            mstore(0x20, shares)
-            let m := shr(96, not(0))
-            log3(0x00, 0x40, _DEPOSIT_EVENT_SIGNATURE, and(m, by), and(m, to))
-        }
+        emit Deposit(by, to, assets, shares);
         _afterDeposit(assets, shares);
     }
 
@@ -476,14 +447,7 @@ abstract contract ERC4626 is ERC20 {
         _beforeWithdraw(assets, shares);
         _burn(owner, shares);
         SafeTransferLib.safeTransfer(asset(), to, assets);
-        /// @solidity memory-safe-assembly
-        assembly {
-            // Emit the {Withdraw} event.
-            mstore(0x00, assets)
-            mstore(0x20, shares)
-            let m := shr(96, not(0))
-            log4(0x00, 0x40, _WITHDRAW_EVENT_SIGNATURE, and(m, by), and(m, to), and(m, owner))
-        }
+        emit Withdraw(by, to, owner, assets, shares);
     }
 
     /// @dev Internal conversion function (from assets to shares) to apply when the Vault is empty.
