@@ -45,6 +45,7 @@ LIBRARIES = [
     "DateTimeLib",
     "LibPRNG",
     "FixedPointMathLib",
+    "EnumerableSetLib",
     "tokens/ERC20",
     "tokens/WETH",
     "tokens/ERC4626",
