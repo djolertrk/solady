@@ -278,6 +278,10 @@ def dispatch_gas(logs, code: bytes, selector: bytes) -> int | None:
     return None
 
 
+# The most word arguments a harness wrapper can take; see `prepare`.
+MAX_WRAPPER_PARAMS = 12
+
+
 def wrapper_name(library: str, signature: str) -> str:
     """Names an API's harness wrapper after the API alone.
 
@@ -397,7 +401,13 @@ def prepare(
             returns = [row["params"][i] for i in row["observed"]]
         row["outputs"] = [t for t, _ in returns]
         row["wrapper_returns"] = returns
-    harness_apis = select_harness_apis(apis, api_filters, isolate)
+    # solc's legacy pipeline cannot keep more than twelve word arguments on its
+    # stack while it encodes a call, so no leg could compile a wrapper for them.
+    harness_apis = [
+        row
+        for row in select_harness_apis(apis, api_filters, isolate)
+        if len(row["wrapper_params"]) <= MAX_WRAPPER_PARAMS
+    ]
     # Files the port adds have no upstream counterpart, so the shared harness
     # cannot import them by name: the upstream leg would not resolve the path.
     # The safe leg still reaches them through the libraries that use them.
@@ -577,9 +587,10 @@ def test_vectors(row, rng):
                 yield [n], [[bytes(32)] * n]
             return
         if name == "free":
-            for n in [0, 1, 8]:
-                buffer = [rng.getrandbits(256).to_bytes(32, "big") for _ in range(n)]
-                yield [buffer], [buffer]
+            # Freeing hands a buffer's memory back, where the wrapper then
+            # encodes its result; only the empty buffer, which `free` leaves
+            # in place, can be returned afterwards.
+            yield [[]], [[]]
             return
         if name == "eq":
             for b in blobs + [bytes(32), bytes([7]) * 32]:

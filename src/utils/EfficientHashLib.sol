@@ -155,6 +155,30 @@ library EfficientHashLib {
     ) internal pure returns (bytes32) {
         return keccak256(abi.encode(v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11));
     }
+    /// @dev `keccak256` of the 13 words.
+    function hash(
+        bytes32 v0, bytes32 v1, bytes32 v2, bytes32 v3, bytes32 v4, bytes32 v5, bytes32 v6, bytes32 v7, bytes32 v8, bytes32 v9, bytes32 v10, bytes32 v11, bytes32 v12
+    ) internal pure returns (bytes32) {
+        return keccak256(abi.encode(v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12));
+    }
+    /// @dev `keccak256` of the 13 words.
+    function hash(
+        uint256 v0, uint256 v1, uint256 v2, uint256 v3, uint256 v4, uint256 v5, uint256 v6, uint256 v7, uint256 v8, uint256 v9, uint256 v10, uint256 v11, uint256 v12
+    ) internal pure returns (bytes32) {
+        return keccak256(abi.encode(v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12));
+    }
+    /// @dev `keccak256` of the 14 words.
+    function hash(
+        bytes32 v0, bytes32 v1, bytes32 v2, bytes32 v3, bytes32 v4, bytes32 v5, bytes32 v6, bytes32 v7, bytes32 v8, bytes32 v9, bytes32 v10, bytes32 v11, bytes32 v12, bytes32 v13
+    ) internal pure returns (bytes32) {
+        return keccak256(abi.encode(v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13));
+    }
+    /// @dev `keccak256` of the 14 words.
+    function hash(
+        uint256 v0, uint256 v1, uint256 v2, uint256 v3, uint256 v4, uint256 v5, uint256 v6, uint256 v7, uint256 v8, uint256 v9, uint256 v10, uint256 v11, uint256 v12, uint256 v13
+    ) internal pure returns (bytes32) {
+        return keccak256(abi.encode(v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13));
+    }
     /// @dev Sets `buffer[i]`, returning the buffer so calls chain.
     function set(bytes32[] memory buffer, uint256 i, bytes32 value)
         internal
@@ -185,8 +209,17 @@ library EfficientHashLib {
         return new bytes32[](n);
     }
 
-    /// @dev Kept for API compatibility. Reclaiming memory is the compiler's.
-    function free(bytes32[] memory buffer) internal pure {}
+    /// @dev Frees memory that has been allocated for `buffer`.
+    /// No-op if `buffer.length` is zero, or if new memory has been allocated after `buffer`.
+    /// Solidity cannot move the free memory pointer, so this keeps the upstream assembly.
+    /// @custom:solar-trusted
+    function free(bytes32[] memory buffer) internal pure {
+        /// @solidity memory-safe-assembly
+        assembly {
+            let n := mload(buffer)
+            mstore(shl(6, lt(iszero(n), eq(add(shl(5, add(1, n)), buffer), mload(0x40)))), buffer)
+        }
+    }
 
     /// @dev Whether `b` is exactly the 32 bytes of `a`.
     function eq(bytes32 a, bytes memory b) internal pure returns (bool) {

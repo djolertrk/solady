@@ -29,7 +29,6 @@ from benchmark import (
     digest,
 )
 
-# EfficientHashLib's suite checks that `free` moves the free-memory pointer back.
 LIBRARIES = [
     "SafeCastLib",
     "LibBit",
@@ -37,6 +36,7 @@ LIBRARIES = [
     "ECDSA",
     "SignatureCheckerLib",
     "MerkleProofLib",
+    "EfficientHashLib",
     "tokens/ERC20",
 ]
 
