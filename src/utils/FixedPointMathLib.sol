@@ -427,6 +427,7 @@ library FixedPointMathLib {
     /// @dev Calculates `floor(x * y / d)` with full precision.
     /// Behavior is undefined if `d` is zero or the final result cannot fit in 256 bits.
     /// Performs the full 512 bit calculation regardless.
+    /// @custom:solar-inline
     function fullMulDivUnchecked(uint256 x, uint256 y, uint256 d)
         internal
         pure
@@ -606,6 +607,7 @@ library FixedPointMathLib {
     }
 
     /// @dev Returns the square root of `x`, rounded down.
+    /// @custom:solar-inline
     function sqrt(uint256 x) internal pure returns (uint256 z) {
         // `floor(sqrt(2**15)) = 181`. `sqrt(2**15) - 181 = 2.84`.
         z = 181; // The "correct" value is 1, but this saves a multiplication later.
@@ -662,6 +664,7 @@ library FixedPointMathLib {
     /// https://github.com/pcaversaccio/snekmate/blob/main/src/snekmate/utils/math.vy
     /// Formally verified by xuwinnie:
     /// https://github.com/vectorized/solady/blob/main/audits/xuwinnie-solady-cbrt-proof.pdf
+    /// @custom:solar-inline
     function cbrt(uint256 x) internal pure returns (uint256 z) {
         uint256 r = _msbByte(x);
         // Makeshift lookup table to nudge the approximate log2 result.
