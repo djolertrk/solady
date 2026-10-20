@@ -14,6 +14,11 @@ import {LibClone} from "../utils/LibClone.sol";
 ///   Upgrading must be done via UUPS logic on the accounts themselves.
 /// - The ERC4337 standard expects the factory to use deterministic deployment.
 ///   As such, this factory does not include any non-deterministic deployment methods.
+///
+/// The checked port initializes a new account with an ordinary call and bubbles a failed
+/// call's revert data with a trusted helper, named with an `_erc4337Factory` prefix so that a
+/// contract can inherit this alongside other ports.
+/// @custom:solar-safe memory arithmetic
 contract ERC4337Factory {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                         IMMUTABLES                         */
@@ -44,15 +49,10 @@ contract ERC4337Factory {
             LibClone.createDeterministicERC1967(msg.value, implementation, ownSalt);
 
         if (!alreadyDeployed) {
-            /// @solidity memory-safe-assembly
-            assembly {
-                mstore(0x20, shr(96, ownSalt)) // Store the `owner` argument.
-                mstore(0x00, 0xc4d66de8) // `initialize(address)`.
-                if iszero(call(gas(), account, 0, 0x1c, 0x24, codesize(), 0x00)) {
-                    returndatacopy(mload(0x40), 0x00, returndatasize())
-                    revert(mload(0x40), returndatasize())
-                }
-            }
+            // `initialize(address)`, with the `owner` argument.
+            (bool success, bytes memory result) =
+                account.call(abi.encodeWithSelector(0xc4d66de8, address(bytes20(ownSalt))));
+            if (!success) _erc4337FactoryRevertRaw(result);
         }
         return account;
     }
@@ -66,5 +66,18 @@ contract ERC4337Factory {
     /// Used for mining vanity addresses with create2crunch.
     function initCodeHash() public view virtual returns (bytes32) {
         return LibClone.initCodeHashERC1967(implementation);
+    }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      PRIVATE HELPERS                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev Reverts the current call with exactly `data`.
+    /// @custom:solar-trusted
+    function _erc4337FactoryRevertRaw(bytes memory data) private pure {
+        /// @solidity memory-safe-assembly
+        assembly {
+            revert(add(data, 0x20), mload(data))
+        }
     }
 }

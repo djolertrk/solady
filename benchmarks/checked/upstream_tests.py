@@ -89,6 +89,11 @@ LIBRARIES = [
     "accounts/LibERC6551",
     "accounts/ERC7821",
     "accounts/Timelock",
+    "CallContextChecker",
+    "UUPSUpgradeable",
+    "EIP712",
+    "accounts/ERC1271",
+    "accounts/ERC4337Factory",
 ]
 
 
