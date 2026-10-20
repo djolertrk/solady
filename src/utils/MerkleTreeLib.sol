@@ -18,11 +18,12 @@ pragma solidity ^0.8.4;
 /// The checked port builds and reads the tree with checked indexing, and hashes each pair as
 /// `keccak256(abi.encode(min, max))`, the words the assembly hashes in scratch space.
 /// `nodeProof` counts a node's depth before it allocates the proof. `multiProofForLeaves`
-/// checks the leaf indices first, then runs the assembly's circular queue twice in one array
-/// sized to the leaf indices, first to size the proof and the flags, then to fill them; the
-/// assembly runs the first pass before it checks the indices. A sibling past the end of
-/// `tree`, which only a tree of even length has, reverts with `Panic(0x32)` where the assembly
-/// reads the word after `tree`. No helper is trusted.
+/// checks the leaf indices first, then runs the assembly's queue once, in an array with room
+/// for every node it ever holds, filling a proof and flags as long as a tree's internal nodes
+/// allow, which the trusted `_truncate` then shrinks to what the queue wrote; the assembly
+/// runs the queue twice, first to size them, and before it checks the indices. A sibling past
+/// the end of `tree`, which only a tree of even length has, reverts with `Panic(0x32)` where
+/// the assembly reads the word after `tree`.
 /// @custom:solar-safe memory arithmetic
 library MerkleTreeLib {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -52,7 +53,7 @@ library MerkleTreeLib {
         tree = new bytes32[](n);
         // The leaves, in reverse order, end the tree.
         uint256 k = n;
-        for (uint256 i; i < l; ++i) {
+        for (uint256 i; i < leaves.length; ++i) {
             --k;
             tree[k] = leaves[i];
         }
@@ -145,18 +146,41 @@ library MerkleTreeLib {
         if (c == 0) revert MerkleTreeInvalidLeafIndices();
         uint256 n = tree.length;
         uint256 l = n - (n >> 1); // Num leaves.
+        // The assembly's queue never holds more than `c` nodes, so a buffer with room for
+        // every node it ever holds gives the same nodes in the same order: the leaves', then
+        // one parent per step, and a step for each internal node at most.
+        uint256[] memory q = new uint256[](c + (n >> 1));
         uint256 p;
         for (uint256 i; i < c; ++i) {
             uint256 j = leafIndices[i]; // Leaf index.
             if (j >= l) revert MerkleTreeOutOfBoundsAccess();
             if (i != 0 && j <= p) revert MerkleTreeInvalidLeafIndices();
             p = j;
+            q[i] = n - 1 - j;
         }
-        uint256[] memory q = new uint256[](c); // Circular buffer.
-        (uint256 flagsLen, uint256 proofLen) = _gen(leafIndices, tree, q, proof, flags, false);
-        proof = new bytes32[](proofLen);
-        flags = new bool[](flagsLen);
-        _gen(leafIndices, tree, q, proof, flags, true);
+        // At most one flag per internal node, and a proof element for each of them but
+        // the `c - 1` whose sibling comes from the queue.
+        flags = new bool[](n >> 1);
+        proof = new bytes32[]((n >> 1) + 1 - c);
+        uint256 flagsLen;
+        uint256 proofLen;
+        uint256 b; // Start index of the queue.
+        uint256 e = c; // End index of the queue.
+        // Each step pushes a parent, so the queue holds a node at each step's start, and
+        // the slot at its end, which a sibling test may read, is still zero.
+        while (true) {
+            uint256 j = q[b]; // Current.
+            if (j == 0) break;
+            ++b;
+            uint256 s = j - 1 + ((j & 1) << 1); // Sibling, which is not zero.
+            bool f = q[b] == s;
+            flags[flagsLen++] = f;
+            if (f) ++b;
+            else proof[proofLen++] = tree[s];
+            q[e++] = (j - 1) >> 1;
+        }
+        _truncate(flags, flagsLen);
+        _truncate(proof, proofLen);
     }
 
     /// @dev Returns a copy of leaves, with the length padded to a power of 2.
@@ -196,45 +220,33 @@ library MerkleTreeLib {
     /// @dev The hash of `a` and `b`, the smaller first.
     /// @custom:solar-inline
     function _hashPair(bytes32 a, bytes32 b) private pure returns (bytes32) {
-        if (b < a) (a, b) = (b, a);
-        return keccak256(abi.encode(a, b));
+        return b < a ? keccak256(abi.encode(b, a)) : keccak256(abi.encode(a, b));
     }
 
-    /// @dev The assembly's `gen`: runs the circular buffer `q` of node indices, from the
-    /// leaves' up to the root, and counts the flags and the proof elements, which with
-    /// `fill` it writes into `proof` and `flags`. A node takes its sibling from the queue
-    /// when it is next, with the flag true, and from `tree` otherwise.
-    /// @custom:solar-inline
-    function _gen(
-        uint256[] memory leafIndices,
-        bytes32[] memory tree,
-        uint256[] memory q,
-        bytes32[] memory proof,
-        bool[] memory flags,
-        bool fill
-    ) private pure returns (uint256 flagsLen, uint256 proofLen) {
-        uint256 c = q.length; // Capacity of circular buffer.
-        uint256 n = tree.length; // Num nodes.
-        for (uint256 i; i < c; ++i) {
-            q[i] = n - 1 - leafIndices[i];
+    /// @dev Shrinks `a` to its first `n` elements in place. Solidity cannot spell a
+    /// shorter length for an existing array; the elements past `n` stay in memory the
+    /// array no longer covers.
+    /// @custom:solar-trusted
+    function _truncate(bytes32[] memory a, uint256 n) private pure {
+        if (n > a.length) n = _outOfBounds();
+        /// @solidity memory-safe-assembly
+        assembly {
+            mstore(a, n)
         }
-        uint256 b; // Start index of circular buffer.
-        uint256 e = c; // End index of circular buffer.
-        while (b < e) {
-            uint256 j = q[b % c]; // Current.
-            if (j == 0) break;
-            ++b;
-            uint256 s = (j & 1) == 0 ? j - 1 : j + 1; // Sibling.
-            ++flagsLen;
-            bool f = b < e && q[b % c] == s;
-            if (f) ++b;
-            else ++proofLen;
-            if (fill) {
-                flags[flagsLen - 1] = f;
-                if (!f) proof[proofLen - 1] = tree[s];
-            }
-            q[e % c] = (j - 1) >> 1;
-            ++e;
+    }
+
+    /// @dev Shrinks `a` to its first `n` elements in place, as the `bytes32[]` one does.
+    /// @custom:solar-trusted
+    function _truncate(bool[] memory a, uint256 n) private pure {
+        if (n > a.length) n = _outOfBounds();
+        /// @solidity memory-safe-assembly
+        assembly {
+            mstore(a, n)
         }
+    }
+
+    /// @dev Raises the `Panic(0x32)` an out-of-range index raises.
+    function _outOfBounds() private pure returns (uint256) {
+        return new uint256[](0)[0];
     }
 }
