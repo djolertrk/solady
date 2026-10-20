@@ -3,11 +3,14 @@ pragma solidity ^0.8.4;
 
 /// @notice Optimized sorts and operations for sorted arrays.
 /// @author Solady (https://github.com/Vectorized/solady/blob/main/src/utils/LibSort.sol)
-/// @dev The checked port gives each element type its own implementation, so no array is read
-/// as another type. Sorting is a median-of-three quicksort with insertion-sort leaves.
-/// Shrinking an array in place has no Solidity spelling, so the APIs that do it, and the set
-/// operations that build a result at its largest size, go through `_truncate`, the library's
-/// only trusted code.
+/// @dev The checked port gives each element type its own implementation, except that
+/// `searchSorted`, `inSorted` and `hasDuplicate` read an `address[]` as the words upstream
+/// compares, through the trusted `_toUints` cast. Sorting is a median-of-three quicksort whose
+/// leaves of up to twelve elements go through the sorting network for their number, after scans for
+/// an array already in order or in reverse order, and, but for addresses, one in order after its
+/// first few elements, which move into place one by one. Shrinking an array in place has no
+/// Solidity spelling, so the APIs that do it, and the set operations that build a result at its
+/// largest size, go through the trusted `_truncate`.
 /// @custom:solar-safe memory arithmetic
 library LibSort {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -104,17 +107,19 @@ library LibSort {
         // The upstream probe sequence: a one-based binary search. An absent
         // needle ends it at `l == h + 1`, where the upstream's last probe reads
         // `h`, the nearest element below the needle when there is one. The
-        // midpoint `(l + h) / 2` is spelled so that it cannot overflow.
+        // midpoint `(l + h) / 2` is spelled so that it cannot overflow, and the
+        // direction is tested before equality, which most probes fail.
         uint256 l = 1;
         uint256 h = a.length;
         while (l <= h) {
             uint256 m = l + (h - l) / 2;
             uint256 t = a[m - 1];
-            if (t == needle) return (true, m - 1);
-            if (needle <= t) {
+            if (needle > t) {
+                l = m + 1;
+            } else if (needle < t) {
                 h = m - 1;
             } else {
-                l = m + 1;
+                return (true, m - 1);
             }
         }
         if (h != 0) index = h - 1;
@@ -130,17 +135,19 @@ library LibSort {
         // The upstream probe sequence: a one-based binary search. An absent
         // needle ends it at `l == h + 1`, where the upstream's last probe reads
         // `h`, the nearest element below the needle when there is one. The
-        // midpoint `(l + h) / 2` is spelled so that it cannot overflow.
+        // midpoint `(l + h) / 2` is spelled so that it cannot overflow, and the
+        // direction is tested before equality, which most probes fail.
         uint256 l = 1;
         uint256 h = a.length;
         while (l <= h) {
             uint256 m = l + (h - l) / 2;
             int256 t = a[m - 1];
-            if (t == needle) return (true, m - 1);
-            if (needle <= t) {
+            if (needle > t) {
+                l = m + 1;
+            } else if (needle < t) {
                 h = m - 1;
             } else {
-                l = m + 1;
+                return (true, m - 1);
             }
         }
         if (h != 0) index = h - 1;
@@ -153,23 +160,7 @@ library LibSort {
         pure
         returns (bool found, uint256 index)
     {
-        // The upstream probe sequence: a one-based binary search. An absent
-        // needle ends it at `l == h + 1`, where the upstream's last probe reads
-        // `h`, the nearest element below the needle when there is one. The
-        // midpoint `(l + h) / 2` is spelled so that it cannot overflow.
-        uint256 l = 1;
-        uint256 h = a.length;
-        while (l <= h) {
-            uint256 m = l + (h - l) / 2;
-            address t = a[m - 1];
-            if (t == needle) return (true, m - 1);
-            if (needle <= t) {
-                h = m - 1;
-            } else {
-                l = m + 1;
-            }
-        }
-        if (h != 0) index = h - 1;
+        (found, index) = searchSorted(_toUints(a), uint160(needle));
     }
 
     /// @dev Returns whether `a` contains `needle`, and the index of `needle`.
@@ -182,17 +173,19 @@ library LibSort {
         // The upstream probe sequence: a one-based binary search. An absent
         // needle ends it at `l == h + 1`, where the upstream's last probe reads
         // `h`, the nearest element below the needle when there is one. The
-        // midpoint `(l + h) / 2` is spelled so that it cannot overflow.
+        // midpoint `(l + h) / 2` is spelled so that it cannot overflow, and the
+        // direction is tested before equality, which most probes fail.
         uint256 l = 1;
         uint256 h = a.length;
         while (l <= h) {
             uint256 m = l + (h - l) / 2;
             bytes32 t = a[m - 1];
-            if (t == needle) return (true, m - 1);
-            if (needle <= t) {
+            if (needle > t) {
+                l = m + 1;
+            } else if (needle < t) {
                 h = m - 1;
             } else {
-                l = m + 1;
+                return (true, m - 1);
             }
         }
         if (h != 0) index = h - 1;
@@ -489,7 +482,7 @@ library LibSort {
 
     /// @dev Returns if `a` has any duplicate. Does NOT mutate `a`. `O(n)`.
     function hasDuplicate(address[] memory a) internal pure returns (bool result) {
-        return _hasDuplicate(a);
+        return _hasDuplicate(_toUints(a));
     }
 
     /// @dev Returns if `a` has any duplicate. Does NOT mutate `a`. `O(n)`.
@@ -507,8 +500,9 @@ library LibSort {
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     /// @dev Sorts `a[low:high]`: median-of-three Hoare partitions down to twelve
-    /// elements, then insertion sort. The smaller part recurses and the larger
-    /// one loops, so the recursion is at most `log2(high - low)` deep.
+    /// elements, then the sorting network for their number. The smaller part
+    /// recurses and the larger one loops, so the recursion is at most
+    /// `log2(high - low)` deep.
     function _sort(uint256[] memory a, uint256 low, uint256 high) private pure {
         while (high - low > 12) {
             uint256 last = high - 1;
@@ -543,14 +537,37 @@ library LibSort {
                 high = j + 1;
             }
         }
-        for (uint256 i = low + 1; i < high; ++i) {
-            uint256 v = a[i];
-            uint256 j = i;
-            while (j > low && a[j - 1] > v) {
-                a[j] = a[j - 1];
-                --j;
+        // At most twelve elements are left, which the network for their number sorts.
+        uint256 n = high - low;
+        if (n < 2) return;
+        if (n < 7) {
+            if (n < 4) {
+                if (n == 2) _sort2(a, low);
+                else _sort3(a, low);
+            } else {
+                if (n < 5) {
+                    _sort4(a, low);
+                } else {
+                    if (n == 5) _sort5(a, low);
+                    else _sort6(a, low);
+                }
             }
-            a[j] = v;
+        } else {
+            if (n < 10) {
+                if (n < 8) {
+                    _sort7(a, low);
+                } else {
+                    if (n == 8) _sort8(a, low);
+                    else _sort9(a, low);
+                }
+            } else {
+                if (n < 11) {
+                    _sort10(a, low);
+                } else {
+                    if (n == 11) _sort11(a, low);
+                    else _sort12(a, low);
+                }
+            }
         }
     }
 
@@ -613,21 +630,32 @@ library LibSort {
     }
 
     /// @dev Whether `a` contains the same value at two indices, through an
-    /// open-addressed table of indices at least twice as long as `a`.
+    /// open-addressed table of indices at least twice as long as `a`. The loop
+    /// tests its index against the length it reads again, as the table's stores
+    /// could reach it, so that one test covers the element's bounds check.
     function _hasDuplicate(uint256[] memory a) private pure returns (bool) {
-        if (a.length < 2) return false;
-        uint256 capacity = 1;
-        while (capacity < a.length * 2) capacity *= 2;
-        uint256[] memory seen = new uint256[](capacity);
-        uint256 mask = capacity - 1;
-        for (uint256 i = a.length; i != 0;) {
-            --i;
-            uint256 slot = mulmod(a[i], 0x100000000000000000000000000000051, ~uint256(0xbc)) & mask;
-            while (seen[slot] != 0) {
-                if (a[seen[slot] - 1] == a[i]) return true;
-                slot = (slot + 1) & mask;
+        uint256 n = a.length;
+        if (n < 2) return false;
+        /// @custom:solar-scratch
+        {
+            uint256 capacity = 1;
+            while (capacity < n * 2) capacity *= 2;
+            uint256[] memory seen = new uint256[](capacity);
+            uint256 mask = capacity - 1;
+            for (uint256 i; i < a.length; ++i) {
+                uint256 x = a[i];
+                uint256 r = mulmod(x, 0x100000000000000000000000000000051, ~uint256(0xbc));
+                while (true) {
+                    uint256 slot = r & mask;
+                    uint256 s = seen[slot];
+                    if (s == 0) {
+                        seen[slot] = i + 1;
+                        break;
+                    }
+                    if (a[s - 1] == x) return true;
+                    r = slot + 1;
+                }
             }
-            seen[slot] = i + 1;
         }
         return false;
     }
@@ -658,6 +686,18 @@ library LibSort {
     /// @dev Removes adjacent duplicates from sorted `a` in place.
     function _uniquifySorted(uint256[] memory a) private pure {
         if (a.length < 2) return;
+        // Nothing moves before the first repeat, and an array without one stays as it is.
+        {
+            uint256 prev = a[1];
+            if (prev != a[0]) {
+                for (uint256 i = 2;; ++i) {
+                    if (i == a.length) return;
+                    uint256 x = a[i];
+                    if (x == prev) break;
+                    prev = x;
+                }
+            }
+        }
         uint256 write = 1;
         // The last kept element, which `a[write - 1]` holds.
         uint256 last = a[0];
@@ -796,8 +836,9 @@ library LibSort {
     }
 
     /// @dev Sorts `a[low:high]`: median-of-three Hoare partitions down to twelve
-    /// elements, then insertion sort. The smaller part recurses and the larger
-    /// one loops, so the recursion is at most `log2(high - low)` deep.
+    /// elements, then the sorting network for their number. The smaller part
+    /// recurses and the larger one loops, so the recursion is at most
+    /// `log2(high - low)` deep.
     function _sort(int256[] memory a, uint256 low, uint256 high) private pure {
         while (high - low > 12) {
             uint256 last = high - 1;
@@ -832,14 +873,37 @@ library LibSort {
                 high = j + 1;
             }
         }
-        for (uint256 i = low + 1; i < high; ++i) {
-            int256 v = a[i];
-            uint256 j = i;
-            while (j > low && a[j - 1] > v) {
-                a[j] = a[j - 1];
-                --j;
+        // At most twelve elements are left, which the network for their number sorts.
+        uint256 n = high - low;
+        if (n < 2) return;
+        if (n < 7) {
+            if (n < 4) {
+                if (n == 2) _sort2(a, low);
+                else _sort3(a, low);
+            } else {
+                if (n < 5) {
+                    _sort4(a, low);
+                } else {
+                    if (n == 5) _sort5(a, low);
+                    else _sort6(a, low);
+                }
             }
-            a[j] = v;
+        } else {
+            if (n < 10) {
+                if (n < 8) {
+                    _sort7(a, low);
+                } else {
+                    if (n == 8) _sort8(a, low);
+                    else _sort9(a, low);
+                }
+            } else {
+                if (n < 11) {
+                    _sort10(a, low);
+                } else {
+                    if (n == 11) _sort11(a, low);
+                    else _sort12(a, low);
+                }
+            }
         }
     }
 
@@ -904,22 +968,32 @@ library LibSort {
     }
 
     /// @dev Whether `a` contains the same value at two indices, through an
-    /// open-addressed table of indices at least twice as long as `a`.
+    /// open-addressed table of indices at least twice as long as `a`. The loop
+    /// tests its index against the length it reads again, as the table's stores
+    /// could reach it, so that one test covers the element's bounds check.
     function _hasDuplicate(int256[] memory a) private pure returns (bool) {
-        if (a.length < 2) return false;
-        uint256 capacity = 1;
-        while (capacity < a.length * 2) capacity *= 2;
-        uint256[] memory seen = new uint256[](capacity);
-        uint256 mask = capacity - 1;
-        for (uint256 i = a.length; i != 0;) {
-            --i;
-            uint256 slot =
-                mulmod(uint256(a[i]), 0x100000000000000000000000000000051, ~uint256(0xbc)) & mask;
-            while (seen[slot] != 0) {
-                if (a[seen[slot] - 1] == a[i]) return true;
-                slot = (slot + 1) & mask;
+        uint256 n = a.length;
+        if (n < 2) return false;
+        /// @custom:solar-scratch
+        {
+            uint256 capacity = 1;
+            while (capacity < n * 2) capacity *= 2;
+            uint256[] memory seen = new uint256[](capacity);
+            uint256 mask = capacity - 1;
+            for (uint256 i; i < a.length; ++i) {
+                int256 x = a[i];
+                uint256 r = mulmod(uint256(x), 0x100000000000000000000000000000051, ~uint256(0xbc));
+                while (true) {
+                    uint256 slot = r & mask;
+                    uint256 s = seen[slot];
+                    if (s == 0) {
+                        seen[slot] = i + 1;
+                        break;
+                    }
+                    if (a[s - 1] == x) return true;
+                    r = slot + 1;
+                }
             }
-            seen[slot] = i + 1;
         }
         return false;
     }
@@ -950,6 +1024,18 @@ library LibSort {
     /// @dev Removes adjacent duplicates from sorted `a` in place.
     function _uniquifySorted(int256[] memory a) private pure {
         if (a.length < 2) return;
+        // Nothing moves before the first repeat, and an array without one stays as it is.
+        {
+            int256 prev = a[1];
+            if (prev != a[0]) {
+                for (uint256 i = 2;; ++i) {
+                    if (i == a.length) return;
+                    int256 x = a[i];
+                    if (x == prev) break;
+                    prev = x;
+                }
+            }
+        }
         uint256 write = 1;
         // The last kept element, which `a[write - 1]` holds.
         int256 last = a[0];
@@ -1084,8 +1170,9 @@ library LibSort {
     }
 
     /// @dev Sorts `a[low:high]`: median-of-three Hoare partitions down to twelve
-    /// elements, then insertion sort. The smaller part recurses and the larger
-    /// one loops, so the recursion is at most `log2(high - low)` deep.
+    /// elements, then the sorting network for their number. The smaller part
+    /// recurses and the larger one loops, so the recursion is at most
+    /// `log2(high - low)` deep.
     function _sort(address[] memory a, uint256 low, uint256 high) private pure {
         while (high - low > 12) {
             uint256 last = high - 1;
@@ -1120,14 +1207,37 @@ library LibSort {
                 high = j + 1;
             }
         }
-        for (uint256 i = low + 1; i < high; ++i) {
-            address v = a[i];
-            uint256 j = i;
-            while (j > low && a[j - 1] > v) {
-                a[j] = a[j - 1];
-                --j;
+        // At most twelve elements are left, which the network for their number sorts.
+        uint256 n = high - low;
+        if (n < 2) return;
+        if (n < 7) {
+            if (n < 4) {
+                if (n == 2) _sort2(a, low);
+                else _sort3(a, low);
+            } else {
+                if (n < 5) {
+                    _sort4(a, low);
+                } else {
+                    if (n == 5) _sort5(a, low);
+                    else _sort6(a, low);
+                }
             }
-            a[j] = v;
+        } else {
+            if (n < 10) {
+                if (n < 8) {
+                    _sort7(a, low);
+                } else {
+                    if (n == 8) _sort8(a, low);
+                    else _sort9(a, low);
+                }
+            } else {
+                if (n < 11) {
+                    _sort10(a, low);
+                } else {
+                    if (n == 11) _sort11(a, low);
+                    else _sort12(a, low);
+                }
+            }
         }
     }
 
@@ -1189,28 +1299,6 @@ library LibSort {
         (values[i], values[j]) = (values[j], values[i]);
     }
 
-    /// @dev Whether `a` contains the same value at two indices, through an
-    /// open-addressed table of indices at least twice as long as `a`.
-    function _hasDuplicate(address[] memory a) private pure returns (bool) {
-        if (a.length < 2) return false;
-        uint256 capacity = 1;
-        while (capacity < a.length * 2) capacity *= 2;
-        uint256[] memory seen = new uint256[](capacity);
-        uint256 mask = capacity - 1;
-        for (uint256 i = a.length; i != 0;) {
-            --i;
-            uint256 slot = mulmod(
-                uint256(uint160(a[i])), 0x100000000000000000000000000000051, ~uint256(0xbc)
-            ) & mask;
-            while (seen[slot] != 0) {
-                if (a[seen[slot] - 1] == a[i]) return true;
-                slot = (slot + 1) & mask;
-            }
-            seen[slot] = i + 1;
-        }
-        return false;
-    }
-
     /// @dev A new array holding the elements of `a`.
     function _copy(address[] memory a) private pure returns (address[] memory c) {
         uint256 n = a.length;
@@ -1223,6 +1311,18 @@ library LibSort {
     /// @dev Removes adjacent duplicates from sorted `a` in place.
     function _uniquifySorted(address[] memory a) private pure {
         if (a.length < 2) return;
+        // Nothing moves before the first repeat, and an array without one stays as it is.
+        {
+            address prev = a[1];
+            if (prev != a[0]) {
+                for (uint256 i = 2;; ++i) {
+                    if (i == a.length) return;
+                    address x = a[i];
+                    if (x == prev) break;
+                    prev = x;
+                }
+            }
+        }
         uint256 write = 1;
         // The last kept element, which `a[write - 1]` holds.
         address last = a[0];
@@ -1361,8 +1461,9 @@ library LibSort {
     }
 
     /// @dev Sorts `a[low:high]`: median-of-three Hoare partitions down to twelve
-    /// elements, then insertion sort. The smaller part recurses and the larger
-    /// one loops, so the recursion is at most `log2(high - low)` deep.
+    /// elements, then the sorting network for their number. The smaller part
+    /// recurses and the larger one loops, so the recursion is at most
+    /// `log2(high - low)` deep.
     function _sort(bytes32[] memory a, uint256 low, uint256 high) private pure {
         while (high - low > 12) {
             uint256 last = high - 1;
@@ -1397,14 +1498,37 @@ library LibSort {
                 high = j + 1;
             }
         }
-        for (uint256 i = low + 1; i < high; ++i) {
-            bytes32 v = a[i];
-            uint256 j = i;
-            while (j > low && a[j - 1] > v) {
-                a[j] = a[j - 1];
-                --j;
+        // At most twelve elements are left, which the network for their number sorts.
+        uint256 n = high - low;
+        if (n < 2) return;
+        if (n < 7) {
+            if (n < 4) {
+                if (n == 2) _sort2(a, low);
+                else _sort3(a, low);
+            } else {
+                if (n < 5) {
+                    _sort4(a, low);
+                } else {
+                    if (n == 5) _sort5(a, low);
+                    else _sort6(a, low);
+                }
             }
-            a[j] = v;
+        } else {
+            if (n < 10) {
+                if (n < 8) {
+                    _sort7(a, low);
+                } else {
+                    if (n == 8) _sort8(a, low);
+                    else _sort9(a, low);
+                }
+            } else {
+                if (n < 11) {
+                    _sort10(a, low);
+                } else {
+                    if (n == 11) _sort11(a, low);
+                    else _sort12(a, low);
+                }
+            }
         }
     }
 
@@ -1467,22 +1591,32 @@ library LibSort {
     }
 
     /// @dev Whether `a` contains the same value at two indices, through an
-    /// open-addressed table of indices at least twice as long as `a`.
+    /// open-addressed table of indices at least twice as long as `a`. The loop
+    /// tests its index against the length it reads again, as the table's stores
+    /// could reach it, so that one test covers the element's bounds check.
     function _hasDuplicate(bytes32[] memory a) private pure returns (bool) {
-        if (a.length < 2) return false;
-        uint256 capacity = 1;
-        while (capacity < a.length * 2) capacity *= 2;
-        uint256[] memory seen = new uint256[](capacity);
-        uint256 mask = capacity - 1;
-        for (uint256 i = a.length; i != 0;) {
-            --i;
-            uint256 slot =
-                mulmod(uint256(a[i]), 0x100000000000000000000000000000051, ~uint256(0xbc)) & mask;
-            while (seen[slot] != 0) {
-                if (a[seen[slot] - 1] == a[i]) return true;
-                slot = (slot + 1) & mask;
+        uint256 n = a.length;
+        if (n < 2) return false;
+        /// @custom:solar-scratch
+        {
+            uint256 capacity = 1;
+            while (capacity < n * 2) capacity *= 2;
+            uint256[] memory seen = new uint256[](capacity);
+            uint256 mask = capacity - 1;
+            for (uint256 i; i < a.length; ++i) {
+                bytes32 x = a[i];
+                uint256 r = mulmod(uint256(x), 0x100000000000000000000000000000051, ~uint256(0xbc));
+                while (true) {
+                    uint256 slot = r & mask;
+                    uint256 s = seen[slot];
+                    if (s == 0) {
+                        seen[slot] = i + 1;
+                        break;
+                    }
+                    if (a[s - 1] == x) return true;
+                    r = slot + 1;
+                }
             }
-            seen[slot] = i + 1;
         }
         return false;
     }
@@ -1513,6 +1647,18 @@ library LibSort {
     /// @dev Removes adjacent duplicates from sorted `a` in place.
     function _uniquifySorted(bytes32[] memory a) private pure {
         if (a.length < 2) return;
+        // Nothing moves before the first repeat, and an array without one stays as it is.
+        {
+            bytes32 prev = a[1];
+            if (prev != a[0]) {
+                for (uint256 i = 2;; ++i) {
+                    if (i == a.length) return;
+                    bytes32 x = a[i];
+                    if (x == prev) break;
+                    prev = x;
+                }
+            }
+        }
         uint256 write = 1;
         // The last kept element, which `a[write - 1]` holds.
         bytes32 last = a[0];
@@ -1659,12 +1805,33 @@ library LibSort {
         uint256 j = n - 1;
         while (j != 0 && a[j - 1] <= a[j]) --j;
         if (j == 0) return;
+        // `a[s:]` is in order.
+        uint256 s = j;
         j = n - 1;
         while (j != 0 && a[j - 1] >= a[j]) --j;
         if (j == 0) {
-            for (uint256 i; i < n / 2; ++i) {
-                (a[i], a[n - 1 - i]) = (a[n - 1 - i], a[i]);
+            uint256 h = n / 2;
+            for (uint256 i; i < h; ++i) {
+                uint256 k = n - 1 - i;
+                uint256 x = a[i];
+                a[i] = a[k];
+                a[k] = x;
             }
+            return;
+        }
+        if (s <= 7) {
+            // At most the first seven are out of order: each moves into the
+            // ordered rest, the last of them first, as an insertion sort would.
+            do {
+                --s;
+                uint256 v = a[s];
+                uint256 i = s + 1;
+                while (i < n && a[i] < v) {
+                    a[i - 1] = a[i];
+                    ++i;
+                }
+                a[i - 1] = v;
+            } while (s != 0);
             return;
         }
         _sort(a, 0, n);
@@ -1770,12 +1937,33 @@ library LibSort {
         uint256 j = n - 1;
         while (j != 0 && a[j - 1] <= a[j]) --j;
         if (j == 0) return;
+        // `a[s:]` is in order.
+        uint256 s = j;
         j = n - 1;
         while (j != 0 && a[j - 1] >= a[j]) --j;
         if (j == 0) {
-            for (uint256 i; i < n / 2; ++i) {
-                (a[i], a[n - 1 - i]) = (a[n - 1 - i], a[i]);
+            uint256 h = n / 2;
+            for (uint256 i; i < h; ++i) {
+                uint256 k = n - 1 - i;
+                int256 x = a[i];
+                a[i] = a[k];
+                a[k] = x;
             }
+            return;
+        }
+        if (s <= 7) {
+            // At most the first seven are out of order: each moves into the
+            // ordered rest, the last of them first, as an insertion sort would.
+            do {
+                --s;
+                int256 v = a[s];
+                uint256 i = s + 1;
+                while (i < n && a[i] < v) {
+                    a[i - 1] = a[i];
+                    ++i;
+                }
+                a[i - 1] = v;
+            } while (s != 0);
             return;
         }
         _sort(a, 0, n);
@@ -1898,8 +2086,12 @@ library LibSort {
             --j;
         }
         if (j == 0) {
-            for (uint256 i; i < n / 2; ++i) {
-                (a[i], a[n - 1 - i]) = (a[n - 1 - i], a[i]);
+            uint256 h = n / 2;
+            for (uint256 i; i < h; ++i) {
+                uint256 k = n - 1 - i;
+                address x = a[i];
+                a[i] = a[k];
+                a[k] = x;
             }
             return;
         }
@@ -2006,12 +2198,33 @@ library LibSort {
         uint256 j = n - 1;
         while (j != 0 && a[j - 1] <= a[j]) --j;
         if (j == 0) return;
+        // `a[s:]` is in order.
+        uint256 s = j;
         j = n - 1;
         while (j != 0 && a[j - 1] >= a[j]) --j;
         if (j == 0) {
-            for (uint256 i; i < n / 2; ++i) {
-                (a[i], a[n - 1 - i]) = (a[n - 1 - i], a[i]);
+            uint256 h = n / 2;
+            for (uint256 i; i < h; ++i) {
+                uint256 k = n - 1 - i;
+                bytes32 x = a[i];
+                a[i] = a[k];
+                a[k] = x;
             }
+            return;
+        }
+        if (s <= 7) {
+            // At most the first seven are out of order: each moves into the
+            // ordered rest, the last of them first, as an insertion sort would.
+            do {
+                --s;
+                bytes32 v = a[s];
+                uint256 i = s + 1;
+                while (i < n && a[i] < v) {
+                    a[i - 1] = a[i];
+                    ++i;
+                }
+                a[i - 1] = v;
+            } while (s != 0);
             return;
         }
         _sort(a, 0, n);
@@ -2106,6 +2319,1620 @@ library LibSort {
         _truncate(keys, u);
         _truncate(values, u);
         return true;
+    }
+
+    /// @dev Sorts `a[low:low + 2]` with a sorting network of 1 comparators.
+    function _sort2(uint256[] memory a, uint256 low) private pure {
+        uint256 x1 = a[low + 1];
+        uint256 x0 = a[low];
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        a[low] = x0;
+        a[low + 1] = x1;
+    }
+
+    /// @dev Sorts `a[low:low + 3]` with a sorting network of 3 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort3(uint256[] memory a, uint256 low) private pure {
+        uint256 x2 = a[low + 2];
+        uint256 x0 = a[low];
+        uint256 x1 = a[low + 1];
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        a[low] = x0;
+        a[low + 1] = x1;
+        a[low + 2] = x2;
+    }
+
+    /// @dev Sorts `a[low:low + 4]` with a sorting network of 5 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort4(uint256[] memory a, uint256 low) private pure {
+        uint256 x3 = a[low + 3];
+        uint256 x0 = a[low];
+        uint256 x1 = a[low + 1];
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        uint256 x2 = a[low + 2];
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        if (x3 < x1) (x1, x3) = (x3, x1);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        a[low] = x0;
+        a[low + 1] = x1;
+        a[low + 2] = x2;
+        a[low + 3] = x3;
+    }
+
+    /// @dev Sorts `a[low:low + 5]` with a sorting network of 9 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort5(uint256[] memory a, uint256 low) private pure {
+        uint256 x4 = a[low + 4];
+        uint256 x0 = a[low];
+        uint256 x1 = a[low + 1];
+        uint256 x2 = a[low + 2];
+        uint256 x3 = a[low + 3];
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        if (x3 < x1) (x1, x3) = (x3, x1);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        if (x4 < x0) (x0, x4) = (x4, x0);
+        a[low] = x0;
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        a[low + 3] = x3;
+        a[low + 4] = x4;
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        a[low + 1] = x1;
+        a[low + 2] = x2;
+    }
+
+    /// @dev Sorts `a[low:low + 6]` with a sorting network of 12 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort6(uint256[] memory a, uint256 low) private pure {
+        uint256 x5 = a[low + 5];
+        uint256 x4 = a[low + 4];
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        uint256 x2 = a[low + 2];
+        uint256 x3 = a[low + 3];
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        uint256 x0 = a[low];
+        uint256 x1 = a[low + 1];
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        if (x3 < x1) (x1, x3) = (x3, x1);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        if (x4 < x0) (x0, x4) = (x4, x0);
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        if (x5 < x1) (x1, x5) = (x5, x1);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        if (x5 < x3) (x3, x5) = (x5, x3);
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        a[low] = x0;
+        a[low + 1] = x1;
+        a[low + 2] = x2;
+        a[low + 3] = x3;
+        a[low + 4] = x4;
+        a[low + 5] = x5;
+    }
+
+    /// @dev Sorts `a[low:low + 7]` with a sorting network of 16 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort7(uint256[] memory a, uint256 low) private pure {
+        uint256 x6 = a[low + 6];
+        uint256 x2 = a[low + 2];
+        uint256 x3 = a[low + 3];
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        uint256 x4 = a[low + 4];
+        uint256 x5 = a[low + 5];
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        if (x6 < x4) (x4, x6) = (x6, x4);
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        uint256 x0 = a[low];
+        uint256 x1 = a[low + 1];
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        if (x3 < x1) (x1, x3) = (x3, x1);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        if (x5 < x1) (x1, x5) = (x5, x1);
+        if (x6 < x2) (x2, x6) = (x6, x2);
+        if (x5 < x3) (x3, x5) = (x5, x3);
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        a[low + 5] = x5;
+        a[low + 6] = x6;
+        if (x4 < x0) (x0, x4) = (x4, x0);
+        a[low] = x0;
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        a[low + 1] = x1;
+        a[low + 2] = x2;
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        a[low + 3] = x3;
+        a[low + 4] = x4;
+    }
+
+    /// @dev Sorts `a[low:low + 8]` with a sorting network of 19 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort8(uint256[] memory a, uint256 low) private pure {
+        uint256 x7 = a[low + 7];
+        uint256 x2 = a[low + 2];
+        uint256 x3 = a[low + 3];
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        uint256 x4 = a[low + 4];
+        uint256 x5 = a[low + 5];
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        uint256 x0 = a[low];
+        uint256 x1 = a[low + 1];
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        if (x3 < x1) (x1, x3) = (x3, x1);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        uint256 x6 = a[low + 6];
+        if (x7 < x6) (x6, x7) = (x7, x6);
+        if (x6 < x4) (x4, x6) = (x6, x4);
+        if (x7 < x5) (x5, x7) = (x7, x5);
+        if (x4 < x0) (x0, x4) = (x4, x0);
+        a[low] = x0;
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        if (x6 < x2) (x2, x6) = (x6, x2);
+        if (x5 < x1) (x1, x5) = (x5, x1);
+        if (x7 < x3) (x3, x7) = (x7, x3);
+        a[low + 7] = x7;
+        if (x5 < x3) (x3, x5) = (x5, x3);
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        a[low + 5] = x5;
+        a[low + 6] = x6;
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        a[low + 3] = x3;
+        a[low + 4] = x4;
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        a[low + 1] = x1;
+        a[low + 2] = x2;
+    }
+
+    /// @dev Sorts `a[low:low + 9]` with a sorting network of 25 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort9(uint256[] memory a, uint256 low) private pure {
+        uint256 x8 = a[low + 8];
+        uint256 x0 = a[low];
+        uint256 x1 = a[low + 1];
+        uint256 x2 = a[low + 2];
+        uint256 x3 = a[low + 3];
+        uint256 x4 = a[low + 4];
+        uint256 x5 = a[low + 5];
+        uint256 x6 = a[low + 6];
+        uint256 x7 = a[low + 7];
+        if (x7 < x1) (x1, x7) = (x7, x1);
+        if (x3 < x0) (x0, x3) = (x3, x0);
+        if (x7 < x0) (x0, x7) = (x7, x0);
+        if (x8 < x4) (x4, x8) = (x8, x4);
+        if (x5 < x2) (x2, x5) = (x5, x2);
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        if (x8 < x3) (x3, x8) = (x8, x3);
+        if (x8 < x7) (x7, x8) = (x8, x7);
+        if (x3 < x1) (x1, x3) = (x3, x1);
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        if (x4 < x1) (x1, x4) = (x4, x1);
+        if (x6 < x3) (x3, x6) = (x6, x3);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        if (x7 < x5) (x5, x7) = (x7, x5);
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        a[low] = x0;
+        if (x8 < x6) (x6, x8) = (x8, x6);
+        a[low + 8] = x8;
+        if (x5 < x3) (x3, x5) = (x5, x3);
+        if (x7 < x6) (x6, x7) = (x7, x6);
+        a[low + 7] = x7;
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        a[low + 3] = x3;
+        a[low + 4] = x4;
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        a[low + 5] = x5;
+        a[low + 6] = x6;
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        a[low + 1] = x1;
+        a[low + 2] = x2;
+    }
+
+    /// @dev Sorts `a[low:low + 10]` with a sorting network of 29 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort10(uint256[] memory a, uint256 low) private pure {
+        uint256 x9 = a[low + 9];
+        uint256 x0 = a[low];
+        uint256 x1 = a[low + 1];
+        uint256 x2 = a[low + 2];
+        uint256 x3 = a[low + 3];
+        uint256 x4 = a[low + 4];
+        uint256 x5 = a[low + 5];
+        uint256 x6 = a[low + 6];
+        uint256 x7 = a[low + 7];
+        uint256 x8 = a[low + 8];
+        if (x7 < x2) (x2, x7) = (x7, x2);
+        if (x9 < x1) (x1, x9) = (x9, x1);
+        if (x9 < x7) (x7, x9) = (x9, x7);
+        if (x5 < x3) (x3, x5) = (x5, x3);
+        if (x8 < x0) (x0, x8) = (x8, x0);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        if (x6 < x4) (x4, x6) = (x6, x4);
+        if (x9 < x6) (x6, x9) = (x9, x6);
+        if (x4 < x1) (x1, x4) = (x4, x1);
+        if (x3 < x0) (x0, x3) = (x3, x0);
+        if (x6 < x3) (x3, x6) = (x6, x3);
+        if (x8 < x5) (x5, x8) = (x8, x5);
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        a[low] = x0;
+        if (x9 < x8) (x8, x9) = (x9, x8);
+        a[low + 9] = x9;
+        if (x7 < x5) (x5, x7) = (x7, x5);
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        if (x7 < x6) (x6, x7) = (x7, x6);
+        if (x8 < x4) (x4, x8) = (x8, x4);
+        if (x8 < x7) (x7, x8) = (x8, x7);
+        a[low + 8] = x8;
+        if (x6 < x4) (x4, x6) = (x6, x4);
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        if (x5 < x1) (x1, x5) = (x5, x1);
+        if (x7 < x6) (x6, x7) = (x7, x6);
+        a[low + 7] = x7;
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        a[low + 1] = x1;
+        if (x5 < x3) (x3, x5) = (x5, x3);
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        a[low + 5] = x5;
+        a[low + 6] = x6;
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        a[low + 2] = x2;
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        a[low + 3] = x3;
+        a[low + 4] = x4;
+    }
+
+    /// @dev Sorts `a[low:low + 11]` with a sorting network of 35 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort11(uint256[] memory a, uint256 low) private pure {
+        uint256 x10 = a[low + 10];
+        uint256 x2 = a[low + 2];
+        uint256 x4 = a[low + 4];
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        uint256 x1 = a[low + 1];
+        uint256 x6 = a[low + 6];
+        if (x6 < x1) (x1, x6) = (x6, x1);
+        uint256 x3 = a[low + 3];
+        uint256 x7 = a[low + 7];
+        if (x7 < x3) (x3, x7) = (x7, x3);
+        uint256 x0 = a[low];
+        uint256 x9 = a[low + 9];
+        if (x9 < x0) (x0, x9) = (x9, x0);
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        if (x9 < x6) (x6, x9) = (x9, x6);
+        uint256 x5 = a[low + 5];
+        uint256 x8 = a[low + 8];
+        if (x8 < x5) (x5, x8) = (x8, x5);
+        if (x8 < x7) (x7, x8) = (x8, x7);
+        if (x5 < x3) (x3, x5) = (x5, x3);
+        if (x3 < x1) (x1, x3) = (x3, x1);
+        if (x10 < x4) (x4, x10) = (x10, x4);
+        if (x7 < x4) (x4, x7) = (x7, x4);
+        if (x7 < x3) (x3, x7) = (x7, x3);
+        if (x4 < x0) (x0, x4) = (x4, x0);
+        if (x5 < x2) (x2, x5) = (x5, x2);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        a[low] = x0;
+        if (x10 < x8) (x8, x10) = (x10, x8);
+        if (x9 < x5) (x5, x9) = (x9, x5);
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        if (x10 < x9) (x9, x10) = (x10, x9);
+        a[low + 10] = x10;
+        if (x8 < x6) (x6, x8) = (x8, x6);
+        if (x6 < x2) (x2, x6) = (x6, x2);
+        if (x6 < x3) (x3, x6) = (x6, x3);
+        if (x8 < x7) (x7, x8) = (x8, x7);
+        if (x9 < x8) (x8, x9) = (x9, x8);
+        a[low + 9] = x9;
+        if (x7 < x5) (x5, x7) = (x7, x5);
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        if (x8 < x7) (x7, x8) = (x8, x7);
+        a[low + 8] = x8;
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        a[low + 1] = x1;
+        if (x7 < x6) (x6, x7) = (x7, x6);
+        a[low + 6] = x6;
+        a[low + 7] = x7;
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        a[low + 4] = x4;
+        a[low + 5] = x5;
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        a[low + 2] = x2;
+        a[low + 3] = x3;
+    }
+
+    /// @dev Sorts `a[low:low + 12]` with a sorting network of 39 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort12(uint256[] memory a, uint256 low) private pure {
+        uint256 x11 = a[low + 11];
+        uint256 x5 = a[low + 5];
+        uint256 x9 = a[low + 9];
+        if (x9 < x5) (x5, x9) = (x9, x5);
+        uint256 x1 = a[low + 1];
+        uint256 x7 = a[low + 7];
+        if (x7 < x1) (x1, x7) = (x7, x1);
+        uint256 x2 = a[low + 2];
+        uint256 x6 = a[low + 6];
+        if (x6 < x2) (x2, x6) = (x6, x2);
+        uint256 x4 = a[low + 4];
+        uint256 x10 = a[low + 10];
+        if (x10 < x4) (x4, x10) = (x10, x4);
+        uint256 x3 = a[low + 3];
+        if (x11 < x3) (x3, x11) = (x11, x3);
+        uint256 x0 = a[low];
+        uint256 x8 = a[low + 8];
+        if (x8 < x0) (x0, x8) = (x8, x0);
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        if (x11 < x10) (x10, x11) = (x11, x10);
+        if (x9 < x6) (x6, x9) = (x9, x6);
+        if (x6 < x1) (x1, x6) = (x6, x1);
+        if (x5 < x2) (x2, x5) = (x5, x2);
+        if (x8 < x7) (x7, x8) = (x8, x7);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        if (x6 < x4) (x4, x6) = (x6, x4);
+        if (x3 < x0) (x0, x3) = (x3, x0);
+        a[low] = x0;
+        if (x4 < x1) (x1, x4) = (x4, x1);
+        if (x10 < x5) (x5, x10) = (x10, x5);
+        if (x7 < x5) (x5, x7) = (x7, x5);
+        if (x5 < x3) (x3, x5) = (x5, x3);
+        if (x11 < x9) (x9, x11) = (x11, x9);
+        if (x10 < x9) (x9, x10) = (x10, x9);
+        if (x10 < x7) (x7, x10) = (x10, x7);
+        if (x11 < x8) (x8, x11) = (x11, x8);
+        a[low + 11] = x11;
+        if (x5 < x2) (x2, x5) = (x5, x2);
+        if (x3 < x1) (x1, x3) = (x3, x1);
+        a[low + 1] = x1;
+        if (x8 < x6) (x6, x8) = (x8, x6);
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        if (x10 < x8) (x8, x10) = (x10, x8);
+        a[low + 10] = x10;
+        if (x9 < x6) (x6, x9) = (x9, x6);
+        if (x9 < x8) (x8, x9) = (x9, x8);
+        a[low + 9] = x9;
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        a[low + 2] = x2;
+        if (x7 < x6) (x6, x7) = (x7, x6);
+        if (x7 < x5) (x5, x7) = (x7, x5);
+        if (x8 < x7) (x7, x8) = (x8, x7);
+        a[low + 7] = x7;
+        a[low + 8] = x8;
+        if (x6 < x4) (x4, x6) = (x6, x4);
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        a[low + 5] = x5;
+        a[low + 6] = x6;
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        a[low + 3] = x3;
+        a[low + 4] = x4;
+    }
+
+    /// @dev Sorts `a[low:low + 2]` with a sorting network of 1 comparators.
+    function _sort2(int256[] memory a, uint256 low) private pure {
+        int256 x1 = a[low + 1];
+        int256 x0 = a[low];
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        a[low] = x0;
+        a[low + 1] = x1;
+    }
+
+    /// @dev Sorts `a[low:low + 3]` with a sorting network of 3 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort3(int256[] memory a, uint256 low) private pure {
+        int256 x2 = a[low + 2];
+        int256 x0 = a[low];
+        int256 x1 = a[low + 1];
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        a[low] = x0;
+        a[low + 1] = x1;
+        a[low + 2] = x2;
+    }
+
+    /// @dev Sorts `a[low:low + 4]` with a sorting network of 5 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort4(int256[] memory a, uint256 low) private pure {
+        int256 x3 = a[low + 3];
+        int256 x0 = a[low];
+        int256 x1 = a[low + 1];
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        int256 x2 = a[low + 2];
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        if (x3 < x1) (x1, x3) = (x3, x1);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        a[low] = x0;
+        a[low + 1] = x1;
+        a[low + 2] = x2;
+        a[low + 3] = x3;
+    }
+
+    /// @dev Sorts `a[low:low + 5]` with a sorting network of 9 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort5(int256[] memory a, uint256 low) private pure {
+        int256 x4 = a[low + 4];
+        int256 x0 = a[low];
+        int256 x1 = a[low + 1];
+        int256 x2 = a[low + 2];
+        int256 x3 = a[low + 3];
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        if (x3 < x1) (x1, x3) = (x3, x1);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        if (x4 < x0) (x0, x4) = (x4, x0);
+        a[low] = x0;
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        a[low + 3] = x3;
+        a[low + 4] = x4;
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        a[low + 1] = x1;
+        a[low + 2] = x2;
+    }
+
+    /// @dev Sorts `a[low:low + 6]` with a sorting network of 12 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort6(int256[] memory a, uint256 low) private pure {
+        int256 x5 = a[low + 5];
+        int256 x4 = a[low + 4];
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        int256 x2 = a[low + 2];
+        int256 x3 = a[low + 3];
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        int256 x0 = a[low];
+        int256 x1 = a[low + 1];
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        if (x3 < x1) (x1, x3) = (x3, x1);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        if (x4 < x0) (x0, x4) = (x4, x0);
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        if (x5 < x1) (x1, x5) = (x5, x1);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        if (x5 < x3) (x3, x5) = (x5, x3);
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        a[low] = x0;
+        a[low + 1] = x1;
+        a[low + 2] = x2;
+        a[low + 3] = x3;
+        a[low + 4] = x4;
+        a[low + 5] = x5;
+    }
+
+    /// @dev Sorts `a[low:low + 7]` with a sorting network of 16 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort7(int256[] memory a, uint256 low) private pure {
+        int256 x6 = a[low + 6];
+        int256 x2 = a[low + 2];
+        int256 x3 = a[low + 3];
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        int256 x4 = a[low + 4];
+        int256 x5 = a[low + 5];
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        if (x6 < x4) (x4, x6) = (x6, x4);
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        int256 x0 = a[low];
+        int256 x1 = a[low + 1];
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        if (x3 < x1) (x1, x3) = (x3, x1);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        if (x5 < x1) (x1, x5) = (x5, x1);
+        if (x6 < x2) (x2, x6) = (x6, x2);
+        if (x5 < x3) (x3, x5) = (x5, x3);
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        a[low + 5] = x5;
+        a[low + 6] = x6;
+        if (x4 < x0) (x0, x4) = (x4, x0);
+        a[low] = x0;
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        a[low + 1] = x1;
+        a[low + 2] = x2;
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        a[low + 3] = x3;
+        a[low + 4] = x4;
+    }
+
+    /// @dev Sorts `a[low:low + 8]` with a sorting network of 19 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort8(int256[] memory a, uint256 low) private pure {
+        int256 x7 = a[low + 7];
+        int256 x2 = a[low + 2];
+        int256 x3 = a[low + 3];
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        int256 x4 = a[low + 4];
+        int256 x5 = a[low + 5];
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        int256 x0 = a[low];
+        int256 x1 = a[low + 1];
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        if (x3 < x1) (x1, x3) = (x3, x1);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        int256 x6 = a[low + 6];
+        if (x7 < x6) (x6, x7) = (x7, x6);
+        if (x6 < x4) (x4, x6) = (x6, x4);
+        if (x7 < x5) (x5, x7) = (x7, x5);
+        if (x4 < x0) (x0, x4) = (x4, x0);
+        a[low] = x0;
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        if (x6 < x2) (x2, x6) = (x6, x2);
+        if (x5 < x1) (x1, x5) = (x5, x1);
+        if (x7 < x3) (x3, x7) = (x7, x3);
+        a[low + 7] = x7;
+        if (x5 < x3) (x3, x5) = (x5, x3);
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        a[low + 5] = x5;
+        a[low + 6] = x6;
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        a[low + 3] = x3;
+        a[low + 4] = x4;
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        a[low + 1] = x1;
+        a[low + 2] = x2;
+    }
+
+    /// @dev Sorts `a[low:low + 9]` with a sorting network of 25 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort9(int256[] memory a, uint256 low) private pure {
+        int256 x8 = a[low + 8];
+        int256 x0 = a[low];
+        int256 x1 = a[low + 1];
+        int256 x2 = a[low + 2];
+        int256 x3 = a[low + 3];
+        int256 x4 = a[low + 4];
+        int256 x5 = a[low + 5];
+        int256 x6 = a[low + 6];
+        int256 x7 = a[low + 7];
+        if (x7 < x1) (x1, x7) = (x7, x1);
+        if (x3 < x0) (x0, x3) = (x3, x0);
+        if (x7 < x0) (x0, x7) = (x7, x0);
+        if (x8 < x4) (x4, x8) = (x8, x4);
+        if (x5 < x2) (x2, x5) = (x5, x2);
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        if (x8 < x3) (x3, x8) = (x8, x3);
+        if (x8 < x7) (x7, x8) = (x8, x7);
+        if (x3 < x1) (x1, x3) = (x3, x1);
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        if (x4 < x1) (x1, x4) = (x4, x1);
+        if (x6 < x3) (x3, x6) = (x6, x3);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        if (x7 < x5) (x5, x7) = (x7, x5);
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        a[low] = x0;
+        if (x8 < x6) (x6, x8) = (x8, x6);
+        a[low + 8] = x8;
+        if (x5 < x3) (x3, x5) = (x5, x3);
+        if (x7 < x6) (x6, x7) = (x7, x6);
+        a[low + 7] = x7;
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        a[low + 3] = x3;
+        a[low + 4] = x4;
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        a[low + 5] = x5;
+        a[low + 6] = x6;
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        a[low + 1] = x1;
+        a[low + 2] = x2;
+    }
+
+    /// @dev Sorts `a[low:low + 10]` with a sorting network of 29 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort10(int256[] memory a, uint256 low) private pure {
+        int256 x9 = a[low + 9];
+        int256 x0 = a[low];
+        int256 x1 = a[low + 1];
+        int256 x2 = a[low + 2];
+        int256 x3 = a[low + 3];
+        int256 x4 = a[low + 4];
+        int256 x5 = a[low + 5];
+        int256 x6 = a[low + 6];
+        int256 x7 = a[low + 7];
+        int256 x8 = a[low + 8];
+        if (x7 < x2) (x2, x7) = (x7, x2);
+        if (x9 < x1) (x1, x9) = (x9, x1);
+        if (x9 < x7) (x7, x9) = (x9, x7);
+        if (x5 < x3) (x3, x5) = (x5, x3);
+        if (x8 < x0) (x0, x8) = (x8, x0);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        if (x6 < x4) (x4, x6) = (x6, x4);
+        if (x9 < x6) (x6, x9) = (x9, x6);
+        if (x4 < x1) (x1, x4) = (x4, x1);
+        if (x3 < x0) (x0, x3) = (x3, x0);
+        if (x6 < x3) (x3, x6) = (x6, x3);
+        if (x8 < x5) (x5, x8) = (x8, x5);
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        a[low] = x0;
+        if (x9 < x8) (x8, x9) = (x9, x8);
+        a[low + 9] = x9;
+        if (x7 < x5) (x5, x7) = (x7, x5);
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        if (x7 < x6) (x6, x7) = (x7, x6);
+        if (x8 < x4) (x4, x8) = (x8, x4);
+        if (x8 < x7) (x7, x8) = (x8, x7);
+        a[low + 8] = x8;
+        if (x6 < x4) (x4, x6) = (x6, x4);
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        if (x5 < x1) (x1, x5) = (x5, x1);
+        if (x7 < x6) (x6, x7) = (x7, x6);
+        a[low + 7] = x7;
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        a[low + 1] = x1;
+        if (x5 < x3) (x3, x5) = (x5, x3);
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        a[low + 5] = x5;
+        a[low + 6] = x6;
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        a[low + 2] = x2;
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        a[low + 3] = x3;
+        a[low + 4] = x4;
+    }
+
+    /// @dev Sorts `a[low:low + 11]` with a sorting network of 35 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort11(int256[] memory a, uint256 low) private pure {
+        int256 x10 = a[low + 10];
+        int256 x2 = a[low + 2];
+        int256 x4 = a[low + 4];
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        int256 x1 = a[low + 1];
+        int256 x6 = a[low + 6];
+        if (x6 < x1) (x1, x6) = (x6, x1);
+        int256 x3 = a[low + 3];
+        int256 x7 = a[low + 7];
+        if (x7 < x3) (x3, x7) = (x7, x3);
+        int256 x0 = a[low];
+        int256 x9 = a[low + 9];
+        if (x9 < x0) (x0, x9) = (x9, x0);
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        if (x9 < x6) (x6, x9) = (x9, x6);
+        int256 x5 = a[low + 5];
+        int256 x8 = a[low + 8];
+        if (x8 < x5) (x5, x8) = (x8, x5);
+        if (x8 < x7) (x7, x8) = (x8, x7);
+        if (x5 < x3) (x3, x5) = (x5, x3);
+        if (x3 < x1) (x1, x3) = (x3, x1);
+        if (x10 < x4) (x4, x10) = (x10, x4);
+        if (x7 < x4) (x4, x7) = (x7, x4);
+        if (x7 < x3) (x3, x7) = (x7, x3);
+        if (x4 < x0) (x0, x4) = (x4, x0);
+        if (x5 < x2) (x2, x5) = (x5, x2);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        a[low] = x0;
+        if (x10 < x8) (x8, x10) = (x10, x8);
+        if (x9 < x5) (x5, x9) = (x9, x5);
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        if (x10 < x9) (x9, x10) = (x10, x9);
+        a[low + 10] = x10;
+        if (x8 < x6) (x6, x8) = (x8, x6);
+        if (x6 < x2) (x2, x6) = (x6, x2);
+        if (x6 < x3) (x3, x6) = (x6, x3);
+        if (x8 < x7) (x7, x8) = (x8, x7);
+        if (x9 < x8) (x8, x9) = (x9, x8);
+        a[low + 9] = x9;
+        if (x7 < x5) (x5, x7) = (x7, x5);
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        if (x8 < x7) (x7, x8) = (x8, x7);
+        a[low + 8] = x8;
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        a[low + 1] = x1;
+        if (x7 < x6) (x6, x7) = (x7, x6);
+        a[low + 6] = x6;
+        a[low + 7] = x7;
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        a[low + 4] = x4;
+        a[low + 5] = x5;
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        a[low + 2] = x2;
+        a[low + 3] = x3;
+    }
+
+    /// @dev Sorts `a[low:low + 12]` with a sorting network of 39 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort12(int256[] memory a, uint256 low) private pure {
+        int256 x11 = a[low + 11];
+        int256 x5 = a[low + 5];
+        int256 x9 = a[low + 9];
+        if (x9 < x5) (x5, x9) = (x9, x5);
+        int256 x1 = a[low + 1];
+        int256 x7 = a[low + 7];
+        if (x7 < x1) (x1, x7) = (x7, x1);
+        int256 x2 = a[low + 2];
+        int256 x6 = a[low + 6];
+        if (x6 < x2) (x2, x6) = (x6, x2);
+        int256 x4 = a[low + 4];
+        int256 x10 = a[low + 10];
+        if (x10 < x4) (x4, x10) = (x10, x4);
+        int256 x3 = a[low + 3];
+        if (x11 < x3) (x3, x11) = (x11, x3);
+        int256 x0 = a[low];
+        int256 x8 = a[low + 8];
+        if (x8 < x0) (x0, x8) = (x8, x0);
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        if (x11 < x10) (x10, x11) = (x11, x10);
+        if (x9 < x6) (x6, x9) = (x9, x6);
+        if (x6 < x1) (x1, x6) = (x6, x1);
+        if (x5 < x2) (x2, x5) = (x5, x2);
+        if (x8 < x7) (x7, x8) = (x8, x7);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        if (x6 < x4) (x4, x6) = (x6, x4);
+        if (x3 < x0) (x0, x3) = (x3, x0);
+        a[low] = x0;
+        if (x4 < x1) (x1, x4) = (x4, x1);
+        if (x10 < x5) (x5, x10) = (x10, x5);
+        if (x7 < x5) (x5, x7) = (x7, x5);
+        if (x5 < x3) (x3, x5) = (x5, x3);
+        if (x11 < x9) (x9, x11) = (x11, x9);
+        if (x10 < x9) (x9, x10) = (x10, x9);
+        if (x10 < x7) (x7, x10) = (x10, x7);
+        if (x11 < x8) (x8, x11) = (x11, x8);
+        a[low + 11] = x11;
+        if (x5 < x2) (x2, x5) = (x5, x2);
+        if (x3 < x1) (x1, x3) = (x3, x1);
+        a[low + 1] = x1;
+        if (x8 < x6) (x6, x8) = (x8, x6);
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        if (x10 < x8) (x8, x10) = (x10, x8);
+        a[low + 10] = x10;
+        if (x9 < x6) (x6, x9) = (x9, x6);
+        if (x9 < x8) (x8, x9) = (x9, x8);
+        a[low + 9] = x9;
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        a[low + 2] = x2;
+        if (x7 < x6) (x6, x7) = (x7, x6);
+        if (x7 < x5) (x5, x7) = (x7, x5);
+        if (x8 < x7) (x7, x8) = (x8, x7);
+        a[low + 7] = x7;
+        a[low + 8] = x8;
+        if (x6 < x4) (x4, x6) = (x6, x4);
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        a[low + 5] = x5;
+        a[low + 6] = x6;
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        a[low + 3] = x3;
+        a[low + 4] = x4;
+    }
+
+    /// @dev Sorts `a[low:low + 2]` with a sorting network of 1 comparators.
+    function _sort2(address[] memory a, uint256 low) private pure {
+        address x1 = a[low + 1];
+        address x0 = a[low];
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        a[low] = x0;
+        a[low + 1] = x1;
+    }
+
+    /// @dev Sorts `a[low:low + 3]` with a sorting network of 3 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort3(address[] memory a, uint256 low) private pure {
+        address x2 = a[low + 2];
+        address x0 = a[low];
+        address x1 = a[low + 1];
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        a[low] = x0;
+        a[low + 1] = x1;
+        a[low + 2] = x2;
+    }
+
+    /// @dev Sorts `a[low:low + 4]` with a sorting network of 5 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort4(address[] memory a, uint256 low) private pure {
+        address x3 = a[low + 3];
+        address x0 = a[low];
+        address x1 = a[low + 1];
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        address x2 = a[low + 2];
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        if (x3 < x1) (x1, x3) = (x3, x1);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        a[low] = x0;
+        a[low + 1] = x1;
+        a[low + 2] = x2;
+        a[low + 3] = x3;
+    }
+
+    /// @dev Sorts `a[low:low + 5]` with a sorting network of 9 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort5(address[] memory a, uint256 low) private pure {
+        address x4 = a[low + 4];
+        address x0 = a[low];
+        address x1 = a[low + 1];
+        address x2 = a[low + 2];
+        address x3 = a[low + 3];
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        if (x3 < x1) (x1, x3) = (x3, x1);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        if (x4 < x0) (x0, x4) = (x4, x0);
+        a[low] = x0;
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        a[low + 3] = x3;
+        a[low + 4] = x4;
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        a[low + 1] = x1;
+        a[low + 2] = x2;
+    }
+
+    /// @dev Sorts `a[low:low + 6]` with a sorting network of 12 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort6(address[] memory a, uint256 low) private pure {
+        address x5 = a[low + 5];
+        address x4 = a[low + 4];
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        address x2 = a[low + 2];
+        address x3 = a[low + 3];
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        address x0 = a[low];
+        address x1 = a[low + 1];
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        if (x3 < x1) (x1, x3) = (x3, x1);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        if (x4 < x0) (x0, x4) = (x4, x0);
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        if (x5 < x1) (x1, x5) = (x5, x1);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        if (x5 < x3) (x3, x5) = (x5, x3);
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        a[low] = x0;
+        a[low + 1] = x1;
+        a[low + 2] = x2;
+        a[low + 3] = x3;
+        a[low + 4] = x4;
+        a[low + 5] = x5;
+    }
+
+    /// @dev Sorts `a[low:low + 7]` with a sorting network of 16 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort7(address[] memory a, uint256 low) private pure {
+        address x6 = a[low + 6];
+        address x2 = a[low + 2];
+        address x3 = a[low + 3];
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        address x4 = a[low + 4];
+        address x5 = a[low + 5];
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        if (x6 < x4) (x4, x6) = (x6, x4);
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        address x0 = a[low];
+        address x1 = a[low + 1];
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        if (x3 < x1) (x1, x3) = (x3, x1);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        if (x5 < x1) (x1, x5) = (x5, x1);
+        if (x6 < x2) (x2, x6) = (x6, x2);
+        if (x5 < x3) (x3, x5) = (x5, x3);
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        a[low + 5] = x5;
+        a[low + 6] = x6;
+        if (x4 < x0) (x0, x4) = (x4, x0);
+        a[low] = x0;
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        a[low + 1] = x1;
+        a[low + 2] = x2;
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        a[low + 3] = x3;
+        a[low + 4] = x4;
+    }
+
+    /// @dev Sorts `a[low:low + 8]` with a sorting network of 19 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort8(address[] memory a, uint256 low) private pure {
+        address x7 = a[low + 7];
+        address x0 = a[low];
+        address x1 = a[low + 1];
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        address x6 = a[low + 6];
+        if (x7 < x6) (x6, x7) = (x7, x6);
+        address x2 = a[low + 2];
+        address x3 = a[low + 3];
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        if (x3 < x1) (x1, x3) = (x3, x1);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        address x4 = a[low + 4];
+        address x5 = a[low + 5];
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        if (x7 < x5) (x5, x7) = (x7, x5);
+        if (x7 < x3) (x3, x7) = (x7, x3);
+        a[low + 7] = x7;
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        if (x6 < x4) (x4, x6) = (x6, x4);
+        if (x4 < x0) (x0, x4) = (x4, x0);
+        a[low] = x0;
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        if (x5 < x1) (x1, x5) = (x5, x1);
+        if (x5 < x3) (x3, x5) = (x5, x3);
+        if (x6 < x2) (x2, x6) = (x6, x2);
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        a[low + 5] = x5;
+        a[low + 6] = x6;
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        a[low + 3] = x3;
+        a[low + 4] = x4;
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        a[low + 1] = x1;
+        a[low + 2] = x2;
+    }
+
+    /// @dev Sorts `a[low:low + 9]` with a sorting network of 25 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort9(address[] memory a, uint256 low) private pure {
+        address x8 = a[low + 8];
+        address x4 = a[low + 4];
+        if (x8 < x4) (x4, x8) = (x8, x4);
+        address x0 = a[low];
+        address x3 = a[low + 3];
+        if (x3 < x0) (x0, x3) = (x3, x0);
+        address x2 = a[low + 2];
+        address x5 = a[low + 5];
+        if (x5 < x2) (x2, x5) = (x5, x2);
+        address x1 = a[low + 1];
+        address x7 = a[low + 7];
+        if (x7 < x1) (x1, x7) = (x7, x1);
+        if (x7 < x0) (x0, x7) = (x7, x0);
+        if (x8 < x3) (x3, x8) = (x8, x3);
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        if (x8 < x7) (x7, x8) = (x8, x7);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        if (x3 < x1) (x1, x3) = (x3, x1);
+        address x6 = a[low + 6];
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        if (x6 < x3) (x3, x6) = (x6, x3);
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        if (x7 < x5) (x5, x7) = (x7, x5);
+        if (x8 < x6) (x6, x8) = (x8, x6);
+        if (x5 < x3) (x3, x5) = (x5, x3);
+        if (x4 < x1) (x1, x4) = (x4, x1);
+        if (x7 < x6) (x6, x7) = (x7, x6);
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        a[low] = x0;
+        a[low + 1] = x1;
+        a[low + 2] = x2;
+        a[low + 3] = x3;
+        a[low + 4] = x4;
+        a[low + 5] = x5;
+        a[low + 6] = x6;
+        a[low + 7] = x7;
+        a[low + 8] = x8;
+    }
+
+    /// @dev Sorts `a[low:low + 10]` with a sorting network of 29 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort10(address[] memory a, uint256 low) private pure {
+        address x9 = a[low + 9];
+        address x1 = a[low + 1];
+        if (x9 < x1) (x1, x9) = (x9, x1);
+        address x0 = a[low];
+        address x8 = a[low + 8];
+        if (x8 < x0) (x0, x8) = (x8, x0);
+        address x2 = a[low + 2];
+        address x7 = a[low + 7];
+        if (x7 < x2) (x2, x7) = (x7, x2);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        address x4 = a[low + 4];
+        address x6 = a[low + 6];
+        if (x6 < x4) (x4, x6) = (x6, x4);
+        if (x9 < x7) (x7, x9) = (x9, x7);
+        if (x9 < x6) (x6, x9) = (x9, x6);
+        if (x4 < x1) (x1, x4) = (x4, x1);
+        address x3 = a[low + 3];
+        address x5 = a[low + 5];
+        if (x5 < x3) (x3, x5) = (x5, x3);
+        if (x3 < x0) (x0, x3) = (x3, x0);
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        a[low] = x0;
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        if (x8 < x5) (x5, x8) = (x8, x5);
+        if (x9 < x8) (x8, x9) = (x9, x8);
+        a[low + 9] = x9;
+        if (x7 < x5) (x5, x7) = (x7, x5);
+        if (x5 < x1) (x1, x5) = (x5, x1);
+        if (x6 < x3) (x3, x6) = (x6, x3);
+        if (x8 < x4) (x4, x8) = (x8, x4);
+        if (x7 < x6) (x6, x7) = (x7, x6);
+        if (x6 < x4) (x4, x6) = (x6, x4);
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        if (x5 < x3) (x3, x5) = (x5, x3);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        a[low + 1] = x1;
+        if (x8 < x7) (x7, x8) = (x8, x7);
+        a[low + 8] = x8;
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        if (x7 < x6) (x6, x7) = (x7, x6);
+        a[low + 7] = x7;
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        a[low + 2] = x2;
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        a[low + 3] = x3;
+        a[low + 4] = x4;
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        a[low + 5] = x5;
+        a[low + 6] = x6;
+    }
+
+    /// @dev Sorts `a[low:low + 11]` with a sorting network of 35 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort11(address[] memory a, uint256 low) private pure {
+        address x10 = a[low + 10];
+        address x2 = a[low + 2];
+        address x4 = a[low + 4];
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        address x1 = a[low + 1];
+        address x6 = a[low + 6];
+        if (x6 < x1) (x1, x6) = (x6, x1);
+        address x3 = a[low + 3];
+        address x7 = a[low + 7];
+        if (x7 < x3) (x3, x7) = (x7, x3);
+        address x0 = a[low];
+        address x9 = a[low + 9];
+        if (x9 < x0) (x0, x9) = (x9, x0);
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        if (x9 < x6) (x6, x9) = (x9, x6);
+        address x5 = a[low + 5];
+        address x8 = a[low + 8];
+        if (x8 < x5) (x5, x8) = (x8, x5);
+        if (x8 < x7) (x7, x8) = (x8, x7);
+        if (x5 < x3) (x3, x5) = (x5, x3);
+        if (x3 < x1) (x1, x3) = (x3, x1);
+        if (x10 < x4) (x4, x10) = (x10, x4);
+        if (x7 < x4) (x4, x7) = (x7, x4);
+        if (x7 < x3) (x3, x7) = (x7, x3);
+        if (x4 < x0) (x0, x4) = (x4, x0);
+        if (x5 < x2) (x2, x5) = (x5, x2);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        a[low] = x0;
+        if (x10 < x8) (x8, x10) = (x10, x8);
+        if (x9 < x5) (x5, x9) = (x9, x5);
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        if (x10 < x9) (x9, x10) = (x10, x9);
+        a[low + 10] = x10;
+        if (x8 < x6) (x6, x8) = (x8, x6);
+        if (x6 < x2) (x2, x6) = (x6, x2);
+        if (x6 < x3) (x3, x6) = (x6, x3);
+        if (x8 < x7) (x7, x8) = (x8, x7);
+        if (x9 < x8) (x8, x9) = (x9, x8);
+        a[low + 9] = x9;
+        if (x7 < x5) (x5, x7) = (x7, x5);
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        if (x8 < x7) (x7, x8) = (x8, x7);
+        a[low + 8] = x8;
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        a[low + 1] = x1;
+        if (x7 < x6) (x6, x7) = (x7, x6);
+        a[low + 6] = x6;
+        a[low + 7] = x7;
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        a[low + 4] = x4;
+        a[low + 5] = x5;
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        a[low + 2] = x2;
+        a[low + 3] = x3;
+    }
+
+    /// @dev Sorts `a[low:low + 12]` with a sorting network of 39 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort12(address[] memory a, uint256 low) private pure {
+        address x11 = a[low + 11];
+        address x0 = a[low];
+        address x8 = a[low + 8];
+        if (x8 < x0) (x0, x8) = (x8, x0);
+        address x1 = a[low + 1];
+        address x7 = a[low + 7];
+        if (x7 < x1) (x1, x7) = (x7, x1);
+        address x3 = a[low + 3];
+        if (x11 < x3) (x3, x11) = (x11, x3);
+        if (x8 < x7) (x7, x8) = (x8, x7);
+        address x4 = a[low + 4];
+        address x10 = a[low + 10];
+        if (x10 < x4) (x4, x10) = (x10, x4);
+        address x5 = a[low + 5];
+        address x9 = a[low + 9];
+        if (x9 < x5) (x5, x9) = (x9, x5);
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        address x2 = a[low + 2];
+        address x6 = a[low + 6];
+        if (x6 < x2) (x2, x6) = (x6, x2);
+        if (x11 < x10) (x10, x11) = (x11, x10);
+        if (x9 < x6) (x6, x9) = (x9, x6);
+        if (x5 < x2) (x2, x5) = (x5, x2);
+        if (x10 < x5) (x5, x10) = (x10, x5);
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        if (x6 < x1) (x1, x6) = (x6, x1);
+        if (x7 < x5) (x5, x7) = (x7, x5);
+        if (x11 < x9) (x9, x11) = (x11, x9);
+        if (x6 < x4) (x4, x6) = (x6, x4);
+        if (x11 < x8) (x8, x11) = (x11, x8);
+        a[low + 11] = x11;
+        if (x10 < x9) (x9, x10) = (x10, x9);
+        if (x10 < x7) (x7, x10) = (x10, x7);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        if (x3 < x0) (x0, x3) = (x3, x0);
+        a[low] = x0;
+        if (x8 < x6) (x6, x8) = (x8, x6);
+        if (x10 < x8) (x8, x10) = (x10, x8);
+        a[low + 10] = x10;
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        if (x4 < x1) (x1, x4) = (x4, x1);
+        if (x5 < x3) (x3, x5) = (x5, x3);
+        if (x9 < x6) (x6, x9) = (x9, x6);
+        if (x5 < x2) (x2, x5) = (x5, x2);
+        if (x9 < x8) (x8, x9) = (x9, x8);
+        a[low + 9] = x9;
+        if (x3 < x1) (x1, x3) = (x3, x1);
+        a[low + 1] = x1;
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        a[low + 2] = x2;
+        if (x7 < x6) (x6, x7) = (x7, x6);
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        if (x7 < x5) (x5, x7) = (x7, x5);
+        if (x8 < x7) (x7, x8) = (x8, x7);
+        a[low + 7] = x7;
+        a[low + 8] = x8;
+        if (x6 < x4) (x4, x6) = (x6, x4);
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        a[low + 3] = x3;
+        a[low + 4] = x4;
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        a[low + 5] = x5;
+        a[low + 6] = x6;
+    }
+
+    /// @dev Sorts `a[low:low + 2]` with a sorting network of 1 comparators.
+    function _sort2(bytes32[] memory a, uint256 low) private pure {
+        bytes32 x1 = a[low + 1];
+        bytes32 x0 = a[low];
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        a[low] = x0;
+        a[low + 1] = x1;
+    }
+
+    /// @dev Sorts `a[low:low + 3]` with a sorting network of 3 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort3(bytes32[] memory a, uint256 low) private pure {
+        bytes32 x2 = a[low + 2];
+        bytes32 x0 = a[low];
+        bytes32 x1 = a[low + 1];
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        a[low] = x0;
+        a[low + 1] = x1;
+        a[low + 2] = x2;
+    }
+
+    /// @dev Sorts `a[low:low + 4]` with a sorting network of 5 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort4(bytes32[] memory a, uint256 low) private pure {
+        bytes32 x3 = a[low + 3];
+        bytes32 x0 = a[low];
+        bytes32 x1 = a[low + 1];
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        bytes32 x2 = a[low + 2];
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        if (x3 < x1) (x1, x3) = (x3, x1);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        a[low] = x0;
+        a[low + 1] = x1;
+        a[low + 2] = x2;
+        a[low + 3] = x3;
+    }
+
+    /// @dev Sorts `a[low:low + 5]` with a sorting network of 9 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort5(bytes32[] memory a, uint256 low) private pure {
+        bytes32 x4 = a[low + 4];
+        bytes32 x0 = a[low];
+        bytes32 x1 = a[low + 1];
+        bytes32 x2 = a[low + 2];
+        bytes32 x3 = a[low + 3];
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        if (x3 < x1) (x1, x3) = (x3, x1);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        if (x4 < x0) (x0, x4) = (x4, x0);
+        a[low] = x0;
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        a[low + 3] = x3;
+        a[low + 4] = x4;
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        a[low + 1] = x1;
+        a[low + 2] = x2;
+    }
+
+    /// @dev Sorts `a[low:low + 6]` with a sorting network of 12 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort6(bytes32[] memory a, uint256 low) private pure {
+        bytes32 x5 = a[low + 5];
+        bytes32 x4 = a[low + 4];
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        bytes32 x2 = a[low + 2];
+        bytes32 x3 = a[low + 3];
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        bytes32 x0 = a[low];
+        bytes32 x1 = a[low + 1];
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        if (x3 < x1) (x1, x3) = (x3, x1);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        if (x4 < x0) (x0, x4) = (x4, x0);
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        if (x5 < x1) (x1, x5) = (x5, x1);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        if (x5 < x3) (x3, x5) = (x5, x3);
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        a[low] = x0;
+        a[low + 1] = x1;
+        a[low + 2] = x2;
+        a[low + 3] = x3;
+        a[low + 4] = x4;
+        a[low + 5] = x5;
+    }
+
+    /// @dev Sorts `a[low:low + 7]` with a sorting network of 16 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort7(bytes32[] memory a, uint256 low) private pure {
+        bytes32 x6 = a[low + 6];
+        bytes32 x2 = a[low + 2];
+        bytes32 x3 = a[low + 3];
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        bytes32 x4 = a[low + 4];
+        bytes32 x5 = a[low + 5];
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        if (x6 < x4) (x4, x6) = (x6, x4);
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        bytes32 x0 = a[low];
+        bytes32 x1 = a[low + 1];
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        if (x3 < x1) (x1, x3) = (x3, x1);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        if (x5 < x1) (x1, x5) = (x5, x1);
+        if (x6 < x2) (x2, x6) = (x6, x2);
+        if (x5 < x3) (x3, x5) = (x5, x3);
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        a[low + 5] = x5;
+        a[low + 6] = x6;
+        if (x4 < x0) (x0, x4) = (x4, x0);
+        a[low] = x0;
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        a[low + 1] = x1;
+        a[low + 2] = x2;
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        a[low + 3] = x3;
+        a[low + 4] = x4;
+    }
+
+    /// @dev Sorts `a[low:low + 8]` with a sorting network of 19 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort8(bytes32[] memory a, uint256 low) private pure {
+        bytes32 x7 = a[low + 7];
+        bytes32 x2 = a[low + 2];
+        bytes32 x3 = a[low + 3];
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        bytes32 x4 = a[low + 4];
+        bytes32 x5 = a[low + 5];
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        bytes32 x0 = a[low];
+        bytes32 x1 = a[low + 1];
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        if (x3 < x1) (x1, x3) = (x3, x1);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        bytes32 x6 = a[low + 6];
+        if (x7 < x6) (x6, x7) = (x7, x6);
+        if (x6 < x4) (x4, x6) = (x6, x4);
+        if (x7 < x5) (x5, x7) = (x7, x5);
+        if (x4 < x0) (x0, x4) = (x4, x0);
+        a[low] = x0;
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        if (x6 < x2) (x2, x6) = (x6, x2);
+        if (x5 < x1) (x1, x5) = (x5, x1);
+        if (x7 < x3) (x3, x7) = (x7, x3);
+        a[low + 7] = x7;
+        if (x5 < x3) (x3, x5) = (x5, x3);
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        a[low + 5] = x5;
+        a[low + 6] = x6;
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        a[low + 3] = x3;
+        a[low + 4] = x4;
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        a[low + 1] = x1;
+        a[low + 2] = x2;
+    }
+
+    /// @dev Sorts `a[low:low + 9]` with a sorting network of 25 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort9(bytes32[] memory a, uint256 low) private pure {
+        bytes32 x8 = a[low + 8];
+        bytes32 x0 = a[low];
+        bytes32 x1 = a[low + 1];
+        bytes32 x2 = a[low + 2];
+        bytes32 x3 = a[low + 3];
+        bytes32 x4 = a[low + 4];
+        bytes32 x5 = a[low + 5];
+        bytes32 x6 = a[low + 6];
+        bytes32 x7 = a[low + 7];
+        if (x7 < x1) (x1, x7) = (x7, x1);
+        if (x3 < x0) (x0, x3) = (x3, x0);
+        if (x7 < x0) (x0, x7) = (x7, x0);
+        if (x8 < x4) (x4, x8) = (x8, x4);
+        if (x5 < x2) (x2, x5) = (x5, x2);
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        if (x8 < x3) (x3, x8) = (x8, x3);
+        if (x8 < x7) (x7, x8) = (x8, x7);
+        if (x3 < x1) (x1, x3) = (x3, x1);
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        if (x4 < x1) (x1, x4) = (x4, x1);
+        if (x6 < x3) (x3, x6) = (x6, x3);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        if (x7 < x5) (x5, x7) = (x7, x5);
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        a[low] = x0;
+        if (x8 < x6) (x6, x8) = (x8, x6);
+        a[low + 8] = x8;
+        if (x5 < x3) (x3, x5) = (x5, x3);
+        if (x7 < x6) (x6, x7) = (x7, x6);
+        a[low + 7] = x7;
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        a[low + 3] = x3;
+        a[low + 4] = x4;
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        a[low + 5] = x5;
+        a[low + 6] = x6;
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        a[low + 1] = x1;
+        a[low + 2] = x2;
+    }
+
+    /// @dev Sorts `a[low:low + 10]` with a sorting network of 29 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort10(bytes32[] memory a, uint256 low) private pure {
+        bytes32 x9 = a[low + 9];
+        bytes32 x0 = a[low];
+        bytes32 x1 = a[low + 1];
+        bytes32 x2 = a[low + 2];
+        bytes32 x3 = a[low + 3];
+        bytes32 x4 = a[low + 4];
+        bytes32 x5 = a[low + 5];
+        bytes32 x6 = a[low + 6];
+        bytes32 x7 = a[low + 7];
+        bytes32 x8 = a[low + 8];
+        if (x7 < x2) (x2, x7) = (x7, x2);
+        if (x9 < x1) (x1, x9) = (x9, x1);
+        if (x9 < x7) (x7, x9) = (x9, x7);
+        if (x5 < x3) (x3, x5) = (x5, x3);
+        if (x8 < x0) (x0, x8) = (x8, x0);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        if (x6 < x4) (x4, x6) = (x6, x4);
+        if (x9 < x6) (x6, x9) = (x9, x6);
+        if (x4 < x1) (x1, x4) = (x4, x1);
+        if (x3 < x0) (x0, x3) = (x3, x0);
+        if (x6 < x3) (x3, x6) = (x6, x3);
+        if (x8 < x5) (x5, x8) = (x8, x5);
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        a[low] = x0;
+        if (x9 < x8) (x8, x9) = (x9, x8);
+        a[low + 9] = x9;
+        if (x7 < x5) (x5, x7) = (x7, x5);
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        if (x7 < x6) (x6, x7) = (x7, x6);
+        if (x8 < x4) (x4, x8) = (x8, x4);
+        if (x8 < x7) (x7, x8) = (x8, x7);
+        a[low + 8] = x8;
+        if (x6 < x4) (x4, x6) = (x6, x4);
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        if (x5 < x1) (x1, x5) = (x5, x1);
+        if (x7 < x6) (x6, x7) = (x7, x6);
+        a[low + 7] = x7;
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        a[low + 1] = x1;
+        if (x5 < x3) (x3, x5) = (x5, x3);
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        a[low + 5] = x5;
+        a[low + 6] = x6;
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        a[low + 2] = x2;
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        a[low + 3] = x3;
+        a[low + 4] = x4;
+    }
+
+    /// @dev Sorts `a[low:low + 11]` with a sorting network of 35 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort11(bytes32[] memory a, uint256 low) private pure {
+        bytes32 x10 = a[low + 10];
+        bytes32 x2 = a[low + 2];
+        bytes32 x4 = a[low + 4];
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        bytes32 x1 = a[low + 1];
+        bytes32 x6 = a[low + 6];
+        if (x6 < x1) (x1, x6) = (x6, x1);
+        bytes32 x3 = a[low + 3];
+        bytes32 x7 = a[low + 7];
+        if (x7 < x3) (x3, x7) = (x7, x3);
+        bytes32 x0 = a[low];
+        bytes32 x9 = a[low + 9];
+        if (x9 < x0) (x0, x9) = (x9, x0);
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        if (x9 < x6) (x6, x9) = (x9, x6);
+        bytes32 x5 = a[low + 5];
+        bytes32 x8 = a[low + 8];
+        if (x8 < x5) (x5, x8) = (x8, x5);
+        if (x8 < x7) (x7, x8) = (x8, x7);
+        if (x5 < x3) (x3, x5) = (x5, x3);
+        if (x3 < x1) (x1, x3) = (x3, x1);
+        if (x10 < x4) (x4, x10) = (x10, x4);
+        if (x7 < x4) (x4, x7) = (x7, x4);
+        if (x7 < x3) (x3, x7) = (x7, x3);
+        if (x4 < x0) (x0, x4) = (x4, x0);
+        if (x5 < x2) (x2, x5) = (x5, x2);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        a[low] = x0;
+        if (x10 < x8) (x8, x10) = (x10, x8);
+        if (x9 < x5) (x5, x9) = (x9, x5);
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        if (x10 < x9) (x9, x10) = (x10, x9);
+        a[low + 10] = x10;
+        if (x8 < x6) (x6, x8) = (x8, x6);
+        if (x6 < x2) (x2, x6) = (x6, x2);
+        if (x6 < x3) (x3, x6) = (x6, x3);
+        if (x8 < x7) (x7, x8) = (x8, x7);
+        if (x9 < x8) (x8, x9) = (x9, x8);
+        a[low + 9] = x9;
+        if (x7 < x5) (x5, x7) = (x7, x5);
+        if (x4 < x2) (x2, x4) = (x4, x2);
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        if (x8 < x7) (x7, x8) = (x8, x7);
+        a[low + 8] = x8;
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        a[low + 1] = x1;
+        if (x7 < x6) (x6, x7) = (x7, x6);
+        a[low + 6] = x6;
+        a[low + 7] = x7;
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        a[low + 4] = x4;
+        a[low + 5] = x5;
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        a[low + 2] = x2;
+        a[low + 3] = x3;
+    }
+
+    /// @dev Sorts `a[low:low + 12]` with a sorting network of 39 comparators.
+    /// The last element is read first, so its bounds check covers the others.
+    function _sort12(bytes32[] memory a, uint256 low) private pure {
+        bytes32 x11 = a[low + 11];
+        bytes32 x5 = a[low + 5];
+        bytes32 x9 = a[low + 9];
+        if (x9 < x5) (x5, x9) = (x9, x5);
+        bytes32 x1 = a[low + 1];
+        bytes32 x7 = a[low + 7];
+        if (x7 < x1) (x1, x7) = (x7, x1);
+        bytes32 x2 = a[low + 2];
+        bytes32 x6 = a[low + 6];
+        if (x6 < x2) (x2, x6) = (x6, x2);
+        bytes32 x4 = a[low + 4];
+        bytes32 x10 = a[low + 10];
+        if (x10 < x4) (x4, x10) = (x10, x4);
+        bytes32 x3 = a[low + 3];
+        if (x11 < x3) (x3, x11) = (x11, x3);
+        bytes32 x0 = a[low];
+        bytes32 x8 = a[low + 8];
+        if (x8 < x0) (x0, x8) = (x8, x0);
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        if (x11 < x10) (x10, x11) = (x11, x10);
+        if (x9 < x6) (x6, x9) = (x9, x6);
+        if (x6 < x1) (x1, x6) = (x6, x1);
+        if (x5 < x2) (x2, x5) = (x5, x2);
+        if (x8 < x7) (x7, x8) = (x8, x7);
+        if (x2 < x0) (x0, x2) = (x2, x0);
+        if (x2 < x1) (x1, x2) = (x2, x1);
+        if (x6 < x4) (x4, x6) = (x6, x4);
+        if (x3 < x0) (x0, x3) = (x3, x0);
+        a[low] = x0;
+        if (x4 < x1) (x1, x4) = (x4, x1);
+        if (x10 < x5) (x5, x10) = (x10, x5);
+        if (x7 < x5) (x5, x7) = (x7, x5);
+        if (x5 < x3) (x3, x5) = (x5, x3);
+        if (x11 < x9) (x9, x11) = (x11, x9);
+        if (x10 < x9) (x9, x10) = (x10, x9);
+        if (x10 < x7) (x7, x10) = (x10, x7);
+        if (x11 < x8) (x8, x11) = (x11, x8);
+        a[low + 11] = x11;
+        if (x5 < x2) (x2, x5) = (x5, x2);
+        if (x3 < x1) (x1, x3) = (x3, x1);
+        a[low + 1] = x1;
+        if (x8 < x6) (x6, x8) = (x8, x6);
+        if (x5 < x4) (x4, x5) = (x5, x4);
+        if (x10 < x8) (x8, x10) = (x10, x8);
+        a[low + 10] = x10;
+        if (x9 < x6) (x6, x9) = (x9, x6);
+        if (x9 < x8) (x8, x9) = (x9, x8);
+        a[low + 9] = x9;
+        if (x3 < x2) (x2, x3) = (x3, x2);
+        a[low + 2] = x2;
+        if (x7 < x6) (x6, x7) = (x7, x6);
+        if (x7 < x5) (x5, x7) = (x7, x5);
+        if (x8 < x7) (x7, x8) = (x8, x7);
+        a[low + 7] = x7;
+        a[low + 8] = x8;
+        if (x6 < x4) (x4, x6) = (x6, x4);
+        if (x6 < x5) (x5, x6) = (x6, x5);
+        a[low + 5] = x5;
+        a[low + 6] = x6;
+        if (x4 < x3) (x3, x4) = (x4, x3);
+        a[low + 3] = x3;
+        a[low + 4] = x4;
+    }
+
+    /// @dev Reinterprets `a` as the array of its words, which upstream searches and
+    /// hashes whole. Solidity cannot read an `address[]` as `uint256[]`.
+    /// @custom:solar-trusted
+    function _toUints(address[] memory a) private pure returns (uint256[] memory casted) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            casted := a
+        }
     }
 
     /// @dev Raises the `Panic(0x32)` an out-of-range index raises.
