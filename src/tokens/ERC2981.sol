@@ -4,6 +4,15 @@ pragma solidity ^0.8.4;
 /// @notice Simple ERC2981 NFT Royalty Standard implementation.
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/tokens/ERC2981.sol)
 /// @author Modified from OpenZeppelin (https://github.com/OpenZeppelin/openzeppelin-contracts/blob/master/contracts/token/common/ERC2981.sol)
+///
+/// @dev The checked port keeps the royalties in the assembly's slots and words, so it is
+/// storage-compatible with it: the default royalty at the seed's slot and a token's at the
+/// `abi.encode` hash of its id and the seed. Solidity cannot name those slots, so two
+/// trusted helpers read and write a slot; they carry the contract's name, so that it
+/// still combines with ERC721. Every check keeps its order and custom error. A royalty
+/// whose product overflows reverts with no data, as the assembly's out-of-gas revert
+/// does, without using up the remaining gas.
+/// @custom:solar-safe memory arithmetic
 abstract contract ERC2981 {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                       CUSTOM ERRORS                        */
@@ -56,12 +65,8 @@ abstract contract ERC2981 {
     /// See: https://eips.ethereum.org/EIPS/eip-165
     /// This function call must use less than 30000 gas.
     function supportsInterface(bytes4 interfaceId) public view virtual returns (bool result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let s := shr(224, interfaceId)
-            // ERC165: 0x01ffc9a7, ERC2981: 0x2a55205a.
-            result := or(eq(s, 0x01ffc9a7), eq(s, 0x2a55205a))
-        }
+        // ERC165: 0x01ffc9a7, ERC2981: 0x2a55205a.
+        result = interfaceId == 0x01ffc9a7 || interfaceId == 0x2a55205a;
     }
 
     /// @dev Returns the `receiver` and `royaltyAmount` for `tokenId` sold at `salePrice`.
@@ -72,23 +77,20 @@ abstract contract ERC2981 {
         returns (address receiver, uint256 royaltyAmount)
     {
         uint256 feeDenominator = _feeDenominator();
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x00, tokenId)
-            mstore(0x20, _ERC2981_MASTER_SLOT_SEED)
-            let packed := sload(keccak256(0x00, 0x40))
-            receiver := shr(96, packed)
-            if iszero(receiver) {
-                packed := sload(mload(0x20))
-                receiver := shr(96, packed)
-            }
-            let x := salePrice
-            let y := xor(packed, shl(96, receiver)) // `feeNumerator`.
-            // Overflow check, equivalent to `require(y == 0 || x <= type(uint256).max / y)`.
-            // Out-of-gas revert. Should not be triggered in practice, but included for safety.
-            returndatacopy(returndatasize(), returndatasize(), mul(y, gt(x, div(not(0), y))))
-            royaltyAmount := div(mul(x, y), feeDenominator)
+        uint256 packed = _erc2981Sload(_erc2981TokenSlot(tokenId));
+        receiver = address(uint160(packed >> 96));
+        if (receiver == address(0)) {
+            packed = _erc2981Sload(_ERC2981_MASTER_SLOT_SEED);
+            receiver = address(uint160(packed >> 96));
         }
+        uint256 x = salePrice;
+        uint256 y = uint96(packed); // `feeNumerator`.
+        // Overflow check, equivalent to `require(y == 0 || x <= type(uint256).max / y)`.
+        // Should not be triggered in practice, but included for safety. The assembly's
+        // out-of-gas revert and this one both return no data.
+        if (y != 0 && x > type(uint256).max / y) revert();
+        // The assembly's division by a zero denominator gives zero.
+        if (feeDenominator != 0) royaltyAmount = x * y / feeDenominator;
     }
 
     /// @dev Sets the default royalty `receiver` and `feeNumerator`.
@@ -98,28 +100,16 @@ abstract contract ERC2981 {
     /// - `feeNumerator` must not be greater than the fee denominator.
     function _setDefaultRoyalty(address receiver, uint96 feeNumerator) internal virtual {
         uint256 feeDenominator = _feeDenominator();
-        /// @solidity memory-safe-assembly
-        assembly {
-            feeNumerator := shr(160, shl(160, feeNumerator))
-            if gt(feeNumerator, feeDenominator) {
-                mstore(0x00, 0x350a88b3) // `RoyaltyOverflow()`.
-                revert(0x1c, 0x04)
-            }
-            let packed := shl(96, receiver)
-            if iszero(packed) {
-                mstore(0x00, 0xb4457eaa) // `RoyaltyReceiverIsZeroAddress()`.
-                revert(0x1c, 0x04)
-            }
-            sstore(_ERC2981_MASTER_SLOT_SEED, or(packed, feeNumerator))
-        }
+        if (feeNumerator > feeDenominator) revert RoyaltyOverflow();
+        if (receiver == address(0)) revert RoyaltyReceiverIsZeroAddress();
+        _erc2981Sstore(
+            _ERC2981_MASTER_SLOT_SEED, uint256(uint160(receiver)) << 96 | uint256(feeNumerator)
+        );
     }
 
     /// @dev Sets the default royalty `receiver` and `feeNumerator` to zero.
     function _deleteDefaultRoyalty() internal virtual {
-        /// @solidity memory-safe-assembly
-        assembly {
-            sstore(_ERC2981_MASTER_SLOT_SEED, 0)
-        }
+        _erc2981Sstore(_ERC2981_MASTER_SLOT_SEED, 0);
     }
 
     /// @dev Sets the royalty `receiver` and `feeNumerator` for `tokenId`.
@@ -132,31 +122,45 @@ abstract contract ERC2981 {
         virtual
     {
         uint256 feeDenominator = _feeDenominator();
-        /// @solidity memory-safe-assembly
-        assembly {
-            feeNumerator := shr(160, shl(160, feeNumerator))
-            if gt(feeNumerator, feeDenominator) {
-                mstore(0x00, 0x350a88b3) // `RoyaltyOverflow()`.
-                revert(0x1c, 0x04)
-            }
-            let packed := shl(96, receiver)
-            if iszero(packed) {
-                mstore(0x00, 0xb4457eaa) // `RoyaltyReceiverIsZeroAddress()`.
-                revert(0x1c, 0x04)
-            }
-            mstore(0x00, tokenId)
-            mstore(0x20, _ERC2981_MASTER_SLOT_SEED)
-            sstore(keccak256(0x00, 0x40), or(packed, feeNumerator))
-        }
+        if (feeNumerator > feeDenominator) revert RoyaltyOverflow();
+        if (receiver == address(0)) revert RoyaltyReceiverIsZeroAddress();
+        _erc2981Sstore(
+            _erc2981TokenSlot(tokenId), uint256(uint160(receiver)) << 96 | uint256(feeNumerator)
+        );
     }
 
     /// @dev Sets the royalty `receiver` and `feeNumerator` for `tokenId` to zero.
     function _resetTokenRoyalty(uint256 tokenId) internal virtual {
+        _erc2981Sstore(_erc2981TokenSlot(tokenId), 0);
+    }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      PRIVATE HELPERS                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev The royalty slot of `tokenId`.
+    /// @custom:solar-inline
+    function _erc2981TokenSlot(uint256 tokenId) private pure returns (uint256) {
+        return uint256(keccak256(abi.encode(tokenId, _ERC2981_MASTER_SLOT_SEED)));
+    }
+
+    /// @dev Returns the word in storage slot `slot`. Solidity cannot name a slot it did not
+    /// allocate.
+    /// @custom:solar-trusted
+    function _erc2981Sload(uint256 slot) private view returns (uint256 value) {
         /// @solidity memory-safe-assembly
         assembly {
-            mstore(0x00, tokenId)
-            mstore(0x20, _ERC2981_MASTER_SLOT_SEED)
-            sstore(keccak256(0x00, 0x40), 0)
+            value := sload(slot)
+        }
+    }
+
+    /// @dev Stores `value` in storage slot `slot`. Solidity cannot name a slot it did not
+    /// allocate.
+    /// @custom:solar-trusted
+    function _erc2981Sstore(uint256 slot, uint256 value) private {
+        /// @solidity memory-safe-assembly
+        assembly {
+            sstore(slot, value)
         }
     }
 }
