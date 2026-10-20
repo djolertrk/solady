@@ -7,9 +7,12 @@ pragma solidity ^0.8.4;
 /// the bits where the stored value and the new one differ, over the same mapping
 /// slots. The generic `bitWidth` operations keep the assembly's results for a
 /// zero width, which divides by zero, and for widths of 256 and more, whose mask
-/// wraps to every bit. A search's index arithmetic wraps as the assembly's does,
-/// through the trusted `_add` and `_sub`: the midpoint stays between the bounds,
-/// and the offset from `start` wraps back for a zero start.
+/// wraps to every bit; a search of zero width returns what the assembly's loop
+/// ends with without reading the slots. The generic `get` and `set` are inlined,
+/// so a constant width folds into shifts and masks. A search's index arithmetic
+/// wraps as the assembly's does, through the trusted `_add` and `_sub`: the
+/// midpoint stays between the bounds, and the offset from `start` wraps back for
+/// a zero start.
 /// @custom:solar-safe memory arithmetic
 library LibMap {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -129,6 +132,7 @@ library LibMap {
     }
 
     /// @dev Returns the value at `index` in `map`.
+    /// @custom:solar-inline
     function get(mapping(uint256 => uint256) storage map, uint256 index, uint256 bitWidth)
         internal
         view
@@ -140,6 +144,7 @@ library LibMap {
     }
 
     /// @dev Updates the value at `index` in `map`.
+    /// @custom:solar-inline
     function set(
         mapping(uint256 => uint256) storage map,
         uint256 index,
@@ -226,6 +231,9 @@ library LibMap {
         uint256 end,
         uint256 bitWidth
     ) internal view returns (bool found, uint256 index) {
+        // Every value of zero width is zero, and the assembly ends without a match at
+        // `start`.
+        if (bitWidth == 0) return (false, start);
         if (start >= end) end = start;
         uint256 t;
         uint256 o = _sub(start, 1); // Offset to derive the actual index.
@@ -242,7 +250,7 @@ library LibMap {
             if (needle <= t) h = _sub(index, 1);
             else l = _add(index, 1);
         }
-        bool none = index == 0 || bitWidth == 0;
+        bool none = index == 0;
         found = t == needle && !none;
         index = _add(o, none ? 1 : index);
     }
