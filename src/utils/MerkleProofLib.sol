@@ -14,10 +14,10 @@ pragma solidity ^0.8.20;
 /// same result without reading memory nothing wrote. The queue is a new array,
 /// where the assembly uses free memory without reserving it.
 ///
-/// Two deliberate differences from the assembly: a calldata flag is read as a
+/// One deliberate difference from the assembly: a calldata flag is read as a
 /// `bool`, so a flag word other than zero or one reverts where the assembly
-/// treats it as true, and `emptyProof`, `emptyLeaves` and `emptyFlags` are left
-/// out, since no Solidity expression is an empty calldata array.
+/// treats it as true. `emptyProof`, `emptyLeaves` and `emptyFlags` keep the
+/// assembly, since no Solidity expression is an empty calldata array.
 /// @custom:solar-safe memory arithmetic
 library MerkleProofLib {
     /// @dev Returns whether `leaf` exists in the Merkle tree with `root`, given `proof`.
