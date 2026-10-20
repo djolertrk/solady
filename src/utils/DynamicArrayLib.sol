@@ -263,7 +263,30 @@ library DynamicArrayLib {
         pure
         returns (uint256 result)
     {
-        for (uint256 i = from; i < a.length; ++i) {
+        uint256 n = a.length;
+        uint256 i = from;
+        // Eight elements a step while they last, compared in one chain that only
+        // says whether the needle is among them; the step that has it then finds it.
+        if (n > 7) {
+            while (i < n - 7) {
+                if (
+                    a[i + 7] == needle || a[i + 6] == needle || a[i + 5] == needle
+                        || a[i + 4] == needle || a[i + 3] == needle || a[i + 2] == needle
+                        || a[i + 1] == needle || a[i] == needle
+                ) {
+                    if (a[i] == needle) return i;
+                    if (a[i + 1] == needle) return i + 1;
+                    if (a[i + 2] == needle) return i + 2;
+                    if (a[i + 3] == needle) return i + 3;
+                    if (a[i + 4] == needle) return i + 4;
+                    if (a[i + 5] == needle) return i + 5;
+                    if (a[i + 6] == needle) return i + 6;
+                    return i + 7;
+                }
+                i += 8;
+            }
+        }
+        for (; i < n; ++i) {
             if (a[i] == needle) return i;
         }
         return NOT_FOUND;
@@ -285,6 +308,35 @@ library DynamicArrayLib {
         uint256 n = a.length;
         if (n == 0) return NOT_FOUND;
         uint256 i = from < n ? from : n - 1;
+        // Sixteen elements a step while they last, compared in one chain that only
+        // says whether the needle is among them; the step that has it then finds it.
+        while (i >= 16) {
+            if (
+                a[i] == needle || a[i - 1] == needle || a[i - 2] == needle || a[i - 3] == needle
+                    || a[i - 4] == needle || a[i - 5] == needle || a[i - 6] == needle
+                    || a[i - 7] == needle || a[i - 8] == needle || a[i - 9] == needle
+                    || a[i - 10] == needle || a[i - 11] == needle || a[i - 12] == needle
+                    || a[i - 13] == needle || a[i - 14] == needle || a[i - 15] == needle
+            ) {
+                if (a[i] == needle) return i;
+                if (a[i - 1] == needle) return i - 1;
+                if (a[i - 2] == needle) return i - 2;
+                if (a[i - 3] == needle) return i - 3;
+                if (a[i - 4] == needle) return i - 4;
+                if (a[i - 5] == needle) return i - 5;
+                if (a[i - 6] == needle) return i - 6;
+                if (a[i - 7] == needle) return i - 7;
+                if (a[i - 8] == needle) return i - 8;
+                if (a[i - 9] == needle) return i - 9;
+                if (a[i - 10] == needle) return i - 10;
+                if (a[i - 11] == needle) return i - 11;
+                if (a[i - 12] == needle) return i - 12;
+                if (a[i - 13] == needle) return i - 13;
+                if (a[i - 14] == needle) return i - 14;
+                return i - 15;
+            }
+            i -= 16;
+        }
         while (a[i] != needle) {
             if (i == 0) return NOT_FOUND;
             --i;
