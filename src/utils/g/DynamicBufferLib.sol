@@ -24,6 +24,13 @@ using DynamicBufferLib for DynamicBuffer global;
 /// @notice Library for buffers with automatic capacity resizing.
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/utils/g/DynamicBufferLib.sol)
 /// @author Modified from cozyco (https://github.com/samkingco/cozyco/blob/main/contracts/utils/DynamicBuffer.sol)
+/// @dev The checked port appends with checked byte copies into a buffer that a small
+/// trusted allocator grows: `_grow` keeps upstream's prime-checksummed capacity word
+/// before the buffer and its growth policy, expanding in place when the buffer ends at
+/// the free memory pointer and moving it otherwise, and `_setLength` and `_truncate`
+/// set a length the capacity covers. `_deallocate` hands back the struct Solidity
+/// allocates for a returned buffer, as upstream does.
+/// @custom:solar-safe memory arithmetic
 library DynamicBufferLib {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                         OPERATIONS                         */
@@ -49,13 +56,8 @@ library DynamicBufferLib {
         if (minimum > n) {
             uint256 i = 0x40;
             do {} while ((i <<= 1) < minimum);
-            bytes memory data;
-            /// @solidity memory-safe-assembly
-            assembly {
-                data := 0x01
-                mstore(data, sub(i, n))
-            }
-            result = p(result, data);
+            _grow(result, i);
+            _setLength(result.data, n);
         }
     }
 
@@ -66,10 +68,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(mload(buffer), 0)
-        }
+        _truncate(buffer.data, 0);
         result = buffer;
     }
 
@@ -87,63 +86,14 @@ library DynamicBufferLib {
     {
         _deallocate(result);
         result = buffer;
-        if (data.length == uint256(0)) return result;
-        /// @solidity memory-safe-assembly
-        assembly {
-            let w := not(0x1f)
-            let bufData := mload(buffer)
-            let bufDataLen := mload(bufData)
-            let newBufDataLen := add(mload(data), bufDataLen)
-            // Some random prime number to multiply `cap`, so that
-            // we know that the `cap` is for a dynamic buffer.
-            // Selected to be larger than any memory pointer realistically.
-            let prime := 1621250193422201
-            let cap := mload(add(bufData, w)) // `mload(sub(bufData, 0x20))`.
-            // Extract `cap`, initializing it to zero if it is not a multiple of `prime`.
-            cap := mul(div(cap, prime), iszero(mod(cap, prime)))
-
-            // Expand / Reallocate memory if required.
-            // Note that we need to allocate an extra word for the length, and
-            // and another extra word as a safety word (giving a total of 0x40 bytes).
-            // Without the safety word, the backwards copying can cause a buffer overflow.
-            for {} iszero(lt(newBufDataLen, cap)) {} {
-                // Approximately more than double the capacity to ensure more than enough space.
-                let newCap := and(add(cap, add(or(cap, newBufDataLen), 0x20)), w)
-                // If the memory is contiguous, we can simply expand it.
-                if iszero(or(xor(mload(0x40), add(bufData, add(0x40, cap))), iszero(cap))) {
-                    // Store `cap * prime` in the word before the length.
-                    mstore(add(bufData, w), mul(prime, newCap))
-                    mstore(0x40, add(bufData, add(0x40, newCap))) // Expand the memory allocation.
-                    break
-                }
-                // Set the `newBufData` to point to the word after `cap`.
-                let newBufData := add(mload(0x40), 0x20)
-                mstore(0x40, add(newBufData, add(0x40, newCap))) // Reallocate the memory.
-                mstore(buffer, newBufData) // Store the `newBufData`.
-                // Copy `bufData` one word at a time, backwards.
-                for { let o := and(add(bufDataLen, 0x20), w) } 1 {} {
-                    mstore(add(newBufData, o), mload(add(bufData, o)))
-                    o := add(o, w) // `sub(o, 0x20)`.
-                    if iszero(o) { break }
-                }
-                // Store `cap * prime` in the word before the length.
-                mstore(add(newBufData, w), mul(prime, newCap))
-                bufData := newBufData // Assign `newBufData` to `bufData`.
-                break
-            }
-            // If it's a reserve operation, set the variables to skip the appending.
-            if eq(data, 0x01) {
-                mstore(data, 0x00)
-                newBufDataLen := bufDataLen
-            }
-            // Copy `data` one word at a time, backwards.
-            for { let o := and(add(mload(data), 0x20), w) } 1 {} {
-                mstore(add(add(bufData, bufDataLen), o), mload(add(data, o)))
-                o := add(o, w) // `sub(o, 0x20)`.
-                if iszero(o) { break }
-            }
-            mstore(add(add(bufData, 0x20), newBufDataLen), 0) // Zeroize the word after the buffer.
-            mstore(bufData, newBufDataLen) // Store the length.
+        uint256 n = data.length;
+        if (n == uint256(0)) return result;
+        uint256 bufLen = buffer.data.length;
+        _grow(result, bufLen + n);
+        bytes memory bufData = result.data;
+        _setLength(bufData, bufLen + n);
+        for (uint256 k; k < n; ++k) {
+            bufData[bufLen + k] = data[k];
         }
     }
 
@@ -229,12 +179,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        uint256 casted;
-        /// @solidity memory-safe-assembly
-        assembly {
-            casted := iszero(iszero(data))
-        }
-        result = p(buffer, _single(casted, 1));
+        result = _pWord(buffer, data ? bytes32(uint256(1) << 248) : bytes32(0), 1);
     }
 
     /// @dev Appends `abi.encodePacked(address(data))` to buffer.
@@ -244,7 +189,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(uint256(uint160(data)), 20));
+        result = _pWord(buffer, bytes32(bytes20(data)), 20);
     }
 
     /// @dev Appends `abi.encodePacked(uint8(data))` to buffer.
@@ -254,7 +199,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(data, 1));
+        result = _pWord(buffer, bytes32(uint256(data) << 248), 1);
     }
 
     /// @dev Appends `abi.encodePacked(uint16(data))` to buffer.
@@ -264,7 +209,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(data, 2));
+        result = _pWord(buffer, bytes32(uint256(data) << 240), 2);
     }
 
     /// @dev Appends `abi.encodePacked(uint24(data))` to buffer.
@@ -274,7 +219,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(data, 3));
+        result = _pWord(buffer, bytes32(uint256(data) << 232), 3);
     }
 
     /// @dev Appends `abi.encodePacked(uint32(data))` to buffer.
@@ -284,7 +229,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(data, 4));
+        result = _pWord(buffer, bytes32(uint256(data) << 224), 4);
     }
 
     /// @dev Appends `abi.encodePacked(uint40(data))` to buffer.
@@ -294,7 +239,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(data, 5));
+        result = _pWord(buffer, bytes32(uint256(data) << 216), 5);
     }
 
     /// @dev Appends `abi.encodePacked(uint48(data))` to buffer.
@@ -304,7 +249,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(data, 6));
+        result = _pWord(buffer, bytes32(uint256(data) << 208), 6);
     }
 
     /// @dev Appends `abi.encodePacked(uint56(data))` to buffer.
@@ -314,7 +259,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(data, 7));
+        result = _pWord(buffer, bytes32(uint256(data) << 200), 7);
     }
 
     /// @dev Appends `abi.encodePacked(uint64(data))` to buffer.
@@ -324,7 +269,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(data, 8));
+        result = _pWord(buffer, bytes32(uint256(data) << 192), 8);
     }
 
     /// @dev Appends `abi.encodePacked(uint72(data))` to buffer.
@@ -334,7 +279,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(data, 9));
+        result = _pWord(buffer, bytes32(uint256(data) << 184), 9);
     }
 
     /// @dev Appends `abi.encodePacked(uint80(data))` to buffer.
@@ -344,7 +289,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(data, 10));
+        result = _pWord(buffer, bytes32(uint256(data) << 176), 10);
     }
 
     /// @dev Appends `abi.encodePacked(uint88(data))` to buffer.
@@ -354,7 +299,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(data, 11));
+        result = _pWord(buffer, bytes32(uint256(data) << 168), 11);
     }
 
     /// @dev Appends `abi.encodePacked(uint96(data))` to buffer.
@@ -364,7 +309,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(data, 12));
+        result = _pWord(buffer, bytes32(uint256(data) << 160), 12);
     }
 
     /// @dev Appends `abi.encodePacked(uint104(data))` to buffer.
@@ -374,7 +319,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(data, 13));
+        result = _pWord(buffer, bytes32(uint256(data) << 152), 13);
     }
 
     /// @dev Appends `abi.encodePacked(uint112(data))` to buffer.
@@ -384,7 +329,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(data, 14));
+        result = _pWord(buffer, bytes32(uint256(data) << 144), 14);
     }
 
     /// @dev Appends `abi.encodePacked(uint120(data))` to buffer.
@@ -394,7 +339,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(data, 15));
+        result = _pWord(buffer, bytes32(uint256(data) << 136), 15);
     }
 
     /// @dev Appends `abi.encodePacked(uint128(data))` to buffer.
@@ -404,7 +349,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(data, 16));
+        result = _pWord(buffer, bytes32(uint256(data) << 128), 16);
     }
 
     /// @dev Appends `abi.encodePacked(uint136(data))` to buffer.
@@ -414,7 +359,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(data, 17));
+        result = _pWord(buffer, bytes32(uint256(data) << 120), 17);
     }
 
     /// @dev Appends `abi.encodePacked(uint144(data))` to buffer.
@@ -424,7 +369,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(data, 18));
+        result = _pWord(buffer, bytes32(uint256(data) << 112), 18);
     }
 
     /// @dev Appends `abi.encodePacked(uint152(data))` to buffer.
@@ -434,7 +379,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(data, 19));
+        result = _pWord(buffer, bytes32(uint256(data) << 104), 19);
     }
 
     /// @dev Appends `abi.encodePacked(uint160(data))` to buffer.
@@ -444,7 +389,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(data, 20));
+        result = _pWord(buffer, bytes32(uint256(data) << 96), 20);
     }
 
     /// @dev Appends `abi.encodePacked(uint168(data))` to buffer.
@@ -454,7 +399,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(data, 21));
+        result = _pWord(buffer, bytes32(uint256(data) << 88), 21);
     }
 
     /// @dev Appends `abi.encodePacked(uint176(data))` to buffer.
@@ -464,7 +409,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(data, 22));
+        result = _pWord(buffer, bytes32(uint256(data) << 80), 22);
     }
 
     /// @dev Appends `abi.encodePacked(uint184(data))` to buffer.
@@ -474,7 +419,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(data, 23));
+        result = _pWord(buffer, bytes32(uint256(data) << 72), 23);
     }
 
     /// @dev Appends `abi.encodePacked(uint192(data))` to buffer.
@@ -484,7 +429,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(data, 24));
+        result = _pWord(buffer, bytes32(uint256(data) << 64), 24);
     }
 
     /// @dev Appends `abi.encodePacked(uint200(data))` to buffer.
@@ -494,7 +439,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(data, 25));
+        result = _pWord(buffer, bytes32(uint256(data) << 56), 25);
     }
 
     /// @dev Appends `abi.encodePacked(uint208(data))` to buffer.
@@ -504,7 +449,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(data, 26));
+        result = _pWord(buffer, bytes32(uint256(data) << 48), 26);
     }
 
     /// @dev Appends `abi.encodePacked(uint216(data))` to buffer.
@@ -514,7 +459,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(data, 27));
+        result = _pWord(buffer, bytes32(uint256(data) << 40), 27);
     }
 
     /// @dev Appends `abi.encodePacked(uint224(data))` to buffer.
@@ -524,7 +469,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(data, 28));
+        result = _pWord(buffer, bytes32(uint256(data) << 32), 28);
     }
 
     /// @dev Appends `abi.encodePacked(uint232(data))` to buffer.
@@ -534,7 +479,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(data, 29));
+        result = _pWord(buffer, bytes32(uint256(data) << 24), 29);
     }
 
     /// @dev Appends `abi.encodePacked(uint240(data))` to buffer.
@@ -544,7 +489,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(data, 30));
+        result = _pWord(buffer, bytes32(uint256(data) << 16), 30);
     }
 
     /// @dev Appends `abi.encodePacked(uint248(data))` to buffer.
@@ -554,7 +499,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(data, 31));
+        result = _pWord(buffer, bytes32(uint256(data) << 8), 31);
     }
 
     /// @dev Appends `abi.encodePacked(uint256(data))` to buffer.
@@ -564,7 +509,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(data, 32));
+        result = _pWord(buffer, bytes32(uint256(data)), 32);
     }
 
     /// @dev Appends `abi.encodePacked(bytes1(data))` to buffer.
@@ -574,7 +519,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(bytes32(data), 1));
+        result = _pWord(buffer, bytes32(data), 1);
     }
 
     /// @dev Appends `abi.encodePacked(bytes2(data))` to buffer.
@@ -584,7 +529,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(bytes32(data), 2));
+        result = _pWord(buffer, bytes32(data), 2);
     }
 
     /// @dev Appends `abi.encodePacked(bytes3(data))` to buffer.
@@ -594,7 +539,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(bytes32(data), 3));
+        result = _pWord(buffer, bytes32(data), 3);
     }
 
     /// @dev Appends `abi.encodePacked(bytes4(data))` to buffer.
@@ -604,7 +549,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(bytes32(data), 4));
+        result = _pWord(buffer, bytes32(data), 4);
     }
 
     /// @dev Appends `abi.encodePacked(bytes5(data))` to buffer.
@@ -614,7 +559,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(bytes32(data), 5));
+        result = _pWord(buffer, bytes32(data), 5);
     }
 
     /// @dev Appends `abi.encodePacked(bytes6(data))` to buffer.
@@ -624,7 +569,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(bytes32(data), 6));
+        result = _pWord(buffer, bytes32(data), 6);
     }
 
     /// @dev Appends `abi.encodePacked(bytes7(data))` to buffer.
@@ -634,7 +579,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(bytes32(data), 7));
+        result = _pWord(buffer, bytes32(data), 7);
     }
 
     /// @dev Appends `abi.encodePacked(bytes8(data))` to buffer.
@@ -644,7 +589,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(bytes32(data), 8));
+        result = _pWord(buffer, bytes32(data), 8);
     }
 
     /// @dev Appends `abi.encodePacked(bytes9(data))` to buffer.
@@ -654,7 +599,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(bytes32(data), 9));
+        result = _pWord(buffer, bytes32(data), 9);
     }
 
     /// @dev Appends `abi.encodePacked(bytes10(data))` to buffer.
@@ -664,7 +609,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(bytes32(data), 10));
+        result = _pWord(buffer, bytes32(data), 10);
     }
 
     /// @dev Appends `abi.encodePacked(bytes11(data))` to buffer.
@@ -674,7 +619,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(bytes32(data), 11));
+        result = _pWord(buffer, bytes32(data), 11);
     }
 
     /// @dev Appends `abi.encodePacked(bytes12(data))` to buffer.
@@ -684,7 +629,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(bytes32(data), 12));
+        result = _pWord(buffer, bytes32(data), 12);
     }
 
     /// @dev Appends `abi.encodePacked(bytes13(data))` to buffer.
@@ -694,7 +639,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(bytes32(data), 13));
+        result = _pWord(buffer, bytes32(data), 13);
     }
 
     /// @dev Appends `abi.encodePacked(bytes14(data))` to buffer.
@@ -704,7 +649,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(bytes32(data), 14));
+        result = _pWord(buffer, bytes32(data), 14);
     }
 
     /// @dev Appends `abi.encodePacked(bytes15(data))` to buffer.
@@ -714,7 +659,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(bytes32(data), 15));
+        result = _pWord(buffer, bytes32(data), 15);
     }
 
     /// @dev Appends `abi.encodePacked(bytes16(data))` to buffer.
@@ -724,7 +669,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(bytes32(data), 16));
+        result = _pWord(buffer, bytes32(data), 16);
     }
 
     /// @dev Appends `abi.encodePacked(bytes17(data))` to buffer.
@@ -734,7 +679,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(bytes32(data), 17));
+        result = _pWord(buffer, bytes32(data), 17);
     }
 
     /// @dev Appends `abi.encodePacked(bytes18(data))` to buffer.
@@ -744,7 +689,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(bytes32(data), 18));
+        result = _pWord(buffer, bytes32(data), 18);
     }
 
     /// @dev Appends `abi.encodePacked(bytes19(data))` to buffer.
@@ -754,7 +699,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(bytes32(data), 19));
+        result = _pWord(buffer, bytes32(data), 19);
     }
 
     /// @dev Appends `abi.encodePacked(bytes20(data))` to buffer.
@@ -764,7 +709,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(bytes32(data), 20));
+        result = _pWord(buffer, bytes32(data), 20);
     }
 
     /// @dev Appends `abi.encodePacked(bytes21(data))` to buffer.
@@ -774,7 +719,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(bytes32(data), 21));
+        result = _pWord(buffer, bytes32(data), 21);
     }
 
     /// @dev Appends `abi.encodePacked(bytes22(data))` to buffer.
@@ -784,7 +729,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(bytes32(data), 22));
+        result = _pWord(buffer, bytes32(data), 22);
     }
 
     /// @dev Appends `abi.encodePacked(bytes23(data))` to buffer.
@@ -794,7 +739,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(bytes32(data), 23));
+        result = _pWord(buffer, bytes32(data), 23);
     }
 
     /// @dev Appends `abi.encodePacked(bytes24(data))` to buffer.
@@ -804,7 +749,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(bytes32(data), 24));
+        result = _pWord(buffer, bytes32(data), 24);
     }
 
     /// @dev Appends `abi.encodePacked(bytes25(data))` to buffer.
@@ -814,7 +759,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(bytes32(data), 25));
+        result = _pWord(buffer, bytes32(data), 25);
     }
 
     /// @dev Appends `abi.encodePacked(bytes26(data))` to buffer.
@@ -824,7 +769,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(bytes32(data), 26));
+        result = _pWord(buffer, bytes32(data), 26);
     }
 
     /// @dev Appends `abi.encodePacked(bytes27(data))` to buffer.
@@ -834,7 +779,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(bytes32(data), 27));
+        result = _pWord(buffer, bytes32(data), 27);
     }
 
     /// @dev Appends `abi.encodePacked(bytes28(data))` to buffer.
@@ -844,7 +789,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(bytes32(data), 28));
+        result = _pWord(buffer, bytes32(data), 28);
     }
 
     /// @dev Appends `abi.encodePacked(bytes29(data))` to buffer.
@@ -854,7 +799,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(bytes32(data), 29));
+        result = _pWord(buffer, bytes32(data), 29);
     }
 
     /// @dev Appends `abi.encodePacked(bytes30(data))` to buffer.
@@ -864,7 +809,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(bytes32(data), 30));
+        result = _pWord(buffer, bytes32(data), 30);
     }
 
     /// @dev Appends `abi.encodePacked(bytes31(data))` to buffer.
@@ -874,7 +819,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(bytes32(data), 31));
+        result = _pWord(buffer, bytes32(data), 31);
     }
 
     /// @dev Appends `abi.encodePacked(bytes32(data))` to buffer.
@@ -884,7 +829,7 @@ library DynamicBufferLib {
         returns (DynamicBuffer memory result)
     {
         _deallocate(result);
-        result = p(buffer, _single(bytes32(data), 32));
+        result = _pWord(buffer, bytes32(data), 32);
     }
 
     /// @dev Shorthand for returning a new buffer.
@@ -1293,6 +1238,7 @@ library DynamicBufferLib {
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     /// @dev Helper for deallocating an automatically allocated `buffer` pointer.
+    /// @custom:solar-trusted
     function _deallocate(DynamicBuffer memory result) private pure {
         /// @solidity memory-safe-assembly
         assembly {
@@ -1300,23 +1246,89 @@ library DynamicBufferLib {
         }
     }
 
-    /// @dev Returns a temporary bytes string of length `n` for `data`.
-    function _single(uint256 data, uint256 n) private pure returns (bytes memory result) {
+    /// @dev Appends the leading `n` bytes of `word` to `buffer`, for `n` at most 32.
+    /// @custom:solar-inline
+    function _pWord(DynamicBuffer memory buffer, bytes32 word, uint256 n)
+        private
+        pure
+        returns (DynamicBuffer memory)
+    {
+        uint256 bufLen = buffer.data.length;
+        _grow(buffer, bufLen + n);
+        bytes memory bufData = buffer.data;
+        _setLength(bufData, bufLen + n);
+        for (uint256 k; k < n; ++k) {
+            bufData[bufLen + k] = word[k];
+        }
+        return buffer;
+    }
+
+    /// @dev Makes room in `buffer` for `newBufDataLen` bytes, as upstream's append does:
+    /// the capacity is the word before the buffer, multiplied by a prime so that no
+    /// other word passes for one. A buffer that ends at the free memory pointer expands
+    /// in place; any other moves, with its contents, to newly allocated memory. Both
+    /// keep a safety word after the capacity.
+    /// @custom:solar-trusted
+    function _grow(DynamicBuffer memory buffer, uint256 newBufDataLen) private pure {
         /// @solidity memory-safe-assembly
         assembly {
-            result := 0x00
-            mstore(n, data)
-            mstore(result, n)
+            let w := not(0x1f)
+            let bufData := mload(buffer)
+            let bufDataLen := mload(bufData)
+            // Some random prime number to multiply `cap`, so that
+            // we know that the `cap` is for a dynamic buffer.
+            // Selected to be larger than any memory pointer realistically.
+            let prime := 1621250193422201
+            let cap := mload(add(bufData, w)) // `mload(sub(bufData, 0x20))`.
+            // Extract `cap`, initializing it to zero if it is not a multiple of `prime`.
+            cap := mul(div(cap, prime), iszero(mod(cap, prime)))
+            // Expand / Reallocate memory if required.
+            // Note that we need to allocate an extra word for the length, and
+            // and another extra word as a safety word (giving a total of 0x40 bytes).
+            for {} iszero(lt(newBufDataLen, cap)) {} {
+                // Approximately more than double the capacity to ensure more than enough space.
+                let newCap := and(add(cap, add(or(cap, newBufDataLen), 0x20)), w)
+                // If the memory is contiguous, we can simply expand it.
+                if iszero(or(xor(mload(0x40), add(bufData, add(0x40, cap))), iszero(cap))) {
+                    // Store `cap * prime` in the word before the length.
+                    mstore(add(bufData, w), mul(prime, newCap))
+                    mstore(0x40, add(bufData, add(0x40, newCap))) // Expand the memory allocation.
+                    break
+                }
+                // Set the `newBufData` to point to the word after `cap`.
+                let newBufData := add(mload(0x40), 0x20)
+                mstore(0x40, add(newBufData, add(0x40, newCap))) // Reallocate the memory.
+                mstore(buffer, newBufData) // Store the `newBufData`.
+                // Copy `bufData` one word at a time, backwards, its length included.
+                for { let o := and(add(bufDataLen, 0x20), w) } 1 {} {
+                    mstore(add(newBufData, o), mload(add(bufData, o)))
+                    if iszero(o) { break }
+                    o := add(o, w) // `sub(o, 0x20)`.
+                }
+                // Store `cap * prime` in the word before the length.
+                mstore(add(newBufData, w), mul(prime, newCap))
+                break
+            }
         }
     }
 
-    /// @dev Returns a temporary bytes string of length `n` for `data`.
-    function _single(bytes32 data, uint256 n) private pure returns (bytes memory result) {
+    /// @dev Sets the length of `data`, which its capacity covers, to `n`, and zeroizes
+    /// the word after it.
+    /// @custom:solar-trusted
+    function _setLength(bytes memory data, uint256 n) private pure {
         /// @solidity memory-safe-assembly
         assembly {
-            result := 0x00
-            mstore(0x20, data)
-            mstore(result, n)
+            mstore(add(add(data, 0x20), n), 0) // Zeroize the word after the buffer.
+            mstore(data, n) // Store the length.
+        }
+    }
+
+    /// @dev Shortens `data` to `n` bytes, for `n` at most its length.
+    /// @custom:solar-trusted
+    function _truncate(bytes memory data, uint256 n) private pure {
+        /// @solidity memory-safe-assembly
+        assembly {
+            mstore(data, n)
         }
     }
 }

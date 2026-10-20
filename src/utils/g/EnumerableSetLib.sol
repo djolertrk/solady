@@ -51,6 +51,14 @@ using EnumerableSetLib for Uint8Set global;
 ///
 /// All enumerable sets except Uint8Set use a pop and swap mechanism to remove elements.
 /// This means that the iteration order of elements can change between element removals.
+///
+/// The checked port keeps upstream's storage layout. Trusted helpers name a set's
+/// slot, cast between set and array types, read and write a slot, and add a slot
+/// offset with wrap-around; the root and position slots are derived in Solidity as
+/// `abi.encodePacked` and `abi.encode` hashes. Every operation reads and writes the
+/// words the assembly does, in the same order, and `values` allocates exactly the
+/// returned array.
+/// @custom:solar-safe memory arithmetic
 library EnumerableSetLib {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                       CUSTOM ERRORS                        */
@@ -111,39 +119,29 @@ library EnumerableSetLib {
 
     /// @dev Returns the number of elements in the set.
     function length(AddressSet storage set) internal view returns (uint256 result) {
-        bytes32 rootSlot = _rootSlot(set);
-        /// @solidity memory-safe-assembly
-        assembly {
-            let rootPacked := sload(rootSlot)
-            let n := shr(160, shl(160, rootPacked))
-            result := shr(1, n)
-            for {} iszero(or(iszero(shr(96, rootPacked)), n)) {} {
-                result := 1
-                if iszero(sload(add(rootSlot, result))) { break }
-                result := 2
-                if iszero(sload(add(rootSlot, result))) { break }
-                result := 3
-                break
+        uint256 rootSlot = _rootSlot(set);
+        uint256 rootPacked = _sload(rootSlot);
+        uint256 n = uint96(rootPacked);
+        result = n >> 1;
+        if (n == 0 && rootPacked >> 96 != 0) {
+            result = 1;
+            if (_sload(_add(rootSlot, 1)) != 0) {
+                result = 2;
+                if (_sload(_add(rootSlot, 2)) != 0) result = 3;
             }
         }
     }
 
     /// @dev Returns the number of elements in the set.
     function length(Bytes32Set storage set) internal view returns (uint256 result) {
-        bytes32 rootSlot = _rootSlot(set);
-        /// @solidity memory-safe-assembly
-        assembly {
-            let n := sload(not(rootSlot))
-            result := shr(1, n)
-            for {} iszero(n) {} {
-                result := 0
-                if iszero(sload(add(rootSlot, result))) { break }
-                result := 1
-                if iszero(sload(add(rootSlot, result))) { break }
-                result := 2
-                if iszero(sload(add(rootSlot, result))) { break }
-                result := 3
-                break
+        uint256 rootSlot = _rootSlot(set);
+        uint256 n = _sload(~rootSlot);
+        result = n >> 1;
+        if (n == 0 && _sload(rootSlot) != 0) {
+            result = 1;
+            if (_sload(_add(rootSlot, 1)) != 0) {
+                result = 2;
+                if (_sload(_add(rootSlot, 2)) != 0) result = 3;
             }
         }
     }
@@ -160,68 +158,32 @@ library EnumerableSetLib {
 
     /// @dev Returns the number of elements in the set.
     function length(Uint8Set storage set) internal view returns (uint256 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            for { let packed := sload(set.slot) } packed { result := add(1, result) } {
-                packed := xor(packed, and(packed, add(1, not(packed))))
-            }
+        for (uint256 packed = set.data; packed != 0; ++result) {
+            packed &= packed - 1;
         }
     }
 
     /// @dev Returns whether `value` is in the set.
     function contains(AddressSet storage set, address value) internal view returns (bool result) {
-        bytes32 rootSlot = _rootSlot(set);
-        /// @solidity memory-safe-assembly
-        assembly {
-            value := shr(96, shl(96, value))
-            if eq(value, _ZERO_SENTINEL) {
-                mstore(0x00, 0xf5a267f1) // `ValueIsZeroSentinel()`.
-                revert(0x1c, 0x04)
-            }
-            if iszero(value) { value := _ZERO_SENTINEL }
-            let rootPacked := sload(rootSlot)
-            for {} 1 {} {
-                if iszero(shr(160, shl(160, rootPacked))) {
-                    result := 1
-                    if eq(shr(96, rootPacked), value) { break }
-                    if eq(shr(96, sload(add(rootSlot, 1))), value) { break }
-                    if eq(shr(96, sload(add(rootSlot, 2))), value) { break }
-                    result := 0
-                    break
-                }
-                mstore(0x20, rootSlot)
-                mstore(0x00, value)
-                result := iszero(iszero(sload(keccak256(0x00, 0x40))))
-                break
-            }
+        uint256 rootSlot = _rootSlot(set);
+        uint256 v = _addressWord(value);
+        uint256 rootPacked = _sload(rootSlot);
+        if (uint96(rootPacked) == 0) {
+            return rootPacked >> 96 == v || _sload(_add(rootSlot, 1)) >> 96 == v
+                || _sload(_add(rootSlot, 2)) >> 96 == v;
         }
+        result = _sload(_positionSlot(rootSlot, v)) != 0;
     }
 
     /// @dev Returns whether `value` is in the set.
     function contains(Bytes32Set storage set, bytes32 value) internal view returns (bool result) {
-        bytes32 rootSlot = _rootSlot(set);
-        /// @solidity memory-safe-assembly
-        assembly {
-            if eq(value, _ZERO_SENTINEL) {
-                mstore(0x00, 0xf5a267f1) // `ValueIsZeroSentinel()`.
-                revert(0x1c, 0x04)
-            }
-            if iszero(value) { value := _ZERO_SENTINEL }
-            for {} 1 {} {
-                if iszero(sload(not(rootSlot))) {
-                    result := 1
-                    if eq(sload(rootSlot), value) { break }
-                    if eq(sload(add(rootSlot, 1)), value) { break }
-                    if eq(sload(add(rootSlot, 2)), value) { break }
-                    result := 0
-                    break
-                }
-                mstore(0x20, rootSlot)
-                mstore(0x00, value)
-                result := iszero(iszero(sload(keccak256(0x00, 0x40))))
-                break
-            }
+        uint256 rootSlot = _rootSlot(set);
+        uint256 v = _word(value);
+        if (_sload(~rootSlot) == 0) {
+            return _sload(rootSlot) == v || _sload(_add(rootSlot, 1)) == v
+                || _sload(_add(rootSlot, 2)) == v;
         }
+        result = _sload(_positionSlot(rootSlot, v)) != 0;
     }
 
     /// @dev Returns whether `value` is in the set.
@@ -236,130 +198,91 @@ library EnumerableSetLib {
 
     /// @dev Returns whether `value` is in the set.
     function contains(Uint8Set storage set, uint8 value) internal view returns (bool result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := and(1, shr(and(0xff, value), sload(set.slot)))
-        }
+        result = (set.data >> value) & 1 != 0;
     }
 
     /// @dev Adds `value` to the set. Returns whether `value` was not in the set.
     function add(AddressSet storage set, address value) internal returns (bool result) {
-        bytes32 rootSlot = _rootSlot(set);
-        /// @solidity memory-safe-assembly
-        assembly {
-            value := shr(96, shl(96, value))
-            if eq(value, _ZERO_SENTINEL) {
-                mstore(0x00, 0xf5a267f1) // `ValueIsZeroSentinel()`.
-                revert(0x1c, 0x04)
+        uint256 rootSlot = _rootSlot(set);
+        uint256 v = _addressWord(value);
+        uint256 rootPacked = _sload(rootSlot);
+        uint256 n = uint96(rootPacked);
+        if (n == 0) {
+            uint256 v0 = rootPacked >> 96;
+            if (v0 == 0) {
+                _sstore(rootSlot, v << 96);
+                return true;
             }
-            if iszero(value) { value := _ZERO_SENTINEL }
-            let rootPacked := sload(rootSlot)
-            for { let n := shr(160, shl(160, rootPacked)) } 1 {} {
-                mstore(0x20, rootSlot)
-                if iszero(n) {
-                    let v0 := shr(96, rootPacked)
-                    if iszero(v0) {
-                        sstore(rootSlot, shl(96, value))
-                        result := 1
-                        break
-                    }
-                    if eq(v0, value) { break }
-                    let v1 := shr(96, sload(add(rootSlot, 1)))
-                    if iszero(v1) {
-                        sstore(add(rootSlot, 1), shl(96, value))
-                        result := 1
-                        break
-                    }
-                    if eq(v1, value) { break }
-                    let v2 := shr(96, sload(add(rootSlot, 2)))
-                    if iszero(v2) {
-                        sstore(add(rootSlot, 2), shl(96, value))
-                        result := 1
-                        break
-                    }
-                    if eq(v2, value) { break }
-                    mstore(0x00, v0)
-                    sstore(keccak256(0x00, 0x40), 1)
-                    mstore(0x00, v1)
-                    sstore(keccak256(0x00, 0x40), 2)
-                    mstore(0x00, v2)
-                    sstore(keccak256(0x00, 0x40), 3)
-                    rootPacked := or(rootPacked, 7)
-                    n := 7
-                }
-                mstore(0x00, value)
-                let p := keccak256(0x00, 0x40)
-                if iszero(sload(p)) {
-                    n := shr(1, n)
-                    result := 1
-                    sstore(p, add(1, n))
-                    if iszero(n) {
-                        sstore(rootSlot, or(3, shl(96, value)))
-                        break
-                    }
-                    sstore(add(rootSlot, n), shl(96, value))
-                    sstore(rootSlot, add(2, rootPacked))
-                    break
-                }
-                break
+            if (v0 == v) return false;
+            uint256 v1 = _sload(_add(rootSlot, 1)) >> 96;
+            if (v1 == 0) {
+                _sstore(_add(rootSlot, 1), v << 96);
+                return true;
+            }
+            if (v1 == v) return false;
+            uint256 v2 = _sload(_add(rootSlot, 2)) >> 96;
+            if (v2 == 0) {
+                _sstore(_add(rootSlot, 2), v << 96);
+                return true;
+            }
+            if (v2 == v) return false;
+            _sstore(_positionSlot(rootSlot, v0), 1);
+            _sstore(_positionSlot(rootSlot, v1), 2);
+            _sstore(_positionSlot(rootSlot, v2), 3);
+            rootPacked |= 7;
+            n = 7;
+        }
+        uint256 p = _positionSlot(rootSlot, v);
+        if (_sload(p) == 0) {
+            n >>= 1;
+            result = true;
+            _sstore(p, n + 1);
+            if (n == 0) {
+                _sstore(rootSlot, (v << 96) | 3);
+            } else {
+                _sstore(_add(rootSlot, n), v << 96);
+                // The length bits are far below their maximum, so the sum stays in them.
+                _sstore(rootSlot, _add(rootPacked, 2));
             }
         }
     }
 
     /// @dev Adds `value` to the set. Returns whether `value` was not in the set.
     function add(Bytes32Set storage set, bytes32 value) internal returns (bool result) {
-        bytes32 rootSlot = _rootSlot(set);
-        /// @solidity memory-safe-assembly
-        assembly {
-            if eq(value, _ZERO_SENTINEL) {
-                mstore(0x00, 0xf5a267f1) // `ValueIsZeroSentinel()`.
-                revert(0x1c, 0x04)
+        uint256 rootSlot = _rootSlot(set);
+        uint256 v = _word(value);
+        uint256 n = _sload(~rootSlot);
+        if (n == 0) {
+            uint256 v0 = _sload(rootSlot);
+            if (v0 == 0) {
+                _sstore(rootSlot, v);
+                return true;
             }
-            if iszero(value) { value := _ZERO_SENTINEL }
-            for { let n := sload(not(rootSlot)) } 1 {} {
-                mstore(0x20, rootSlot)
-                if iszero(n) {
-                    let v0 := sload(rootSlot)
-                    if iszero(v0) {
-                        sstore(rootSlot, value)
-                        result := 1
-                        break
-                    }
-                    if eq(v0, value) { break }
-                    let v1 := sload(add(rootSlot, 1))
-                    if iszero(v1) {
-                        sstore(add(rootSlot, 1), value)
-                        result := 1
-                        break
-                    }
-                    if eq(v1, value) { break }
-                    let v2 := sload(add(rootSlot, 2))
-                    if iszero(v2) {
-                        sstore(add(rootSlot, 2), value)
-                        result := 1
-                        break
-                    }
-                    if eq(v2, value) { break }
-                    mstore(0x00, v0)
-                    sstore(keccak256(0x00, 0x40), 1)
-                    mstore(0x00, v1)
-                    sstore(keccak256(0x00, 0x40), 2)
-                    mstore(0x00, v2)
-                    sstore(keccak256(0x00, 0x40), 3)
-                    n := 7
-                }
-                mstore(0x00, value)
-                let p := keccak256(0x00, 0x40)
-                if iszero(sload(p)) {
-                    n := shr(1, n)
-                    sstore(add(rootSlot, n), value)
-                    sstore(p, add(1, n))
-                    sstore(not(rootSlot), or(1, shl(1, add(1, n))))
-                    result := 1
-                    break
-                }
-                break
+            if (v0 == v) return false;
+            uint256 v1 = _sload(_add(rootSlot, 1));
+            if (v1 == 0) {
+                _sstore(_add(rootSlot, 1), v);
+                return true;
             }
+            if (v1 == v) return false;
+            uint256 v2 = _sload(_add(rootSlot, 2));
+            if (v2 == 0) {
+                _sstore(_add(rootSlot, 2), v);
+                return true;
+            }
+            if (v2 == v) return false;
+            _sstore(_positionSlot(rootSlot, v0), 1);
+            _sstore(_positionSlot(rootSlot, v1), 2);
+            _sstore(_positionSlot(rootSlot, v2), 3);
+            n = 7;
+        }
+        uint256 p = _positionSlot(rootSlot, v);
+        if (_sload(p) == 0) {
+            n >>= 1;
+            _sstore(_add(rootSlot, n), v);
+            _sstore(p, n + 1);
+            _sstore(~rootSlot, ((n + 1) << 1) | 1);
+            result = true;
         }
     }
 
@@ -375,13 +298,10 @@ library EnumerableSetLib {
 
     /// @dev Adds `value` to the set. Returns whether `value` was not in the set.
     function add(Uint8Set storage set, uint8 value) internal returns (bool result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := sload(set.slot)
-            let mask := shl(and(0xff, value), 1)
-            sstore(set.slot, or(result, mask))
-            result := iszero(and(result, mask))
-        }
+        uint256 packed = set.data;
+        uint256 mask = uint256(1) << value;
+        set.data = packed | mask;
+        result = packed & mask == 0;
     }
 
     /// @dev Adds `value` to the set. Returns whether `value` was not in the set.
@@ -431,106 +351,79 @@ library EnumerableSetLib {
 
     /// @dev Removes `value` from the set. Returns whether `value` was in the set.
     function remove(AddressSet storage set, address value) internal returns (bool result) {
-        bytes32 rootSlot = _rootSlot(set);
-        /// @solidity memory-safe-assembly
-        assembly {
-            value := shr(96, shl(96, value))
-            if eq(value, _ZERO_SENTINEL) {
-                mstore(0x00, 0xf5a267f1) // `ValueIsZeroSentinel()`.
-                revert(0x1c, 0x04)
+        uint256 rootSlot = _rootSlot(set);
+        uint256 v = _addressWord(value);
+        uint256 rootPacked = _sload(rootSlot);
+        uint256 n = uint96(rootPacked);
+        if (n == 0) {
+            if (rootPacked >> 96 == v) {
+                _sstore(rootSlot, _sload(_add(rootSlot, 1)));
+                _sstore(_add(rootSlot, 1), _sload(_add(rootSlot, 2)));
+                _sstore(_add(rootSlot, 2), 0);
+                return true;
             }
-            if iszero(value) { value := _ZERO_SENTINEL }
-            let rootPacked := sload(rootSlot)
-            for { let n := shr(160, shl(160, rootPacked)) } 1 {} {
-                if iszero(n) {
-                    result := 1
-                    if eq(shr(96, rootPacked), value) {
-                        sstore(rootSlot, sload(add(rootSlot, 1)))
-                        sstore(add(rootSlot, 1), sload(add(rootSlot, 2)))
-                        sstore(add(rootSlot, 2), 0)
-                        break
-                    }
-                    if eq(shr(96, sload(add(rootSlot, 1))), value) {
-                        sstore(add(rootSlot, 1), sload(add(rootSlot, 2)))
-                        sstore(add(rootSlot, 2), 0)
-                        break
-                    }
-                    if eq(shr(96, sload(add(rootSlot, 2))), value) {
-                        sstore(add(rootSlot, 2), 0)
-                        break
-                    }
-                    result := 0
-                    break
-                }
-                mstore(0x20, rootSlot)
-                mstore(0x00, value)
-                let p := keccak256(0x00, 0x40)
-                let position := sload(p)
-                if iszero(position) { break }
-                n := sub(shr(1, n), 1)
-                if iszero(eq(sub(position, 1), n)) {
-                    let lastValue := shr(96, sload(add(rootSlot, n)))
-                    sstore(add(rootSlot, sub(position, 1)), shl(96, lastValue))
-                    mstore(0x00, lastValue)
-                    sstore(keccak256(0x00, 0x40), position)
-                }
-                sstore(rootSlot, or(shl(96, shr(96, sload(rootSlot))), or(shl(1, n), 1)))
-                sstore(p, 0)
-                result := 1
-                break
+            if (_sload(_add(rootSlot, 1)) >> 96 == v) {
+                _sstore(_add(rootSlot, 1), _sload(_add(rootSlot, 2)));
+                _sstore(_add(rootSlot, 2), 0);
+                return true;
             }
+            if (_sload(_add(rootSlot, 2)) >> 96 == v) {
+                _sstore(_add(rootSlot, 2), 0);
+                return true;
+            }
+            return false;
         }
+        uint256 p = _positionSlot(rootSlot, v);
+        uint256 position = _sload(p);
+        if (position == 0) return false;
+        // The index of the last element, which moves into the removed one's place.
+        n = (n >> 1) - 1;
+        if (position - 1 != n) {
+            uint256 lastValue = _sload(_add(rootSlot, n)) >> 96;
+            _sstore(_add(rootSlot, position - 1), lastValue << 96);
+            _sstore(_positionSlot(rootSlot, lastValue), position);
+        }
+        _sstore(rootSlot, ((_sload(rootSlot) >> 96) << 96) | (n << 1) | 1);
+        _sstore(p, 0);
+        result = true;
     }
 
     /// @dev Removes `value` from the set. Returns whether `value` was in the set.
     function remove(Bytes32Set storage set, bytes32 value) internal returns (bool result) {
-        bytes32 rootSlot = _rootSlot(set);
-        /// @solidity memory-safe-assembly
-        assembly {
-            if eq(value, _ZERO_SENTINEL) {
-                mstore(0x00, 0xf5a267f1) // `ValueIsZeroSentinel()`.
-                revert(0x1c, 0x04)
+        uint256 rootSlot = _rootSlot(set);
+        uint256 v = _word(value);
+        uint256 n = _sload(~rootSlot);
+        if (n == 0) {
+            if (_sload(rootSlot) == v) {
+                _sstore(rootSlot, _sload(_add(rootSlot, 1)));
+                _sstore(_add(rootSlot, 1), _sload(_add(rootSlot, 2)));
+                _sstore(_add(rootSlot, 2), 0);
+                return true;
             }
-            if iszero(value) { value := _ZERO_SENTINEL }
-            for { let n := sload(not(rootSlot)) } 1 {} {
-                if iszero(n) {
-                    result := 1
-                    if eq(sload(rootSlot), value) {
-                        sstore(rootSlot, sload(add(rootSlot, 1)))
-                        sstore(add(rootSlot, 1), sload(add(rootSlot, 2)))
-                        sstore(add(rootSlot, 2), 0)
-                        break
-                    }
-                    if eq(sload(add(rootSlot, 1)), value) {
-                        sstore(add(rootSlot, 1), sload(add(rootSlot, 2)))
-                        sstore(add(rootSlot, 2), 0)
-                        break
-                    }
-                    if eq(sload(add(rootSlot, 2)), value) {
-                        sstore(add(rootSlot, 2), 0)
-                        break
-                    }
-                    result := 0
-                    break
-                }
-                mstore(0x20, rootSlot)
-                mstore(0x00, value)
-                let p := keccak256(0x00, 0x40)
-                let position := sload(p)
-                if iszero(position) { break }
-                n := sub(shr(1, n), 1)
-                if iszero(eq(sub(position, 1), n)) {
-                    let lastValue := sload(add(rootSlot, n))
-                    sstore(add(rootSlot, sub(position, 1)), lastValue)
-                    mstore(0x00, lastValue)
-                    sstore(keccak256(0x00, 0x40), position)
-                }
-                sstore(not(rootSlot), or(shl(1, n), 1))
-                sstore(p, 0)
-                result := 1
-                break
+            if (_sload(_add(rootSlot, 1)) == v) {
+                _sstore(_add(rootSlot, 1), _sload(_add(rootSlot, 2)));
+                _sstore(_add(rootSlot, 2), 0);
+                return true;
             }
+            if (_sload(_add(rootSlot, 2)) == v) {
+                _sstore(_add(rootSlot, 2), 0);
+                return true;
+            }
+            return false;
         }
+        uint256 p = _positionSlot(rootSlot, v);
+        uint256 position = _sload(p);
+        if (position == 0) return false;
+        // The index of the last element, which moves into the removed one's place.
+        n = (n >> 1) - 1;
+        if (position - 1 != n) {
+            uint256 lastValue = _sload(_add(rootSlot, n));
+            _sstore(_add(rootSlot, position - 1), lastValue);
+            _sstore(_positionSlot(rootSlot, lastValue), position);
+        }
+        _sstore(~rootSlot, (n << 1) | 1);
+        _sstore(p, 0);
+        result = true;
     }
 
     /// @dev Removes `value` from the set. Returns whether `value` was in the set.
@@ -545,13 +438,10 @@ library EnumerableSetLib {
 
     /// @dev Removes `value` from the set. Returns whether `value` was in the set.
     function remove(Uint8Set storage set, uint8 value) internal returns (bool result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := sload(set.slot)
-            let mask := shl(and(0xff, value), 1)
-            sstore(set.slot, and(result, not(mask)))
-            result := iszero(iszero(and(result, mask)))
-        }
+        uint256 packed = set.data;
+        uint256 mask = uint256(1) << value;
+        set.data = packed & ~mask;
+        result = packed & mask != 0;
     }
 
     /// @dev Shorthand for `isAdd ? set.add(value, cap) : set.remove(value)`.
@@ -597,83 +487,66 @@ library EnumerableSetLib {
     /// @dev Returns all of the values in the set.
     /// Note: This can consume more gas than the block gas limit for large sets.
     function values(AddressSet storage set) internal view returns (address[] memory result) {
-        bytes32 rootSlot = _rootSlot(set);
-        /// @solidity memory-safe-assembly
-        assembly {
-            let zs := _ZERO_SENTINEL
-            let rootPacked := sload(rootSlot)
-            let n := shr(160, shl(160, rootPacked))
-            result := mload(0x40)
-            let o := add(0x20, result)
-            let v := shr(96, rootPacked)
-            mstore(o, mul(v, iszero(eq(v, zs))))
-            for {} 1 {} {
-                if iszero(n) {
-                    if v {
-                        n := 1
-                        v := shr(96, sload(add(rootSlot, n)))
-                        if v {
-                            n := 2
-                            mstore(add(o, 0x20), mul(v, iszero(eq(v, zs))))
-                            v := shr(96, sload(add(rootSlot, n)))
-                            if v {
-                                n := 3
-                                mstore(add(o, 0x40), mul(v, iszero(eq(v, zs))))
-                            }
-                        }
-                    }
-                    break
+        uint256 rootSlot = _rootSlot(set);
+        uint256 rootPacked = _sload(rootSlot);
+        uint256 n = uint96(rootPacked);
+        uint256 v0 = rootPacked >> 96;
+        if (n == 0) {
+            // At most three values, in the root slot and the two after it.
+            uint256 v1;
+            uint256 v2;
+            if (v0 != 0) {
+                n = 1;
+                v1 = _sload(_add(rootSlot, 1)) >> 96;
+                if (v1 != 0) {
+                    n = 2;
+                    v2 = _sload(_add(rootSlot, 2)) >> 96;
+                    if (v2 != 0) n = 3;
                 }
-                n := shr(1, n)
-                for { let i := 1 } lt(i, n) { i := add(i, 1) } {
-                    v := shr(96, sload(add(rootSlot, i)))
-                    mstore(add(o, shl(5, i)), mul(v, iszero(eq(v, zs))))
-                }
-                break
             }
-            mstore(result, n)
-            mstore(0x40, add(o, shl(5, n)))
+            result = new address[](n);
+            if (n != 0) result[0] = _wordAddress(v0);
+            if (n > 1) result[1] = _wordAddress(v1);
+            if (n > 2) result[2] = _wordAddress(v2);
+            return result;
+        }
+        n >>= 1;
+        result = new address[](n);
+        if (n != 0) result[0] = _wordAddress(v0);
+        for (uint256 i = 1; i < n; ++i) {
+            result[i] = _wordAddress(_sload(_add(rootSlot, i)) >> 96);
         }
     }
 
     /// @dev Returns all of the values in the set.
     /// Note: This can consume more gas than the block gas limit for large sets.
     function values(Bytes32Set storage set) internal view returns (bytes32[] memory result) {
-        bytes32 rootSlot = _rootSlot(set);
-        /// @solidity memory-safe-assembly
-        assembly {
-            let zs := _ZERO_SENTINEL
-            let n := sload(not(rootSlot))
-            result := mload(0x40)
-            let o := add(0x20, result)
-            for {} 1 {} {
-                if iszero(n) {
-                    let v := sload(rootSlot)
-                    if v {
-                        n := 1
-                        mstore(o, mul(v, iszero(eq(v, zs))))
-                        v := sload(add(rootSlot, n))
-                        if v {
-                            n := 2
-                            mstore(add(o, 0x20), mul(v, iszero(eq(v, zs))))
-                            v := sload(add(rootSlot, n))
-                            if v {
-                                n := 3
-                                mstore(add(o, 0x40), mul(v, iszero(eq(v, zs))))
-                            }
-                        }
-                    }
-                    break
+        uint256 rootSlot = _rootSlot(set);
+        uint256 n = _sload(~rootSlot);
+        if (n == 0) {
+            // At most three values, in the root slot and the two after it.
+            uint256 v1;
+            uint256 v2;
+            uint256 v0 = _sload(rootSlot);
+            if (v0 != 0) {
+                n = 1;
+                v1 = _sload(_add(rootSlot, 1));
+                if (v1 != 0) {
+                    n = 2;
+                    v2 = _sload(_add(rootSlot, 2));
+                    if (v2 != 0) n = 3;
                 }
-                n := shr(1, n)
-                for { let i := 0 } lt(i, n) { i := add(i, 1) } {
-                    let v := sload(add(rootSlot, i))
-                    mstore(add(o, shl(5, i)), mul(v, iszero(eq(v, zs))))
-                }
-                break
             }
-            mstore(result, n)
-            mstore(0x40, add(o, shl(5, n)))
+            result = new bytes32[](n);
+            if (n != 0) result[0] = _wordValue(v0);
+            if (n > 1) result[1] = _wordValue(v1);
+            if (n > 2) result[2] = _wordValue(v2);
+            return result;
+        }
+        n >>= 1;
+        result = new bytes32[](n);
+        for (uint256 i; i < n; ++i) {
+            result[i] = _wordValue(_sload(_add(rootSlot, i)));
         }
     }
 
@@ -691,46 +564,30 @@ library EnumerableSetLib {
 
     /// @dev Returns all of the values in the set.
     function values(Uint8Set storage set) internal view returns (uint8[] memory result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := mload(0x40)
-            let ptr := add(result, 0x20)
-            let o := 0
-            for { let packed := sload(set.slot) } packed {} {
-                if iszero(and(packed, 0xffff)) {
-                    o := add(o, 16)
-                    packed := shr(16, packed)
-                    continue
-                }
-                mstore(ptr, o)
-                ptr := add(ptr, shl(5, and(packed, 1)))
-                o := add(o, 1)
-                packed := shr(1, packed)
+        uint256 packed = set.data;
+        result = new uint8[](length(set));
+        uint256 k;
+        for (uint256 o; packed != 0;) {
+            if (packed & 0xffff == 0) {
+                o += 16;
+                packed >>= 16;
+                continue;
             }
-            mstore(result, shr(5, sub(ptr, add(result, 0x20))))
-            mstore(0x40, ptr)
+            if (packed & 1 != 0) result[k++] = uint8(o);
+            ++o;
+            packed >>= 1;
         }
     }
 
     /// @dev Returns the element at index `i` in the set. Reverts if `i` is out-of-bounds.
     function at(AddressSet storage set, uint256 i) internal view returns (address result) {
-        bytes32 rootSlot = _rootSlot(set);
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := shr(96, sload(add(rootSlot, i)))
-            result := mul(result, iszero(eq(result, _ZERO_SENTINEL)))
-        }
+        result = _wordAddress(_sload(_add(_rootSlot(set), i)) >> 96);
         if (i >= length(set)) revert IndexOutOfBounds();
     }
 
     /// @dev Returns the element at index `i` in the set. Reverts if `i` is out-of-bounds.
     function at(Bytes32Set storage set, uint256 i) internal view returns (bytes32 result) {
-        result = _rootSlot(set);
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := sload(add(result, i))
-            result := mul(result, iszero(eq(result, _ZERO_SENTINEL)))
-        }
+        result = _wordValue(_sload(_add(_rootSlot(set), i)));
         if (i >= length(set)) revert IndexOutOfBounds();
     }
 
@@ -746,98 +603,62 @@ library EnumerableSetLib {
 
     /// @dev Returns the element at index `i` in the set. Reverts if `i` is out-of-bounds.
     function at(Uint8Set storage set, uint256 i) internal view returns (uint8 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let packed := sload(set.slot)
-            for {} 1 {
-                mstore(0x00, 0x4e23d035) // `IndexOutOfBounds()`.
-                revert(0x1c, 0x04)
-            } {
-                if iszero(lt(i, 256)) { continue }
-                for { let j := 0 } iszero(eq(i, j)) {} {
-                    packed := xor(packed, and(packed, add(1, not(packed))))
-                    j := add(j, 1)
-                }
-                if iszero(packed) { continue }
-                break
-            }
-            // Find first set subroutine, optimized for smaller bytecode size.
-            let x := and(packed, add(1, not(packed)))
-            let r := shl(7, iszero(iszero(shr(128, x))))
-            r := or(r, shl(6, iszero(iszero(shr(64, shr(r, x))))))
-            r := or(r, shl(5, lt(0xffffffff, shr(r, x))))
-            // For the lower 5 bits of the result, use a De Bruijn lookup.
-            // forgefmt: disable-next-item
-            result := or(r, byte(and(div(0xd76453e0, shr(r, x)), 0x1f),
-                0x001f0d1e100c1d070f090b19131c1706010e11080a1a141802121b1503160405))
+        uint256 packed = set.data;
+        if (i >= 256) revert IndexOutOfBounds();
+        // Clear the `i` lowest set bits.
+        for (uint256 j; j != i; ++j) {
+            if (packed == 0) revert IndexOutOfBounds();
+            packed &= packed - 1;
         }
+        if (packed == 0) revert IndexOutOfBounds();
+        // Find first set subroutine, optimized for smaller bytecode size.
+        // `packed` is not zero, so `~packed + 1` cannot wrap.
+        uint256 x = packed & (~packed + 1);
+        uint256 r = x >> 128 != 0 ? 128 : 0;
+        r |= (x >> r) >> 64 != 0 ? 64 : 0;
+        r |= (x >> r) > 0xffffffff ? 32 : 0;
+        // For the lower 5 bits of the result, use a De Bruijn lookup.
+        result = uint8(
+            r
+                | uint8(
+                    bytes32(
+                        0x001f0d1e100c1d070f090b19131c1706010e11080a1a141802121b1503160405
+                    )[(0xd76453e0 / (x >> r)) & 0x1f]
+                )
+        );
     }
 
     /// @dev Returns the index of `value`. Returns `NOT_FOUND` if the value does not exist.
     function indexOf(AddressSet storage set, address value) internal view returns (uint256 result) {
         result = NOT_FOUND;
         if (uint160(value) == _ZERO_SENTINEL) return result;
-        bytes32 rootSlot = _rootSlot(set);
-        /// @solidity memory-safe-assembly
-        assembly {
-            value := shr(96, shl(96, value))
-            if iszero(value) { value := _ZERO_SENTINEL }
-            result := not(0)
-            let rootPacked := sload(rootSlot)
-            for {} 1 {} {
-                if iszero(shr(160, shl(160, rootPacked))) {
-                    if eq(shr(96, rootPacked), value) {
-                        result := 0
-                        break
-                    }
-                    if eq(shr(96, sload(add(rootSlot, 1))), value) {
-                        result := 1
-                        break
-                    }
-                    if eq(shr(96, sload(add(rootSlot, 2))), value) {
-                        result := 2
-                        break
-                    }
-                    break
-                }
-                mstore(0x20, rootSlot)
-                mstore(0x00, value)
-                result := sub(sload(keccak256(0x00, 0x40)), 1)
-                break
-            }
+        uint256 rootSlot = _rootSlot(set);
+        uint256 v = _addressWord(value);
+        uint256 rootPacked = _sload(rootSlot);
+        if (uint96(rootPacked) == 0) {
+            if (rootPacked >> 96 == v) return 0;
+            if (_sload(_add(rootSlot, 1)) >> 96 == v) return 1;
+            if (_sload(_add(rootSlot, 2)) >> 96 == v) return 2;
+            return result;
         }
+        uint256 position = _sload(_positionSlot(rootSlot, v));
+        if (position != 0) result = position - 1;
     }
 
     /// @dev Returns the index of `value`. Returns `NOT_FOUND` if the value does not exist.
     function indexOf(Bytes32Set storage set, bytes32 value) internal view returns (uint256 result) {
         result = NOT_FOUND;
         if (uint256(value) == _ZERO_SENTINEL) return result;
-        bytes32 rootSlot = _rootSlot(set);
-        /// @solidity memory-safe-assembly
-        assembly {
-            if iszero(value) { value := _ZERO_SENTINEL }
-            for {} 1 {} {
-                if iszero(sload(not(rootSlot))) {
-                    if eq(sload(rootSlot), value) {
-                        result := 0
-                        break
-                    }
-                    if eq(sload(add(rootSlot, 1)), value) {
-                        result := 1
-                        break
-                    }
-                    if eq(sload(add(rootSlot, 2)), value) {
-                        result := 2
-                        break
-                    }
-                    break
-                }
-                mstore(0x20, rootSlot)
-                mstore(0x00, value)
-                result := sub(sload(keccak256(0x00, 0x40)), 1)
-                break
-            }
+        uint256 rootSlot = _rootSlot(set);
+        uint256 v = _word(value);
+        if (_sload(~rootSlot) == 0) {
+            if (_sload(rootSlot) == v) return 0;
+            if (_sload(_add(rootSlot, 1)) == v) return 1;
+            if (_sload(_add(rootSlot, 2)) == v) return 2;
+            return result;
         }
+        uint256 position = _sload(_positionSlot(rootSlot, v));
+        if (position != 0) result = position - 1;
     }
 
     /// @dev Returns the index of `value`. Returns `NOT_FOUND` if the value does not exist.
@@ -852,17 +673,13 @@ library EnumerableSetLib {
 
     /// @dev Returns the index of `value`. Returns `NOT_FOUND` if the value does not exist.
     function indexOf(Uint8Set storage set, uint8 value) internal view returns (uint256 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := not(0)
-            let packed := sload(set.slot)
-            let m := shl(and(0xff, value), 1)
-            if and(packed, m) {
-                result := 0
-                for { let p := and(packed, sub(m, 1)) } p {} {
-                    p := xor(p, and(p, add(1, not(p))))
-                    result := add(result, 1)
-                }
+        result = NOT_FOUND;
+        uint256 packed = set.data;
+        uint256 m = uint256(1) << value;
+        if (packed & m != 0) {
+            result = 0;
+            for (uint256 p = packed & (m - 1); p != 0; ++result) {
+                p &= p - 1;
             }
         }
     }
@@ -872,26 +689,19 @@ library EnumerableSetLib {
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     /// @dev Returns the root slot.
-    function _rootSlot(AddressSet storage s) private pure returns (bytes32 r) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x04, _ENUMERABLE_ADDRESS_SET_SLOT_SEED)
-            mstore(0x00, s.slot)
-            r := keccak256(0x00, 0x24)
-        }
+    function _rootSlot(AddressSet storage s) private pure returns (uint256 r) {
+        r = uint256(
+            keccak256(abi.encodePacked(_slot(s), uint32(_ENUMERABLE_ADDRESS_SET_SLOT_SEED)))
+        );
     }
 
     /// @dev Returns the root slot.
-    function _rootSlot(Bytes32Set storage s) private pure returns (bytes32 r) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x04, _ENUMERABLE_WORD_SET_SLOT_SEED)
-            mstore(0x00, s.slot)
-            r := keccak256(0x00, 0x24)
-        }
+    function _rootSlot(Bytes32Set storage s) private pure returns (uint256 r) {
+        r = uint256(keccak256(abi.encodePacked(_slot(s), uint32(_ENUMERABLE_WORD_SET_SLOT_SEED))));
     }
 
     /// @dev Casts to a Bytes32Set.
+    /// @custom:solar-trusted
     function _toBytes32Set(Uint256Set storage s) private pure returns (Bytes32Set storage c) {
         /// @solidity memory-safe-assembly
         assembly {
@@ -900,6 +710,7 @@ library EnumerableSetLib {
     }
 
     /// @dev Casts to a Bytes32Set.
+    /// @custom:solar-trusted
     function _toBytes32Set(Int256Set storage s) private pure returns (Bytes32Set storage c) {
         /// @solidity memory-safe-assembly
         assembly {
@@ -908,6 +719,7 @@ library EnumerableSetLib {
     }
 
     /// @dev Casts to a uint256 array.
+    /// @custom:solar-trusted
     function _toUints(bytes32[] memory a) private pure returns (uint256[] memory c) {
         /// @solidity memory-safe-assembly
         assembly {
@@ -916,10 +728,89 @@ library EnumerableSetLib {
     }
 
     /// @dev Casts to a int256 array.
+    /// @custom:solar-trusted
     function _toInts(bytes32[] memory a) private pure returns (int256[] memory c) {
         /// @solidity memory-safe-assembly
         assembly {
             c := a
+        }
+    }
+
+    /// @dev The word that stands for address `value` in a set: zero is the sentinel.
+    /// Reverts if `value` is the sentinel itself.
+    /// @custom:solar-inline
+    function _addressWord(address value) private pure returns (uint256 v) {
+        v = uint160(value);
+        if (v == _ZERO_SENTINEL) revert ValueIsZeroSentinel();
+        if (v == 0) v = _ZERO_SENTINEL;
+    }
+
+    /// @dev The word that stands for `value` in a set: zero is the sentinel.
+    /// Reverts if `value` is the sentinel itself.
+    /// @custom:solar-inline
+    function _word(bytes32 value) private pure returns (uint256 v) {
+        v = uint256(value);
+        if (v == _ZERO_SENTINEL) revert ValueIsZeroSentinel();
+        if (v == 0) v = _ZERO_SENTINEL;
+    }
+
+    /// @dev The address a stored word stands for: the sentinel is zero.
+    function _wordAddress(uint256 v) private pure returns (address) {
+        return v == _ZERO_SENTINEL ? address(0) : address(uint160(v));
+    }
+
+    /// @dev The value a stored word stands for: the sentinel is zero.
+    function _wordValue(uint256 v) private pure returns (bytes32) {
+        return v == _ZERO_SENTINEL ? bytes32(0) : bytes32(v);
+    }
+
+    /// @dev The slot holding the 1-based position of value word `v`.
+    /// @custom:solar-inline
+    function _positionSlot(uint256 rootSlot, uint256 v) private pure returns (uint256) {
+        return uint256(keccak256(abi.encode(v, rootSlot)));
+    }
+
+    /// @dev The storage slot of `s`.
+    /// @custom:solar-trusted
+    function _slot(AddressSet storage s) private pure returns (uint256 slot) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            slot := s.slot
+        }
+    }
+
+    /// @dev The storage slot of `s`.
+    /// @custom:solar-trusted
+    function _slot(Bytes32Set storage s) private pure returns (uint256 slot) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            slot := s.slot
+        }
+    }
+
+    /// @dev Returns the word in storage slot `slot`.
+    /// @custom:solar-trusted
+    function _sload(uint256 slot) private view returns (uint256 value) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            value := sload(slot)
+        }
+    }
+
+    /// @dev Stores `value` in storage slot `slot`.
+    /// @custom:solar-trusted
+    function _sstore(uint256 slot, uint256 value) private {
+        /// @solidity memory-safe-assembly
+        assembly {
+            sstore(slot, value)
+        }
+    }
+
+    /// @dev `a + b` modulo `2**256`.
+    /// @custom:solar-trusted
+    function _add(uint256 a, uint256 b) private pure returns (uint256 c) {
+        unchecked {
+            c = a + b;
         }
     }
 }

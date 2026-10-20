@@ -27,6 +27,13 @@ import {LibBytes} from "../LibBytes.sol";
 /// byte strings (7-bit ASCII), except where otherwise specified.
 /// Usage of byte string operations on charsets with runes spanning two or more bytes
 /// can lead to undefined behavior.
+///
+/// The checked port keeps upstream's split: the byte operations are LibBytes', and the string
+/// storage operations go through `bytesStorage`, which views a `StringStorage` as a
+/// `BytesStorage` at the same slot with upstream's packed layout. `bytesStorage` and
+/// `directReturn` stay trusted assembly: Solidity cannot retype a storage reference, and a
+/// `return` statement leaves only the function it is in.
+/// @custom:solar-safe memory arithmetic
 library LibString {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                        CUSTOM ERRORS                       */
@@ -78,6 +85,60 @@ library LibString {
     /// @dev Lookup for ' \t\n\r\x0b\x0c'.
     uint128 internal constant WHITESPACE_7_BIT_ASCII = 0x100003e00;
 
+    /// @dev Nibble-spreading masks, one per halving of the packing.
+    uint256 private constant MASK_64 =
+        0x0000000000000000ffffffffffffffff0000000000000000ffffffffffffffff;
+
+    uint256 private constant MASK_32 =
+        0x00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff;
+
+    uint256 private constant MASK_16 =
+        0x0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff;
+
+    uint256 private constant MASK_8 =
+        0x00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff;
+
+    uint256 private constant MASK_4 =
+        0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f;
+
+    /// @dev One copy of the value in every byte.
+    uint256 private constant SPREAD_1 =
+        0x0101010101010101010101010101010101010101010101010101010101010101;
+
+    uint256 private constant SPREAD_5 =
+        0x0505050505050505050505050505050505050505050505050505050505050505;
+
+    uint256 private constant SPREAD_6 =
+        0x0606060606060606060606060606060606060606060606060606060606060606;
+
+    uint256 private constant SPREAD_ASCII_0 =
+        0x3030303030303030303030303030303030303030303030303030303030303030;
+
+    uint256 private constant SPREAD_1F =
+        0x1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f;
+
+    uint256 private constant SPREAD_20 =
+        0x2020202020202020202020202020202020202020202020202020202020202020;
+
+    uint256 private constant LANES_7F =
+        0x7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f;
+
+    uint256 private constant LANES_01 =
+        0x0101010101010101010101010101010101010101010101010101010101010101;
+
+    /// @dev The top bit of every byte lane.
+    uint256 private constant _HIGH_BITS =
+        0x8080808080808080808080808080808080808080808080808080808080808080;
+
+    /// @dev Lowercase hexadecimal digits.
+    bytes16 private constant _DIGITS = "0123456789abcdef";
+
+    /// @dev Uppercase hexadecimal digits.
+    bytes16 private constant _UPPER_DIGITS = "0123456789ABCDEF";
+
+    /// @dev One bit per byte a URI component keeps: letters, digits and `-_.!~*'()`.
+    uint256 private constant _URI_UNRESERVED = 0x47fffffe87fffffe03ff678200000000;
+
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                 STRING STORAGE OPERATIONS                  */
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
@@ -118,6 +179,8 @@ library LibString {
     }
 
     /// @dev Helper to cast `$` to a `BytesStorage`.
+    /// Solidity cannot retype a storage reference, so this keeps the upstream assembly.
+    /// @custom:solar-trusted
     function bytesStorage(StringStorage storage $)
         internal
         pure
@@ -135,49 +198,12 @@ library LibString {
 
     /// @dev Returns the base 10 decimal representation of `value`.
     function toString(uint256 value) internal pure returns (string memory result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            // The maximum value of a uint256 contains 78 digits (1 byte per digit), but
-            // we allocate 0xa0 bytes to keep the free memory pointer 32-byte word aligned.
-            // We will need 1 word for the trailing zeros padding, 1 word for the length,
-            // and 3 words for a maximum of 78 digits.
-            result := add(mload(0x40), 0x80)
-            mstore(0x40, add(result, 0x20)) // Allocate memory.
-            mstore(result, 0) // Zeroize the slot after the string.
-
-            let end := result // Cache the end of the memory to calculate the length later.
-            let w := not(0) // Tsk.
-            // We write the string from rightmost digit to leftmost digit.
-            // The following is essentially a do-while loop that also handles the zero case.
-            for { let temp := value } 1 {} {
-                result := add(result, w) // `sub(result, 1)`.
-                // Store the character to the pointer.
-                // The ASCII index of the '0' character is 48.
-                mstore8(result, add(48, mod(temp, 10)))
-                temp := div(temp, 10) // Keep dividing `temp` until zero.
-                if iszero(temp) { break }
-            }
-            let n := sub(end, result)
-            result := sub(result, 0x20) // Move the pointer 32 bytes back to make room for the length.
-            mstore(result, n) // Store the length.
-        }
+        return _toString(value);
     }
 
     /// @dev Returns the base 10 decimal representation of `value`.
     function toString(int256 value) internal pure returns (string memory result) {
-        if (value >= 0) return toString(uint256(value));
-        unchecked {
-            result = toString(~uint256(value) + 1);
-        }
-        /// @solidity memory-safe-assembly
-        assembly {
-            // We still have some spare memory space on the left,
-            // as we have allocated 3 words (96 bytes) for up to 78 digits.
-            let n := mload(result) // Load the string length.
-            mstore(result, 0x2d) // Store the '-' character.
-            result := sub(result, 1) // Move back the string pointer by a byte.
-            mstore(result, add(n, 1)) // Update the string length.
-        }
+        return _toString(value);
     }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -194,14 +220,8 @@ library LibString {
         pure
         returns (string memory result)
     {
-        result = toHexStringNoPrefix(value, byteCount);
-        /// @solidity memory-safe-assembly
-        assembly {
-            let n := add(mload(result), 2) // Compute the length.
-            mstore(result, 0x3078) // Store the "0x" prefix.
-            result := sub(result, 2) // Move the pointer.
-            mstore(result, n) // Store the length.
-        }
+        _checkHexLength(value, byteCount);
+        return _toHexString(value, byteCount);
     }
 
     /// @dev Returns the hexadecimal representation of `value`,
@@ -214,40 +234,8 @@ library LibString {
         pure
         returns (string memory result)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            // We need 0x20 bytes for the trailing zeros padding, `byteCount * 2` bytes
-            // for the digits, 0x02 bytes for the prefix, and 0x20 bytes for the length.
-            // We add 0x20 to the total and round down to a multiple of 0x20.
-            // (0x20 + 0x20 + 0x02 + 0x20) = 0x62.
-            result := add(mload(0x40), and(add(shl(1, byteCount), 0x42), not(0x1f)))
-            mstore(0x40, add(result, 0x20)) // Allocate memory.
-            mstore(result, 0) // Zeroize the slot after the string.
-
-            let end := result // Cache the end to calculate the length later.
-            // Store "0123456789abcdef" in scratch space.
-            mstore(0x0f, 0x30313233343536373839616263646566)
-
-            let start := sub(result, add(byteCount, byteCount))
-            let w := not(1) // Tsk.
-            let temp := value
-            // We write the string from rightmost digit to leftmost digit.
-            // The following is essentially a do-while loop that also handles the zero case.
-            for {} 1 {} {
-                result := add(result, w) // `sub(result, 2)`.
-                mstore8(add(result, 1), mload(and(temp, 15)))
-                mstore8(result, mload(and(shr(4, temp), 15)))
-                temp := shr(8, temp)
-                if iszero(xor(result, start)) { break }
-            }
-            if temp {
-                mstore(0x00, 0x2194895a) // `HexLengthInsufficient()`.
-                revert(0x1c, 0x04)
-            }
-            let n := sub(end, result)
-            result := sub(result, 0x20)
-            mstore(result, n) // Store the length.
-        }
+        _checkHexLength(value, byteCount);
+        return _toHexStringNoPrefix(value, byteCount);
     }
 
     /// @dev Returns the hexadecimal representation of `value`.
@@ -255,14 +243,7 @@ library LibString {
     /// As address are 20 bytes long, the output will left-padded to have
     /// a length of `20 * 2 + 2` bytes.
     function toHexString(uint256 value) internal pure returns (string memory result) {
-        result = toHexStringNoPrefix(value);
-        /// @solidity memory-safe-assembly
-        assembly {
-            let n := add(mload(result), 2) // Compute the length.
-            mstore(result, 0x3078) // Store the "0x" prefix.
-            result := sub(result, 2) // Move the pointer.
-            mstore(result, n) // Store the length.
-        }
+        return _toHexString(value);
     }
 
     /// @dev Returns the hexadecimal representation of `value`.
@@ -270,15 +251,7 @@ library LibString {
     /// The output excludes leading "0" from the `toHexString` output.
     /// `0x00: "0x0", 0x01: "0x1", 0x12: "0x12", 0x123: "0x123"`.
     function toMinimalHexString(uint256 value) internal pure returns (string memory result) {
-        result = toHexStringNoPrefix(value);
-        /// @solidity memory-safe-assembly
-        assembly {
-            let o := eq(byte(0, mload(add(result, 0x20))), 0x30) // Whether leading zero is present.
-            let n := add(mload(result), 2) // Compute the length.
-            mstore(add(result, o), 0x3078) // Store the "0x" prefix, accounting for leading zero.
-            result := sub(add(result, o), 2) // Move the pointer, accounting for leading zero.
-            mstore(result, sub(n, o)) // Store the length, accounting for leading zero.
-        }
+        return _toMinimalHexString(value);
     }
 
     /// @dev Returns the hexadecimal representation of `value`.
@@ -289,14 +262,7 @@ library LibString {
         pure
         returns (string memory result)
     {
-        result = toHexStringNoPrefix(value);
-        /// @solidity memory-safe-assembly
-        assembly {
-            let o := eq(byte(0, mload(add(result, 0x20))), 0x30) // Whether leading zero is present.
-            let n := mload(result) // Get the length.
-            result := add(result, o) // Move the pointer, accounting for leading zero.
-            mstore(result, sub(n, o)) // Store the length, accounting for leading zero.
-        }
+        return _toMinimalHexStringNoPrefix(value);
     }
 
     /// @dev Returns the hexadecimal representation of `value`.
@@ -304,32 +270,7 @@ library LibString {
     /// As address are 20 bytes long, the output will left-padded to have
     /// a length of `20 * 2` bytes.
     function toHexStringNoPrefix(uint256 value) internal pure returns (string memory result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            // We need 0x20 bytes for the trailing zeros padding, 0x20 bytes for the length,
-            // 0x02 bytes for the prefix, and 0x40 bytes for the digits.
-            // The next multiple of 0x20 above (0x20 + 0x20 + 0x02 + 0x40) is 0xa0.
-            result := add(mload(0x40), 0x80)
-            mstore(0x40, add(result, 0x20)) // Allocate memory.
-            mstore(result, 0) // Zeroize the slot after the string.
-
-            let end := result // Cache the end to calculate the length later.
-            mstore(0x0f, 0x30313233343536373839616263646566) // Store the "0123456789abcdef" lookup.
-
-            let w := not(1) // Tsk.
-            // We write the string from rightmost digit to leftmost digit.
-            // The following is essentially a do-while loop that also handles the zero case.
-            for { let temp := value } 1 {} {
-                result := add(result, w) // `sub(result, 2)`.
-                mstore8(add(result, 1), mload(and(temp, 15)))
-                mstore8(result, mload(and(shr(4, temp), 15)))
-                temp := shr(8, temp)
-                if iszero(temp) { break }
-            }
-            let n := sub(end, result)
-            result := sub(result, 0x20)
-            mstore(result, n) // Store the length.
-        }
+        return _toHexStringNoPrefix(value);
     }
 
     /// @dev Returns the hexadecimal representation of `value`.
@@ -337,102 +278,49 @@ library LibString {
     /// and the alphabets are capitalized conditionally according to
     /// https://eips.ethereum.org/EIPS/eip-55
     function toHexStringChecksummed(address value) internal pure returns (string memory result) {
-        result = toHexString(value);
-        /// @solidity memory-safe-assembly
-        assembly {
-            let mask := shl(6, div(not(0), 255)) // `0b010000000100000000 ...`
-            let o := add(result, 0x22)
-            let hashed := and(keccak256(o, 40), mul(34, mask)) // `0b10001000 ... `
-            let t := shl(240, 136) // `0b10001000 << 240`
-            for { let i := 0 } 1 {} {
-                mstore(add(i, i), mul(t, byte(i, hashed)))
-                i := add(i, 1)
-                if eq(i, 20) { break }
-            }
-            mstore(o, xor(mload(o), shr(1, and(mload(0x00), and(mload(o), mask)))))
-            o := add(o, 0x20)
-            mstore(o, xor(mload(o), shr(1, and(mload(0x20), and(mload(o), mask)))))
-        }
+        bytes memory out = new bytes(42);
+        out[0] = "0";
+        out[1] = "x";
+        // The top sixteen bytes make one word of characters; the low four make the top eight
+        // characters of another.
+        uint256 raw = uint160(value);
+        uint256 head = uint256(_hexWord(raw >> 32));
+        uint256 tail = uint256(_hexWord((raw & 0xffffffff) << 96));
+        _writeBytes32(out, 2, bytes32(head));
+        _writeBytes8(out, 34, bytes8(bytes32(tail)));
+        // A character is uppercased when it is a letter and its nibble of the hash of the
+        // lowercase digits is at least eight: nibble by nibble, the hash's top sixteen bytes
+        // line up with the head and the next four with the tail.
+        uint256 hash = uint256(_keccak256Range(out, 2, 40));
+        _writeBytes32(out, 2, bytes32(_checksumCase(head, _nibbles(hash >> 128))));
+        _writeBytes8(
+            out, 34, bytes8(bytes32(_checksumCase(tail, _nibbles(hash & type(uint128).max))))
+        );
+        return string(out);
     }
 
     /// @dev Returns the hexadecimal representation of `value`.
     /// The output is prefixed with "0x" and encoded using 2 hexadecimal digits per byte.
     function toHexString(address value) internal pure returns (string memory result) {
-        result = toHexStringNoPrefix(value);
-        /// @solidity memory-safe-assembly
-        assembly {
-            let n := add(mload(result), 2) // Compute the length.
-            mstore(result, 0x3078) // Store the "0x" prefix.
-            result := sub(result, 2) // Move the pointer.
-            mstore(result, n) // Store the length.
-        }
+        return _toHexString(uint160(value), 20);
     }
 
     /// @dev Returns the hexadecimal representation of `value`.
     /// The output is encoded using 2 hexadecimal digits per byte.
     function toHexStringNoPrefix(address value) internal pure returns (string memory result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := mload(0x40)
-            // Allocate memory.
-            // We need 0x20 bytes for the trailing zeros padding, 0x20 bytes for the length,
-            // 0x02 bytes for the prefix, and 0x28 bytes for the digits.
-            // The next multiple of 0x20 above (0x20 + 0x20 + 0x02 + 0x28) is 0x80.
-            mstore(0x40, add(result, 0x80))
-            mstore(0x0f, 0x30313233343536373839616263646566) // Store the "0123456789abcdef" lookup.
-
-            result := add(result, 2)
-            mstore(result, 40) // Store the length.
-            let o := add(result, 0x20)
-            mstore(add(o, 40), 0) // Zeroize the slot after the string.
-            value := shl(96, value)
-            // We write the string from rightmost digit to leftmost digit.
-            // The following is essentially a do-while loop that also handles the zero case.
-            for { let i := 0 } 1 {} {
-                let p := add(o, add(i, i))
-                let temp := byte(i, value)
-                mstore8(add(p, 1), mload(and(temp, 15)))
-                mstore8(p, mload(shr(4, temp)))
-                i := add(i, 1)
-                if eq(i, 20) { break }
-            }
-        }
+        return _toHexStringNoPrefix(uint160(value), 20);
     }
 
     /// @dev Returns the hex encoded string from the raw bytes.
     /// The output is encoded using 2 hexadecimal digits per byte.
     function toHexString(bytes memory raw) internal pure returns (string memory result) {
-        result = toHexStringNoPrefix(raw);
-        /// @solidity memory-safe-assembly
-        assembly {
-            let n := add(mload(result), 2) // Compute the length.
-            mstore(result, 0x3078) // Store the "0x" prefix.
-            result := sub(result, 2) // Move the pointer.
-            mstore(result, n) // Store the length.
-        }
+        return _hexEncodePrefixed(raw);
     }
 
     /// @dev Returns the hex encoded string from the raw bytes.
     /// The output is encoded using 2 hexadecimal digits per byte.
     function toHexStringNoPrefix(bytes memory raw) internal pure returns (string memory result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let n := mload(raw)
-            result := add(mload(0x40), 2) // Skip 2 bytes for the optional prefix.
-            mstore(result, add(n, n)) // Store the length of the output.
-
-            mstore(0x0f, 0x30313233343536373839616263646566) // Store the "0123456789abcdef" lookup.
-            let o := add(result, 0x20)
-            let end := add(raw, n)
-            for {} iszero(eq(raw, end)) {} {
-                raw := add(raw, 1)
-                mstore8(add(o, 1), mload(and(mload(raw), 15)))
-                mstore8(o, mload(and(shr(4, mload(raw)), 15)))
-                o := add(o, 2)
-            }
-            mstore(o, 0) // Zeroize the slot after the string.
-            mstore(0x40, add(o, 0x20)) // Allocate memory.
-        }
+        return _hexEncode(raw);
     }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -441,85 +329,45 @@ library LibString {
 
     /// @dev Returns the number of UTF characters in the string.
     function runeCount(string memory s) internal pure returns (uint256 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            if mload(s) {
-                mstore(0x00, div(not(0), 255))
-                mstore(0x20, 0x0202020202020202020202020202020202020202020202020303030304040506)
-                let o := add(s, 0x20)
-                let end := add(o, mload(s))
-                for { result := 1 } 1 { result := add(result, 1) } {
-                    o := add(o, byte(0, mload(shr(250, mload(o)))))
-                    if iszero(lt(o, end)) { break }
-                }
-            }
-        }
+        return _runeCount(s);
     }
 
     /// @dev Returns if this string is a 7-bit ASCII string.
     /// (i.e. all characters codes are in [0..127])
     function is7BitASCII(string memory s) internal pure returns (bool result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := 1
-            let mask := shl(7, div(not(0), 255))
-            let n := mload(s)
-            if n {
-                let o := add(s, 0x20)
-                let end := add(o, n)
-                let last := mload(end)
-                mstore(end, 0)
-                for {} 1 {} {
-                    if and(mask, mload(o)) {
-                        result := 0
-                        break
-                    }
-                    o := add(o, 0x20)
-                    if iszero(lt(o, end)) { break }
-                }
-                mstore(end, last)
-            }
+        // A word at a time: any byte with its top bit set fails the whole word.
+        bytes memory b = bytes(s);
+        uint256 n = b.length;
+        uint256 i;
+        while (i + 32 <= n) {
+            if (uint256(_readBytes32(b, i)) & _HIGH_BITS != 0) return false;
+            i += 32;
         }
+        if (i < n) return uint256(_readBytesN(b, i, n - i)) & _HIGH_BITS == 0;
+        return true;
     }
 
     /// @dev Returns if this string is a 7-bit ASCII string,
     /// AND all characters are in the `allowed` lookup.
     /// Note: If `s` is empty, returns true regardless of `allowed`.
     function is7BitASCII(string memory s, uint128 allowed) internal pure returns (bool result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := 1
-            if mload(s) {
-                let allowed_ := shr(128, shl(128, allowed))
-                let o := add(s, 0x20)
-                for { let end := add(o, mload(s)) } 1 {} {
-                    result := and(result, shr(byte(0, mload(o)), allowed_))
-                    o := add(o, 1)
-                    if iszero(and(result, lt(o, end))) { break }
-                }
-            }
-        }
+        // With every 7-bit byte allowed, only the high bits matter.
+        if (allowed == type(uint128).max) return is7BitASCII(s);
+        return _allowedBytes(bytes(s), allowed);
     }
 
     /// @dev Converts the bytes in the 7-bit ASCII string `s` to
     /// an allowed lookup for use in `is7BitASCII(s, allowed)`.
     /// To save runtime gas, you can cache the result in an immutable variable.
     function to7BitASCIIAllowedLookup(string memory s) internal pure returns (uint128 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            if mload(s) {
-                let o := add(s, 0x20)
-                for { let end := add(o, mload(s)) } 1 {} {
-                    result := or(result, shl(byte(0, mload(o)), 1))
-                    o := add(o, 1)
-                    if iszero(lt(o, end)) { break }
-                }
-                if shr(128, result) {
-                    mstore(0x00, 0xc9807e0d) // `StringNot7BitASCII()`.
-                    revert(0x1c, 0x04)
-                }
-            }
+        bytes memory b = bytes(s);
+        if (b.length == 0) return 0;
+        uint256 lookup;
+        for (uint256 i; i < b.length; ++i) {
+            lookup |= uint256(1) << uint8(b[i]);
         }
+        if (lookup > type(uint128).max) revert StringNot7BitASCII();
+        return uint128(lookup);
     }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -613,7 +461,7 @@ library LibString {
     /// @dev Returns a copy of `subject` sliced from `start` to the end of the string.
     /// `start` is a byte offset.
     function slice(string memory subject, uint256 start) internal pure returns (string memory) {
-        return string(LibBytes.slice(bytes(subject), start, type(uint256).max));
+        return string(LibBytes.slice(bytes(subject), start));
     }
 
     /// @dev Returns all the indices of `needle` in `subject`.
@@ -630,13 +478,9 @@ library LibString {
     function split(string memory subject, string memory delimiter)
         internal
         pure
-        returns (string[] memory result)
+        returns (string[] memory)
     {
-        bytes[] memory a = LibBytes.split(bytes(subject), bytes(delimiter));
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := a
-        }
+        return _toStrings(LibBytes.split(bytes(subject), bytes(delimiter)));
     }
 
     /// @dev Returns a concatenated string of `a` and `b`.
@@ -652,111 +496,117 @@ library LibString {
         pure
         returns (string memory result)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let n := mload(subject)
-            if n {
-                result := mload(0x40)
-                let o := add(result, 0x20)
-                let d := sub(subject, result)
-                let flags := shl(add(70, shl(5, toUpper)), 0x3ffffff)
-                for { let end := add(o, n) } 1 {} {
-                    let b := byte(0, mload(add(d, o)))
-                    mstore8(o, xor(and(shr(b, flags), 0x20), b))
-                    o := add(o, 1)
-                    if eq(o, end) { break }
-                }
-                mstore(result, n) // Store the length.
-                mstore(o, 0) // Zeroize the slot after the string.
-                mstore(0x40, add(o, 0x20)) // Allocate memory.
-            }
+        bytes memory b = bytes(subject);
+        uint256 n = b.length;
+        if (n == 0) return result;
+        // Either direction is the same single bit flip, applied a word at a
+        // time. Flipping that bit in every byte first maps uppercase letters
+        // onto the lowercase range, so both directions test one range. A
+        // shorter string is one zero-padded word.
+        uint256 flip = toUpper ? 0 : SPREAD_20;
+        if (n < 32) {
+            uint256 word = uint256(bytes32(b));
+            bytes memory short = abi.encodePacked(bytes32(word ^ _caseFlips(word, flip)));
+            _truncate(short, n);
+            return string(short);
         }
+        bytes memory out = new bytes(n);
+        uint256 i;
+        for (; i + 32 <= n; i += 32) {
+            uint256 word = uint256(_readBytes32(b, i));
+            _writeBytes32(out, i, bytes32(word ^ _caseFlips(word, flip)));
+        }
+        // The last word ends at the end of the string, repeating bytes already
+        // converted with the same result.
+        if (i < n) {
+            uint256 word = uint256(_readBytes32(b, n - 32));
+            _writeBytes32(out, n - 32, bytes32(word ^ _caseFlips(word, flip)));
+        }
+        return string(out);
     }
 
     /// @dev Returns a string from a small bytes32 string.
     /// `s` must be null-terminated, or behavior will be undefined.
     function fromSmallString(bytes32 s) internal pure returns (string memory result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := mload(0x40)
-            let n := 0
-            for {} // Scan for '\0'.
-             byte(n, s) { n := add(n, 1) } {}
-            mstore(result, n) // Store the length.
-            let o := add(result, 0x20)
-            mstore(o, s) // Store the bytes of the string.
-            mstore(add(o, n), 0) // Zeroize the slot after the string.
-            mstore(0x40, add(result, 0x40)) // Allocate memory.
+        // A null in the first eight bytes is found by testing them in turn,
+        // which costs less than spreading and counting its marks. After eight
+        // tests, spreading the marks still costs less than scanning to the
+        // null a byte at a time, so no length pays more than a scan.
+        if (s[0] == 0) return "";
+        bytes32 word;
+        uint256 length;
+        if (s[1] == 0) {
+            (word, length) = (s & bytes32(bytes1(0xff)), 1);
+        } else if (s[2] == 0) {
+            (word, length) = (s & bytes32(bytes2(0xffff)), 2);
+        } else if (s[3] == 0) {
+            (word, length) = (s & bytes32(bytes3(0xffffff)), 3);
+        } else if (s[4] == 0) {
+            (word, length) = (s & bytes32(bytes4(0xffffffff)), 4);
+        } else if (s[5] == 0) {
+            (word, length) = (s & bytes32(bytes5(0xffffffffff)), 5);
+        } else if (s[6] == 0) {
+            (word, length) = (s & bytes32(bytes6(0xffffffffffff)), 6);
+        } else if (s[7] == 0) {
+            (word, length) = (s & bytes32(bytes7(0xffffffffffffff)), 7);
+        } else {
+            uint256 tail = _nullTail(s);
+            (word, length) = (s & bytes32(_smallStringMask(tail)), _smallStringLength(tail));
         }
+        // The word is written whole, with the bytes from the null on cleared,
+        // and the string then shortened to them.
+        bytes memory out = abi.encodePacked(word);
+        _truncate(out, length);
+        return string(out);
     }
 
     /// @dev Returns the small string, with all bytes after the first null byte zeroized.
     function normalizeSmallString(bytes32 s) internal pure returns (bytes32 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            for {} // Scan for '\0'.
-             byte(result, s) { result := add(result, 1) } {}
-            mstore(0x00, s)
-            mstore(result, 0x00)
-            result := mload(0x00)
-        }
+        // A null in the first seven bytes is found by testing them in turn,
+        // which costs less than clearing from it with word operations; after
+        // seven tests the word path costs less than a byte scan to the null.
+        if (s[0] == 0) return 0;
+        if (s[1] == 0) return s & bytes32(bytes1(0xff));
+        if (s[2] == 0) return s & bytes32(bytes2(0xffff));
+        if (s[3] == 0) return s & bytes32(bytes3(0xffffff));
+        if (s[4] == 0) return s & bytes32(bytes4(0xffffffff));
+        if (s[5] == 0) return s & bytes32(bytes5(0xffffffffff));
+        if (s[6] == 0) return s & bytes32(bytes6(0xffffffffffff));
+        // Otherwise each byte from the first zero byte on is cleared, spelled
+        // out here so that the word path pays for no helper calls where the
+        // helpers are shared.
+        uint256 x = uint256(s);
+        uint256 tail = ~(x | ((x & LANES_7F) + LANES_7F) | LANES_7F);
+        tail |= tail >> 8;
+        tail |= tail >> 16;
+        tail |= tail >> 32;
+        tail |= tail >> 64;
+        tail |= tail >> 128;
+        return s & bytes32(~((tail - (tail >> 7)) | tail));
     }
 
     /// @dev Returns the string as a normalized null-terminated small string.
     function toSmallString(string memory s) internal pure returns (bytes32 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := mload(s)
-            if iszero(lt(result, 33)) {
-                mstore(0x00, 0xec92f9a3) // `TooBigForSmallString()`.
-                revert(0x1c, 0x04)
-            }
-            result := shl(shl(3, sub(32, result)), mload(add(s, result)))
-        }
+        bytes memory b = bytes(s);
+        if (b.length > 32) revert TooBigForSmallString();
+        return bytes32(b);
     }
 
     /// @dev Returns a lowercased copy of the string.
     /// WARNING! This function is only compatible with 7-bit ASCII strings.
     function lower(string memory subject) internal pure returns (string memory result) {
-        result = toCase(subject, false);
+        return toCase(subject, false);
     }
 
     /// @dev Returns an UPPERCASED copy of the string.
     /// WARNING! This function is only compatible with 7-bit ASCII strings.
     function upper(string memory subject) internal pure returns (string memory result) {
-        result = toCase(subject, true);
+        return toCase(subject, true);
     }
 
     /// @dev Escapes the string to be used within HTML tags.
     function escapeHTML(string memory s) internal pure returns (string memory result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := mload(0x40)
-            let end := add(s, mload(s))
-            let o := add(result, 0x20)
-            // Store the bytes of the packed offsets and strides into the scratch space.
-            // `packed = (stride << 5) | offset`. Max offset is 20. Max stride is 6.
-            mstore(0x1f, 0x900094)
-            mstore(0x08, 0xc0000000a6ab)
-            // Store "&quot;&amp;&#39;&lt;&gt;" into the scratch space.
-            mstore(0x00, shl(64, 0x2671756f743b26616d703b262333393b266c743b2667743b))
-            for {} iszero(eq(s, end)) {} {
-                s := add(s, 1)
-                let c := and(mload(s), 0xff)
-                // Not in `["\"","'","&","<",">"]`.
-                if iszero(and(shl(c, 1), 0x500000c400000000)) {
-                    mstore8(o, c)
-                    o := add(o, 1)
-                    continue
-                }
-                let t := shr(248, mload(c))
-                mstore(o, mload(and(t, 0x1f)))
-                o := add(o, shr(5, t))
-            }
-            mstore(o, 0) // Zeroize the slot after the string.
-            mstore(result, sub(o, add(result, 0x20))) // Store the length.
-            mstore(0x40, add(o, 0x20)) // Allocate memory.
-        }
+        return _escapeHTML(s);
     }
 
     /// @dev Escapes the string to be used within double-quotes in a JSON.
@@ -766,61 +616,12 @@ library LibString {
         pure
         returns (string memory result)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := mload(0x40)
-            let o := add(result, 0x20)
-            if addDoubleQuotes {
-                mstore8(o, 34)
-                o := add(1, o)
-            }
-            // Store "\\u0000" in scratch space.
-            // Store "0123456789abcdef" in scratch space.
-            // Also, store `{0x08:"b", 0x09:"t", 0x0a:"n", 0x0c:"f", 0x0d:"r"}`.
-            // into the scratch space.
-            mstore(0x15, 0x5c75303030303031323334353637383961626364656662746e006672)
-            // Bitmask for detecting `["\"","\\"]`.
-            let e := or(shl(0x22, 1), shl(0x5c, 1))
-            for { let end := add(s, mload(s)) } iszero(eq(s, end)) {} {
-                s := add(s, 1)
-                let c := and(mload(s), 0xff)
-                if iszero(lt(c, 0x20)) {
-                    if iszero(and(shl(c, 1), e)) {
-                        // Not in `["\"","\\"]`.
-                        mstore8(o, c)
-                        o := add(o, 1)
-                        continue
-                    }
-                    mstore8(o, 0x5c) // "\\".
-                    mstore8(add(o, 1), c)
-                    o := add(o, 2)
-                    continue
-                }
-                if iszero(and(shl(c, 1), 0x3700)) {
-                    // Not in `["\b","\t","\n","\f","\d"]`.
-                    mstore8(0x1d, mload(shr(4, c))) // Hex value.
-                    mstore8(0x1e, mload(and(c, 15))) // Hex value.
-                    mstore(o, mload(0x19)) // "\\u00XX".
-                    o := add(o, 6)
-                    continue
-                }
-                mstore8(o, 0x5c) // "\\".
-                mstore8(add(o, 1), mload(add(c, 8)))
-                o := add(o, 2)
-            }
-            if addDoubleQuotes {
-                mstore8(o, 34)
-                o := add(1, o)
-            }
-            mstore(o, 0) // Zeroize the slot after the string.
-            mstore(result, sub(o, add(result, 0x20))) // Store the length.
-            mstore(0x40, add(o, 0x20)) // Allocate memory.
-        }
+        return _escapeJSON(s, addDoubleQuotes);
     }
 
     /// @dev Escapes the string to be used within double-quotes in a JSON.
     function escapeJSON(string memory s) internal pure returns (string memory result) {
-        result = escapeJSON(s, false);
+        return _escapeJSON(s);
     }
 
     /// @dev Encodes `s` so that it can be safely used in a URI,
@@ -829,57 +630,23 @@ library LibString {
     /// See: https://datatracker.ietf.org/doc/html/rfc2396
     /// See: https://datatracker.ietf.org/doc/html/rfc3986
     function encodeURIComponent(string memory s) internal pure returns (string memory result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := mload(0x40)
-            // Store "0123456789ABCDEF" in scratch space.
-            // Uppercased to be consistent with JavaScript's implementation.
-            mstore(0x0f, 0x30313233343536373839414243444546)
-            let o := add(result, 0x20)
-            for { let end := add(s, mload(s)) } iszero(eq(s, end)) {} {
-                s := add(s, 1)
-                let c := and(mload(s), 0xff)
-                // If not in `[0-9A-Z-a-z-_.!~*'()]`.
-                if iszero(and(1, shr(c, 0x47fffffe87fffffe03ff678200000000))) {
-                    mstore8(o, 0x25) // '%'.
-                    mstore8(add(o, 1), mload(and(shr(4, c), 15)))
-                    mstore8(add(o, 2), mload(and(c, 15)))
-                    o := add(o, 3)
-                    continue
-                }
-                mstore8(o, c)
-                o := add(o, 1)
-            }
-            mstore(result, sub(o, add(result, 0x20))) // Store the length.
-            mstore(o, 0) // Zeroize the slot after the string.
-            mstore(0x40, add(o, 0x20)) // Allocate memory.
-        }
+        return _encodeURIComponent(s);
     }
 
     /// @dev Returns whether `a` equals `b`.
     function eq(string memory a, string memory b) internal pure returns (bool result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := eq(keccak256(add(a, 0x20), mload(a)), keccak256(add(b, 0x20), mload(b)))
-        }
+        return keccak256(bytes(a)) == keccak256(bytes(b));
     }
 
     /// @dev Returns whether `a` equals `b`, where `b` is a null-terminated small string.
     function eqs(string memory a, bytes32 b) internal pure returns (bool result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            // These should be evaluated on compile time, as far as possible.
-            let m := not(shl(7, div(not(iszero(b)), 255))) // `0x7f7f ...`.
-            let x := not(or(m, or(b, add(m, and(b, m)))))
-            let r := shl(7, iszero(iszero(shr(128, x))))
-            r := or(r, shl(6, iszero(iszero(shr(64, shr(r, x))))))
-            r := or(r, shl(5, lt(0xffffffff, shr(r, x))))
-            r := or(r, shl(4, lt(0xffff, shr(r, x))))
-            r := or(r, shl(3, lt(0xff, shr(r, x))))
-            // forgefmt: disable-next-item
-            result := gt(eq(mload(a), add(iszero(x), xor(31, shr(3, r)))),
-                xor(shr(add(8, r), b), shr(add(8, r), mload(add(a, 0x20)))))
-        }
+        bytes memory s = bytes(a);
+        uint256 tail = _nullTail(b);
+        // `b`'s null marks must start exactly where `a` ends.
+        if (s.length > 32 || tail != _HIGH_BITS >> (s.length * 8)) return false;
+        // The conversion pads `a` with zeros after its bytes, and the mask
+        // clears `b` from its first null byte on.
+        return bytes32(s) == b & bytes32(_smallStringMask(tail));
     }
 
     /// @dev Returns 0 if `a == b`, -1 if `a < b`, +1 if `a > b`.
@@ -891,52 +658,20 @@ library LibString {
     /// @dev Packs a single string with its length into a single word.
     /// Returns `bytes32(0)` if the length is zero or greater than 31.
     function packOne(string memory a) internal pure returns (bytes32 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            // We don't need to zero right pad the string,
-            // since this is our own custom non-standard packing scheme.
-            result := mul(
-                // Load the length and the bytes.
-                mload(add(a, 0x1f)),
-                // `length != 0 && length < 32`. Abuses underflow.
-                // Assumes that the length is valid and within the block gas limit.
-                lt(sub(mload(a), 1), 0x1f)
-            )
-        }
+        return _packOne(a);
     }
 
     /// @dev Unpacks a string packed using {packOne}.
     /// Returns the empty string if `packed` is `bytes32(0)`.
     /// If `packed` is not an output of {packOne}, the output behavior is undefined.
     function unpackOne(bytes32 packed) internal pure returns (string memory result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := mload(0x40) // Grab the free memory pointer.
-            mstore(0x40, add(result, 0x40)) // Allocate 2 words (1 for the length, 1 for the bytes).
-            mstore(result, 0) // Zeroize the length slot.
-            mstore(add(result, 0x1f), packed) // Store the length and bytes.
-            mstore(add(add(result, 0x20), mload(result)), 0) // Right pad with zeroes.
-        }
+        return _unpackOne(packed);
     }
 
     /// @dev Packs two strings with their lengths into a single word.
     /// Returns `bytes32(0)` if combined length is zero or greater than 30.
     function packTwo(string memory a, string memory b) internal pure returns (bytes32 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let aLen := mload(a)
-            // We don't need to zero right pad the strings,
-            // since this is our own custom non-standard packing scheme.
-            result := mul(
-                or( // Load the length and the bytes of `a` and `b`.
-                    shl(shl(3, sub(0x1f, aLen)), mload(add(a, aLen))),
-                    shr(shl(3, add(aLen, 1)), mload(add(b, 0x1f)))
-                ),
-                // `totalLen != 0 && totalLen < 31`. Abuses underflow.
-                // Assumes that the lengths are valid and within the block gas limit.
-                lt(sub(add(aLen, mload(b)), 1), 0x1e)
-            )
-        }
+        return _packTwo(a, b);
     }
 
     /// @dev Unpacks strings packed using {packTwo}.
@@ -947,37 +682,674 @@ library LibString {
         pure
         returns (string memory resultA, string memory resultB)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            resultA := mload(0x40) // Grab the free memory pointer.
-            resultB := add(resultA, 0x40)
-            // Allocate 2 words for each string (1 for the length, 1 for the byte). Total 4 words.
-            mstore(0x40, add(resultB, 0x40))
-            // Zeroize the length slots.
-            mstore(resultA, 0)
-            mstore(resultB, 0)
-            // Store the lengths and bytes.
-            mstore(add(resultA, 0x1f), packed)
-            mstore(add(resultB, 0x1f), mload(add(add(resultA, 0x20), mload(resultA))))
-            // Right pad with zeroes.
-            mstore(add(add(resultA, 0x20), mload(resultA)), 0)
-            mstore(add(add(resultB, 0x20), mload(resultB)), 0)
-        }
+        return _unpackTwo(packed);
     }
 
     /// @dev Directly returns `a` without copying.
     function directReturn(string memory a) internal pure {
-        /// @solidity memory-safe-assembly
-        assembly {
-            // Assumes that the string does not start from the scratch space.
-            let retStart := sub(a, 0x20)
-            let retUnpaddedSize := add(mload(a), 0x40)
-            // Right pad with zeroes. Just in case the string is produced
-            // by a method that doesn't zero right pad.
-            mstore(add(retStart, retUnpaddedSize), 0)
-            mstore(retStart, 0x20) // Store the return offset.
-            // End the transaction, returning the string.
-            return(retStart, and(not(0x1f), add(0x1f, retUnpaddedSize)))
+        _directReturn(a);
+    }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      PRIVATE HELPERS                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev The thirty-two hex characters of the sixteen bytes in `x`, which
+    /// must be below `2 ** 128`.
+    function _hexWord(uint256 x) private pure returns (bytes32) {
+        // Spread the thirty-two nibbles one to a byte, halving the packing
+        // each step: eight bytes, four, two, one, then one nibble.
+        x = (x | (x << 64)) & MASK_64;
+        x = (x | (x << 32)) & MASK_32;
+        x = (x | (x << 16)) & MASK_16;
+        x = (x | (x << 8)) & MASK_8;
+        x = (x | (x << 4)) & MASK_4;
+        // Adding six carries every nibble above nine into the next bit, which
+        // marks the ones that become letters rather than digits.
+        uint256 letters = ((x + SPREAD_6) >> 4) & SPREAD_1;
+        return bytes32(x + SPREAD_ASCII_0 + letters * 39);
+    }
+
+    /// @dev Spreads the thirty-two nibbles of the low sixteen bytes of `x` one to a byte,
+    /// the highest nibble first, as `_hexWord` does before it turns them into digits. Kept
+    /// apart from it so that the hex formatters' loops keep their inlined body.
+    function _nibbles(uint256 x) private pure returns (uint256) {
+        x = (x | (x << 64)) & MASK_64;
+        x = (x | (x << 32)) & MASK_32;
+        x = (x | (x << 16)) & MASK_16;
+        x = (x | (x << 8)) & MASK_8;
+        return (x | (x << 4)) & MASK_4;
+    }
+
+    /// @dev Whether every byte of `b` has its bit set in `allowed`.
+    function _allowedBytes(bytes memory b, uint256 allowed) private pure returns (bool) {
+        for (uint256 i; i < b.length; ++i) {
+            if (((allowed >> uint8(b[i])) & 1) == 0) return false;
+        }
+        return true;
+    }
+
+    /// @dev `0x20` in each byte of `word` that is a lowercase letter once
+    /// `flip` is applied. A byte's low seven bits plus `0x80 - x` reach its
+    /// high bit exactly when they are at least `x`, and never carry into the
+    /// next byte; bytes of `0x80` and above are no letters.
+    function _caseFlips(uint256 word, uint256 flip) private pure returns (uint256) {
+        uint256 low = (word ^ flip) & LANES_7F;
+        // `a` through `z` are 0x61 through 0x7a.
+        uint256 letters = (low + SPREAD_1F) ^ (low + SPREAD_5);
+        return (letters & ~word & _HIGH_BITS) >> 2;
+    }
+
+    /// @dev Uppercases every letter of the hex `chars` whose lane of `nibbles` is at least
+    /// eight. Adding 0x1f sets the top bit of a letter's lane, 0x61 to 0x66, and of no digit's
+    /// or empty lane; the nibble's bit three shifted up is the other condition, and taking
+    /// 0x20 off a marked lane is the case change.
+    function _checksumCase(uint256 chars, uint256 nibbles) private pure returns (uint256) {
+        uint256 letters = (chars + SPREAD_1F) & _HIGH_BITS;
+        uint256 marked = letters & ((nibbles << 4) & _HIGH_BITS);
+        return chars - (marked >> 2);
+    }
+
+    /// @dev Returns the length of a small string up to its first null byte,
+    /// from the string's `_nullTail` marks.
+    function _smallStringLength(uint256 tail) private pure returns (uint256) {
+        // One mark for each byte from the first zero byte on; the bytes before
+        // it are the string. Multiplying the marks, one per byte, by a one in
+        // every byte sums them into the top byte, modulo `2**256` on purpose:
+        // no byte of the product exceeds 32, so no sum carries into another.
+        return 32 - (_rawMul(tail >> 7, LANES_01) >> 248);
+    }
+
+    /// @dev `0x80` in every byte of `s` from its first zero byte on. A byte
+    /// carries into its own high bit exactly when it is not zero, so the kept
+    /// high bits mark the zero bytes; each mark then spreads to every lower
+    /// byte, which the first zero byte's mark reaches first.
+    function _nullTail(bytes32 s) private pure returns (uint256 marks) {
+        uint256 x = uint256(s);
+        marks = ~(x | ((x & LANES_7F) + LANES_7F) | LANES_7F);
+        marks |= marks >> 8;
+        marks |= marks >> 16;
+        marks |= marks >> 32;
+        marks |= marks >> 64;
+        marks |= marks >> 128;
+    }
+
+    /// @dev Keeps the bytes before the first null byte, from the string's
+    /// `_nullTail` marks: a marked byte minus its mark shifted to the byte's
+    /// low bit leaves the seven bits below the mark, which the mark completes
+    /// to the whole byte. A shift never exceeds its operand, so the difference
+    /// cannot wrap.
+    function _smallStringMask(uint256 tail) private pure returns (uint256) {
+        return ~((tail - (tail >> 7)) | tail);
+    }
+
+    /// @dev `value` in decimal. Halving the remaining magnitude finds the
+    /// length in at most seven steps, where dividing by ten once per digit
+    /// costs up to seventy-eight.
+    function _toString(uint256 value) private pure returns (string memory) {
+        uint256 n = 1;
+        uint256 x = value;
+        if (x >= 1e64) {
+            x /= 1e64;
+            n += 64;
+        }
+        if (x >= 1e32) {
+            x /= 1e32;
+            n += 32;
+        }
+        if (x >= 1e16) {
+            x /= 1e16;
+            n += 16;
+        }
+        if (x >= 1e8) {
+            x /= 1e8;
+            n += 8;
+        }
+        if (x >= 1e4) {
+            x /= 1e4;
+            n += 4;
+        }
+        if (x >= 1e2) {
+            x /= 1e2;
+            n += 2;
+        }
+        if (x >= 10) ++n;
+        bytes memory out = new bytes(n);
+        do {
+            --n;
+            out[n] = bytes1(uint8(48 + value % 10));
+            value /= 10;
+        } while (n != 0);
+        return string(out);
+    }
+
+    /// @dev `value` in decimal, with a leading `-` when negative.
+    function _toString(int256 value) private pure returns (string memory) {
+        if (value >= 0) return _toString(uint256(value));
+        // The magnitude of the most negative value does not fit `int256`.
+        uint256 magnitude = value == type(int256).min ? uint256(1) << 255 : uint256(-value);
+        return string.concat("-", _toString(magnitude));
+    }
+
+    /// @dev `s` with every character JSON requires escaped, without quotes.
+    function _escapeJSON(string memory s) private pure returns (string memory) {
+        return _escapeJSON(s, false);
+    }
+
+    /// @dev `s` with the quote, the backslash and the control characters
+    /// escaped, as the short forms where JSON has them and `\u00XX` elsewhere,
+    /// enclosed in double quotes when `addDoubleQuotes`. The output is built at
+    /// its largest size, six characters per input byte, then cut down.
+    function _escapeJSON(string memory s, bool addDoubleQuotes)
+        private
+        pure
+        returns (string memory)
+    {
+        bytes memory input = bytes(s);
+        bytes memory out = new bytes(input.length * 6 + 2);
+        uint256 o;
+        if (addDoubleQuotes) out[o++] = '"';
+        // Bytes before `bytewise` belong to a word with a byte to replace.
+        uint256 bytewise;
+        for (uint256 i; i < input.length; ++i) {
+            // A word without `"`, `\` or a control byte copies whole; `out` has
+            // room, as every input byte before it took at most six.
+            if (i >= bytewise) {
+                while (input.length - i >= 32) {
+                    uint256 w = uint256(_readBytes32(input, i));
+                    if (_jsonSpecials(w) != 0) break;
+                    _writeBytes32(out, o, bytes32(w));
+                    o += 32;
+                    i += 32;
+                }
+                if (i == input.length) break;
+                bytewise = i + 32;
+            }
+            bytes1 c = input[i];
+            if (c == '"' || c == "\\") {
+                out[o++] = "\\";
+                out[o++] = c;
+            } else if (uint8(c) >= 0x20) {
+                out[o++] = c;
+            } else {
+                out[o++] = "\\";
+                if (c == 0x08) {
+                    out[o++] = "b";
+                } else if (c == 0x09) {
+                    out[o++] = "t";
+                } else if (c == 0x0a) {
+                    out[o++] = "n";
+                } else if (c == 0x0c) {
+                    out[o++] = "f";
+                } else if (c == 0x0d) {
+                    out[o++] = "r";
+                } else {
+                    out[o++] = "u";
+                    out[o++] = "0";
+                    out[o++] = "0";
+                    out[o++] = _DIGITS[uint8(c) >> 4];
+                    out[o++] = _DIGITS[uint8(c) & 15];
+                }
+            }
+        }
+        if (addDoubleQuotes) out[o++] = '"';
+        _truncate(out, o);
+        return string(out);
+    }
+
+    /// @dev `s` with the characters HTML gives meaning to replaced by their
+    /// entities: `&quot;`, `&amp;`, `&#39;`, `&lt;` and `&gt;`. Built at its
+    /// largest size, six characters per input byte, then cut down.
+    function _escapeHTML(string memory s) private pure returns (string memory) {
+        bytes memory input = bytes(s);
+        bytes memory out = new bytes(input.length * 6);
+        uint256 o;
+        // Bytes before `bytewise` belong to a word with a byte to replace.
+        uint256 bytewise;
+        for (uint256 i; i < input.length; ++i) {
+            // A word without `"`, `&`, `'`, `<` or `>` copies whole; `out` has
+            // room, as every input byte before it took at most six.
+            if (i >= bytewise) {
+                while (input.length - i >= 32) {
+                    uint256 w = uint256(_readBytes32(input, i));
+                    if (_htmlSpecials(w) != 0) break;
+                    _writeBytes32(out, o, bytes32(w));
+                    o += 32;
+                    i += 32;
+                }
+                if (i == input.length) break;
+                bytewise = i + 32;
+            }
+            bytes1 c = input[i];
+            if (c == '"') {
+                o = _put(out, o, "&quot;", 6);
+            } else if (c == "&") {
+                o = _put(out, o, "&amp;", 5);
+            } else if (c == "'") {
+                o = _put(out, o, "&#39;", 5);
+            } else if (c == "<") {
+                o = _put(out, o, "&lt;", 4);
+            } else if (c == ">") {
+                o = _put(out, o, "&gt;", 4);
+            } else {
+                out[o++] = c;
+            }
+        }
+        _truncate(out, o);
+        return string(out);
+    }
+
+    /// @dev Writes the leading `count` bytes of `text` into `out` at `o` and
+    /// returns the offset after them.
+    /// @custom:solar-inline
+    function _put(bytes memory out, uint256 o, bytes32 text, uint256 count)
+        private
+        pure
+        returns (uint256)
+    {
+        for (uint256 k; k < count; ++k) {
+            out[o + k] = text[k];
+        }
+        return o + count;
+    }
+
+    /// @dev `s` as a URI component, like JavaScript's `encodeURIComponent`:
+    /// every byte other than the letters, the digits and `-_.!~*'()` becomes
+    /// `%` and two uppercase hexadecimal digits.
+    function _encodeURIComponent(string memory s) private pure returns (string memory) {
+        bytes memory input = bytes(s);
+        bytes memory out = new bytes(input.length * 3);
+        uint256 o;
+        for (uint256 i; i < input.length; ++i) {
+            bytes1 c = input[i];
+            if ((_URI_UNRESERVED >> uint8(c)) & 1 != 0) {
+                out[o++] = c;
+            } else {
+                out[o++] = "%";
+                out[o++] = _UPPER_DIGITS[uint8(c) >> 4];
+                out[o++] = _UPPER_DIGITS[uint8(c) & 15];
+            }
+        }
+        _truncate(out, o);
+        return string(out);
+    }
+
+    /// @dev `0x80` in each byte of `z` that is zero, and zero in every other
+    /// byte: the low seven bits of a byte plus `0x7f` carry into its top bit
+    /// unless they are all clear, and never into the next byte.
+    /// @custom:solar-inline
+    function _zeroBytes(uint256 z) private pure returns (uint256) {
+        return ~(((z & LANES_7F) + LANES_7F) | z | LANES_7F);
+    }
+
+    /// @dev Nonzero when a byte of `w` is one `escapeHTML` replaces. `&` and
+    /// `'` differ in the low bit, `<` and `>` in the next one.
+    /// @custom:solar-inline
+    function _htmlSpecials(uint256 w) private pure returns (uint256) {
+        return _zeroBytes(w ^ (0x22 * LANES_01)) | _zeroBytes((w | LANES_01) ^ (0x27 * LANES_01))
+            | _zeroBytes((w | (0x02 * LANES_01)) ^ (0x3e * LANES_01));
+    }
+
+    /// @dev Nonzero when a byte of `w` is one `escapeJSON` escapes: `"`, `\`,
+    /// or below 0x20, which neither has its top bit set nor reaches it by
+    /// adding 0x60 to its low seven bits.
+    /// @custom:solar-inline
+    function _jsonSpecials(uint256 w) private pure returns (uint256) {
+        return _zeroBytes(w ^ (0x22 * LANES_01)) | _zeroBytes(w ^ (0x5c * LANES_01))
+            | (~(((w & LANES_7F) + 0x60 * LANES_01) | w) & _HIGH_BITS);
+    }
+
+    /// @dev The number of UTF-8 runes in `subject`. Each rune is stepped over by
+    /// the length its lead byte declares from the byte's top six bits: one below
+    /// 0x80, two up to 0xdf (a stray continuation byte included), then three,
+    /// four, five and six. Malformed text is counted by the same steps.
+    function _runeCount(string memory subject) private pure returns (uint256 count) {
+        bytes memory s = bytes(subject);
+        // One nibble per value of the top six bits, at four times that value.
+        uint256 lengths = 0x6544333322222222222222222222222211111111111111111111111111111111;
+        for (uint256 i; i < s.length; ++count) {
+            // A word of bytes below 0x80 is 32 runes of one byte each.
+            while (s.length - i >= 32 && uint256(_readBytes32(s, i)) & _HIGH_BITS == 0) {
+                count += 32;
+                i += 32;
+            }
+            if (i == s.length) break;
+            i += (lengths >> (uint8(s[i]) & 0xfc)) & 15;
+        }
+    }
+
+    /// @dev The low `byteCount` bytes of `value` as lowercase hexadecimal, two
+    /// digits per byte, without a prefix. `value` must fit in them, which
+    /// `_checkHexLength` checks for a caller's `byteCount`.
+    function _toHexStringNoPrefix(uint256 value, uint256 byteCount)
+        private
+        pure
+        returns (string memory)
+    {
+        bytes memory out = new bytes(byteCount * 2);
+        _hexInto(out, 0, value, byteCount);
+        return string(out);
+    }
+
+    /// @dev `_toHexStringNoPrefix(value, byteCount)` after `0x`.
+    function _toHexString(uint256 value, uint256 byteCount) private pure returns (string memory) {
+        bytes memory out = new bytes(byteCount * 2 + 2);
+        (out[0], out[1]) = ("0", "x");
+        _hexInto(out, 2, value, byteCount);
+        return string(out);
+    }
+
+    /// @dev `value` as lowercase hexadecimal in its fewest whole bytes, at
+    /// least one, without a prefix.
+    function _toHexStringNoPrefix(uint256 value) private pure returns (string memory) {
+        return _toHexStringNoPrefix(value, _byteLength(value));
+    }
+
+    /// @dev `_toHexStringNoPrefix(value)` after `0x`.
+    function _toHexString(uint256 value) private pure returns (string memory) {
+        return _toHexString(value, _byteLength(value));
+    }
+
+    /// @dev The fewest whole bytes that hold `value`, at least one.
+    function _byteLength(uint256 value) private pure returns (uint256) {
+        return (_nibbleLength(value) + 1) >> 1;
+    }
+
+    /// @dev The fewest hexadecimal digits that spell `value`, at least one,
+    /// found by halving the remaining width.
+    function _nibbleLength(uint256 value) private pure returns (uint256 n) {
+        n = 1;
+        if (value >> 128 != 0) {
+            value >>= 128;
+            n += 32;
+        }
+        if (value >> 64 != 0) {
+            value >>= 64;
+            n += 16;
+        }
+        if (value >> 32 != 0) {
+            value >>= 32;
+            n += 8;
+        }
+        if (value >> 16 != 0) {
+            value >>= 16;
+            n += 4;
+        }
+        if (value >> 8 != 0) {
+            value >>= 8;
+            n += 2;
+        }
+        if (value >> 4 != 0) ++n;
+    }
+
+    /// @dev Reverts with `HexLengthInsufficient()` when `value` does not fit in
+    /// its low `byteCount` bytes. The functions taking a caller's `byteCount`
+    /// check it before they allocate the digits, which a failing call does
+    /// not need; a length found from `value` always fits.
+    function _checkHexLength(uint256 value, uint256 byteCount) private pure {
+        if (byteCount < 32 && value >> (8 * byteCount) != 0) revert HexLengthInsufficient();
+    }
+
+    /// @dev Writes the low `byteCount` bytes of `value` into `out` at `offset`
+    /// as `2 * byteCount` lowercase hexadecimal digits, once `_checkHexLength`
+    /// found that `value` fits in them. Sixteen bytes make a word of digits;
+    /// bytes past the word's are zeros.
+    function _hexInto(bytes memory out, uint256 offset, uint256 value, uint256 byteCount)
+        private
+        pure
+    {
+        uint256 o = offset;
+        for (; byteCount > 32; --byteCount) {
+            (out[o], out[o + 1]) = ("0", "0");
+            o += 2;
+        }
+        if (byteCount > 16) {
+            // The high bytes' digits are the last ones of their word.
+            uint256 high = byteCount - 16;
+            uint256 digits = uint256(_hexWord(value >> 128)) << (8 * (32 - 2 * high));
+            _writeBytesN(out, o, bytes32(digits), 2 * high);
+            _writeBytes32(out, o + 2 * high, _hexWord(value & type(uint128).max));
+        } else if (byteCount != 0) {
+            uint256 digits = uint256(_hexWord(value)) << (8 * (32 - 2 * byteCount));
+            _writeBytesN(out, o, bytes32(digits), 2 * byteCount);
+        }
+    }
+
+    /// @dev Minimal lowercase hexadecimal digits without a prefix.
+    function _toMinimalHexStringNoPrefix(uint256 value) private pure returns (string memory) {
+        uint256 n = _nibbleLength(value);
+        bytes memory out = new bytes(n);
+        _minimalHexInto(out, 0, value, n);
+        return string(out);
+    }
+
+    /// @dev Minimal lowercase hexadecimal digits after `0x`.
+    function _toMinimalHexString(uint256 value) private pure returns (string memory) {
+        uint256 n = _nibbleLength(value);
+        bytes memory out = new bytes(n + 2);
+        (out[0], out[1]) = ("0", "x");
+        _minimalHexInto(out, 2, value, n);
+        return string(out);
+    }
+
+    /// @dev Writes the last `n` of the 64 digits of `value` into `out` at `offset`.
+    function _minimalHexInto(bytes memory out, uint256 offset, uint256 value, uint256 n)
+        private
+        pure
+    {
+        if (n > 32) {
+            uint256 high = n - 32;
+            uint256 digits = uint256(_hexWord(value >> 128)) << (8 * (32 - high));
+            _writeBytesN(out, offset, bytes32(digits), high);
+            _writeBytes32(out, offset + high, _hexWord(value & type(uint128).max));
+        } else {
+            uint256 digits = uint256(_hexWord(value & type(uint128).max)) << (8 * (32 - n));
+            _writeBytesN(out, offset, bytes32(digits), n);
+        }
+    }
+
+    /// @dev The digits of `data`, without a prefix.
+    function _hexEncode(bytes memory data) private pure returns (string memory) {
+        bytes memory out = new bytes(data.length * 2);
+        _hexEncodeInto(out, 0, data);
+        return string(out);
+    }
+
+    /// @dev The digits of `data` after `0x`.
+    function _hexEncodePrefixed(bytes memory data) private pure returns (string memory) {
+        bytes memory out = new bytes(data.length * 2 + 2);
+        (out[0], out[1]) = ("0", "x");
+        _hexEncodeInto(out, 2, data);
+        return string(out);
+    }
+
+    /// @dev Writes the digits of `data` into `out` from `start`. Sixteen bytes
+    /// make one word of digits; a remainder is one more block pulled back to
+    /// end where the input ends, and an input below sixteen bytes goes a byte
+    /// at a time.
+    function _hexEncodeInto(bytes memory out, uint256 start, bytes memory data) private pure {
+        uint256 n = data.length;
+        uint256 i;
+        uint256 o = start;
+        while (i + 16 <= n) {
+            _writeBytes32(out, o, _hexWord(uint128(_readBytes16(data, i))));
+            i += 16;
+            o += 32;
+        }
+        if (i == n) return;
+        if (n >= 16) {
+            uint256 last = n - 16;
+            _writeBytes32(out, start + last * 2, _hexWord(uint128(_readBytes16(data, last))));
+            return;
+        }
+        for (; i < n; ++i) {
+            uint256 x = uint8(data[i]);
+            out[o] = _DIGITS[x >> 4];
+            out[o + 1] = _DIGITS[x & 15];
+            o += 2;
+        }
+    }
+
+    /// @dev Packs a nonempty string of at most 31 bytes into one word. The
+    /// first byte is its length and the remaining bytes are its contents.
+    function _packOne(string memory value) private pure returns (bytes32 result) {
+        bytes memory input = bytes(value);
+        if (input.length == 0 || input.length > 31) return 0;
+        // The length byte, then the contents in the rest of the word.
+        result = bytes32(input.length << 248) | (_readBytesN(input, 0, input.length) >> 8);
+    }
+
+    /// @dev Reconstructs a string produced by `_packOne`.
+    function _unpackOne(bytes32 packed) private pure returns (string memory result) {
+        uint256 n = uint8(packed[0]);
+        if (n > 31) n = 31;
+        bytes memory out = new bytes(n);
+        _writeBytesN(out, 0, packed << 8, n);
+        return string(out);
+    }
+
+    /// @dev Packs two strings whose combined length is 1..30 bytes into one
+    /// word. Each string is preceded by one length byte.
+    function _packTwo(string memory a, string memory b) private pure returns (bytes32 result) {
+        bytes memory x = bytes(a);
+        bytes memory y = bytes(b);
+        uint256 total = x.length + y.length;
+        if (total == 0 || total > 30) return 0;
+        // Each length byte, then its string's contents.
+        result = bytes32(x.length << 248) | (_readBytesN(x, 0, x.length) >> 8)
+            | bytes32(y.length << ((30 - x.length) * 8))
+            | (_readBytesN(y, 0, y.length) >> ((x.length + 2) * 8));
+    }
+
+    /// @dev Reconstructs two strings produced by `_packTwo`.
+    function _unpackTwo(bytes32 packed)
+        private
+        pure
+        returns (string memory resultA, string memory resultB)
+    {
+        uint256 aLength = uint8(packed[0]);
+        if (aLength > 30) aLength = 30;
+        bytes memory a = new bytes(aLength);
+        _writeBytesN(a, 0, packed << 8, aLength);
+        uint256 bLength = uint8(packed[aLength + 1]);
+        if (bLength > 30 - aLength) bLength = 30 - aLength;
+        bytes memory b = new bytes(bLength);
+        _writeBytesN(b, 0, packed << ((aLength + 2) * 8), bLength);
+        return (string(a), string(b));
+    }
+
+    /// @dev `x * y` modulo `2**256`.
+    /// @custom:solar-trusted
+    function _rawMul(uint256 x, uint256 y) private pure returns (uint256 z) {
+        unchecked {
+            z = x * y;
+        }
+    }
+
+    /// @dev Shrinks `b` to its first `n` bytes in place and clears the rest of
+    /// its last word, so the bytes past the new end read as zero padding.
+    /// Solidity cannot spell a shorter length for an existing buffer.
+    /// @custom:solar-trusted
+    function _truncate(bytes memory b, uint256 n) private pure {
+        if (n > b.length) n = new uint256[](0)[0];
+        assembly ("memory-safe") {
+            mstore(b, n)
+            mstore(add(add(b, 0x20), n), 0)
+        }
+    }
+
+    /// @dev Ends the call, returning `s` ABI-encoded as the single result of a
+    /// function that returns `string`. A `return` statement leaves only the
+    /// function it is in.
+    /// @custom:solar-trusted
+    function _directReturn(string memory s) private pure {
+        bytes memory data = abi.encode(s);
+        assembly ("memory-safe") {
+            return(add(data, 0x20), mload(data))
+        }
+    }
+
+    /// @dev The 16 bytes of `b` at `offset`.
+    /// @custom:solar-inline
+    function _readBytes16(bytes memory b, uint256 offset) private pure returns (bytes16 result) {
+        for (uint256 k; k < 16; ++k) {
+            result |= bytes16(b[offset + k]) >> (8 * k);
+        }
+    }
+
+    /// @dev The 32 bytes of `b` at `offset`.
+    /// @custom:solar-inline
+    function _readBytes32(bytes memory b, uint256 offset) private pure returns (bytes32 result) {
+        for (uint256 k; k < 32; ++k) {
+            result |= bytes32(b[offset + k]) >> (8 * k);
+        }
+    }
+
+    /// @dev Writes `value` into `b` at `offset`.
+    /// @custom:solar-inline
+    function _writeBytes32(bytes memory b, uint256 offset, bytes32 value) private pure {
+        for (uint256 k; k < 32; ++k) {
+            b[offset + k] = value[k];
+        }
+    }
+
+    /// @dev Writes `value` into `b` at `offset`.
+    /// @custom:solar-inline
+    function _writeBytes8(bytes memory b, uint256 offset, bytes8 value) private pure {
+        for (uint256 k; k < 8; ++k) {
+            b[offset + k] = value[k];
+        }
+    }
+
+    /// @dev The keccak-256 hash of the `count` bytes of `b` at `offset`.
+    function _keccak256Range(bytes memory b, uint256 offset, uint256 count)
+        private
+        pure
+        returns (bytes32)
+    {
+        if (count > b.length || offset > b.length - count) count = _outOfBounds();
+        bytes memory range = new bytes(count);
+        for (uint256 k; k < count; ++k) {
+            range[k] = b[offset + k];
+        }
+        return keccak256(range);
+    }
+
+    /// @dev Raises the `Panic(0x32)` an out-of-range index raises, which is the
+    /// portable spelling of a failed range check.
+    function _outOfBounds() private pure returns (uint256) {
+        return new uint256[](0)[0];
+    }
+
+    /// @dev The leading `count` bytes of `b` from `offset`, at most a word, left-aligned.
+    /// @custom:solar-inline
+    function _readBytesN(bytes memory b, uint256 offset, uint256 count)
+        private
+        pure
+        returns (bytes32 result)
+    {
+        for (uint256 k; k < count; ++k) {
+            result |= bytes32(b[offset + k]) >> (8 * k);
+        }
+    }
+
+    /// @dev Writes the leading `count` bytes of `value`, at most a word, to `b` at `offset`.
+    /// @custom:solar-inline
+    function _writeBytesN(bytes memory b, uint256 offset, bytes32 value, uint256 count)
+        private
+        pure
+    {
+        for (uint256 k; k < count; ++k) {
+            b[offset + k] = value[k];
+        }
+    }
+
+    /// @dev `a` as strings: the same words, each a pointer to bytes, which
+    /// Solidity cannot convert in place.
+    /// @custom:solar-trusted
+    function _toStrings(bytes[] memory a) private pure returns (string[] memory result) {
+        assembly ("memory-safe") {
+            result := a
         }
     }
 }

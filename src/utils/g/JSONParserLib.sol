@@ -17,6 +17,18 @@ using JSONParserLib for Item global;
 
 /// @notice Library for parsing JSONs.
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/utils/g/JSONParserLib.sol)
+/// @dev The checked port keeps upstream's items. Each is one word that packs the
+/// parsed string's address; the value and the key as offsets into the string, or,
+/// once read, as the addresses of their cached copies; the last child, or, once read,
+/// the children array; and the previous sibling, which reading the children turns
+/// into the parent. Trusted casts follow these addresses, so, as upstream says,
+/// `_data` must not be modified. The parser is checked Solidity and iterative rather
+/// than recursive: it creates the items in document order, and an open array or
+/// object keeps its parent's address in its value length until it closes. Strings are
+/// scanned and decoded a word at a time, and the integer parsers take 32 digits a word.
+/// Nothing reads past the string, so a string that ends in a backslash fails at once,
+/// where upstream scans on past the end until it fails.
+/// @custom:solar-safe memory arithmetic
 library JSONParserLib {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                       CUSTOM ERRORS                        */
@@ -71,6 +83,44 @@ library JSONParserLib {
     uint256 private constant _PARENT_IS_ARRAY = 1 << 6;
     uint256 private constant _PARENT_IS_OBJECT = 1 << 7;
 
+    /// @dev An item's parent flags, and its index or key.
+    uint256 private constant _META = (_BITMASK_POINTER << _BITPOS_KEY_LENGTH)
+        | (_BITMASK_POINTER << _BITPOS_KEY) | _PARENT_IS_ARRAY | _PARENT_IS_OBJECT;
+
+    // Character classes, one bit per byte value.
+
+    /// @dev ' ', '\t', '\n' and '\r'.
+    uint256 private constant _WHITESPACE = 0x100002600;
+
+    /// @dev '0' to '9'.
+    uint256 private constant _DIGITS = 0x3ff000000000000;
+
+    /// @dev '-' and '0' to '9', which start a number.
+    uint256 private constant _NUMBER_STARTS = 0x3ff200000000000;
+
+    /// @dev '0' to '9', 'a' to 'f' and 'A' to 'F'.
+    uint256 private constant _HEX_DIGITS = 0x7e0000007e03ff000000000000;
+
+    /// @dev The characters after a backslash that stand for themselves or for a
+    /// control character: '"', '/', '\\', 'b', 'f', 'n', 'r' and 't'.
+    uint256 private constant _ESCAPES = 0x144044100000000000800400000000;
+
+    /// @dev The top bit of every byte, and the other bits.
+    uint256 private constant _HIGH_BITS =
+        0x8080808080808080808080808080808080808080808080808080808080808080;
+    uint256 private constant _LOW_BITS =
+        0x7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f;
+
+    /// @dev 32 '0's.
+    uint256 private constant _ZEROS =
+        0x3030303030303030303030303030303030303030303030303030303030303030;
+
+    /// @dev '"' and '\\'.
+    uint256 private constant _QUOTE_OR_BACKSLASH = 0x100000000000000400000000;
+
+    /// @dev The characters after a backslash that stand for themselves: '"', '/' and '\\'.
+    uint256 private constant _SELF_ESCAPES = 0x100000000000800400000000;
+
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                   JSON PARSING OPERATION                   */
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
@@ -84,14 +134,85 @@ library JSONParserLib {
     /// The parsed tree WILL contain offsets to `s`.
     /// Do NOT pass in a string that WILL be modified later on.
     function parse(string memory s) internal pure returns (Item memory result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x40, result) // We will use our own allocation instead.
-        }
-        bytes32 r = _query(_toInput(s), 255);
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := r
+        bytes memory b = bytes(s);
+        // Every item packs the string's address, and offsets below its length.
+        _pointer(_addr(b));
+        _pointer(b.length);
+        // The innermost open array or object, or zero.
+        uint256 cur;
+        // The previous sibling of the next item, or zero.
+        uint256 last;
+        // The next item's parent flag, which tells what `cur` is, and its index or key.
+        uint256 meta;
+        // The next item's position, and its first byte.
+        (uint256 p, uint256 c) = _skipWhitespace(b, 0);
+        while (true) {
+            if (p >= b.length) _fail();
+            uint256 data = (_addr(b) << _BITPOS_STRING) | meta | (last << _BITPOS_SIBLING_OR_PARENT)
+                | (p << _BITPOS_VALUE);
+            if (c == 91 || c == 123) {
+                // '[' or '{'. Until it closes, its value length holds its parent.
+                bool opensArray = c == 91;
+                cur = _newItem(
+                    data | (cur << _BITPOS_VALUE_LENGTH) | (opensArray ? TYPE_ARRAY : TYPE_OBJECT)
+                );
+                last = 0;
+                meta = opensArray ? _PARENT_IS_ARRAY : _PARENT_IS_OBJECT;
+                uint256 closing = c + 2;
+                (p, c) = _skipWhitespace(b, p + 1);
+                // ']' or '}' closes it at once, below.
+                if (c != closing) {
+                    if (!opensArray) (p, c, meta) = _parseKey(b, p);
+                    continue;
+                }
+            } else {
+                uint256 end;
+                uint256 t = TYPE_NUMBER;
+                if (c == 34) {
+                    end = _parseString(b, p);
+                    t = TYPE_STRING;
+                } else if ((_NUMBER_STARTS >> c) & 1 != 0) {
+                    (end, c) = _parseNumber(b, p, c);
+                } else {
+                    (end, t) = _parseLiteral(b, p);
+                }
+                last = _newItem(data | ((end - p) << _BITPOS_VALUE_LENGTH) | t);
+                // Only a number has read the byte at its end.
+                if (t != TYPE_NUMBER || (_WHITESPACE >> c) & 1 != 0) {
+                    (p, c) = _skipWhitespace(b, end);
+                } else {
+                    p = end;
+                }
+            }
+            // Close arrays and objects until a comma starts the next item.
+            while (true) {
+                if (cur == 0) {
+                    if (p < b.length) _fail();
+                    return _item(last);
+                }
+                bool inArray = meta & _PARENT_IS_ARRAY != 0;
+                if (c == 44) {
+                    // ','.
+                    (p, c) = _skipWhitespace(b, p + 1);
+                    if (inArray) meta += 1 << _BITPOS_KEY;
+                    else (p, c, meta) = _parseKey(b, p);
+                    break;
+                }
+                if (c != (inArray ? 93 : 125)) _fail();
+                // The value length replaces the parent, and the last child is `last`.
+                Item memory container = _item(cur);
+                uint256 d = container._data;
+                uint256 parentAddress = (d >> _BITPOS_VALUE_LENGTH) & _BITMASK_POINTER;
+                uint256 length = ++p - ((d >> _BITPOS_VALUE) & _BITMASK_POINTER);
+                container._data = (d ^ (parentAddress << _BITPOS_VALUE_LENGTH))
+                    | (length << _BITPOS_VALUE_LENGTH) | (last << _BITPOS_CHILD);
+                // The parent's next item comes after `cur`, whose own parent flag, and
+                // index or key, it continues from.
+                meta = d & _META;
+                last = cur;
+                cur = parentAddress;
+                (p, c) = _skipWhitespace(b, p);
+            }
         }
     }
 
@@ -118,22 +239,14 @@ library JSONParserLib {
     /// Note: This function lazily instantiates and caches the returned string.
     /// Do NOT modify the returned string.
     function value(Item memory item) internal pure returns (string memory result) {
-        bytes32 r = _query(_toInput(item), 0);
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := r
-        }
+        result = _getStr(item, _BITPOS_VALUE, _BITPOS_VALUE_LENGTH, _VALUE_INITED);
     }
 
     /// @dev Returns the index of the item in the array.
     /// It the item's parent is not an array, returns 0.
     function index(Item memory item) internal pure returns (uint256 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            if and(mload(item), _PARENT_IS_ARRAY) {
-                result := and(_BITMASK_POINTER, shr(_BITPOS_KEY, mload(item)))
-            }
-        }
+        uint256 d = item._data;
+        if (d & _PARENT_IS_ARRAY != 0) result = (d >> _BITPOS_KEY) & _BITMASK_POINTER;
     }
 
     /// @dev Returns the key of the item in the object.
@@ -144,11 +257,7 @@ library JSONParserLib {
     /// Do NOT modify the returned string.
     function key(Item memory item) internal pure returns (string memory result) {
         if (item._data & _PARENT_IS_OBJECT != 0) {
-            bytes32 r = _query(_toInput(item), 1);
-            /// @solidity memory-safe-assembly
-            assembly {
-                result := r
-            }
+            result = _getStr(item, _BITPOS_KEY, _BITPOS_KEY_LENGTH, _KEY_INITED);
         }
     }
 
@@ -158,38 +267,46 @@ library JSONParserLib {
     /// Note: This function lazily instantiates and caches the returned array.
     /// Do NOT modify the returned array.
     function children(Item memory item) internal pure returns (Item[] memory result) {
-        bytes32 r = _query(_toInput(item), 3);
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := r
+        uint256 d = item._data;
+        uint256 t = d & _BITMASK_TYPE;
+        if (t != TYPE_ARRAY && t != TYPE_OBJECT) return result;
+        uint256 h = (d >> _BITPOS_CHILD) & _BITMASK_POINTER;
+        if (d & _CHILDREN_INITED != 0) return _items(h);
+        // The children are linked from the last, each to its previous sibling.
+        uint256 m;
+        for (uint256 q = h; q != 0; ++m) {
+            q = (_item(q)._data >> _BITPOS_SIBLING_OR_PARENT) & _BITMASK_POINTER;
         }
+        uint256[] memory a = new uint256[](m);
+        uint256 self = _pointer(_addr(item));
+        while (m != 0) {
+            a[--m] = h;
+            Item memory child = _item(h);
+            uint256 q = child._data;
+            h = (q >> _BITPOS_SIBLING_OR_PARENT) & _BITMASK_POINTER;
+            // The previous sibling's place now holds the parent.
+            child._data = q ^ ((h ^ self) << _BITPOS_SIBLING_OR_PARENT);
+        }
+        uint256 arrayAddress = _pointer(_addr(a));
+        item._data = d
+            ^ ((((d >> _BITPOS_CHILD) & _BITMASK_POINTER) ^ arrayAddress) << _BITPOS_CHILD)
+            | _CHILDREN_INITED;
+        result = _items(arrayAddress);
     }
 
     /// @dev Returns the number of children.
     /// It the item is neither an array nor object, returns zero.
     function size(Item memory item) internal pure returns (uint256 result) {
-        bytes32 r = _query(_toInput(item), 3);
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := mload(r)
-        }
+        result = children(item).length;
     }
 
     /// @dev Returns the item at index `i` for (array).
     /// If `item` is not an array, the result's type WILL be undefined.
     /// If there is no item with the index, the result's type WILL be undefined.
     function at(Item memory item, uint256 i) internal pure returns (Item memory result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x40, result) // Free the default allocation. We'll allocate manually.
-        }
-        bytes32 r = _query(_toInput(item), 3);
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := mload(add(add(r, 0x20), shl(5, i)))
-            if iszero(and(lt(i, mload(r)), eq(and(mload(item), _BITMASK_TYPE), TYPE_ARRAY))) {
-                result := 0x60 // Reset to the zero pointer.
-            }
+        if (item._data & _BITMASK_TYPE == TYPE_ARRAY) {
+            Item[] memory r = children(item);
+            if (i < r.length) result = r[i];
         }
     }
 
@@ -201,24 +318,16 @@ library JSONParserLib {
     /// For duplicated keys, the last item with the key WILL be returned.
     /// If there is no item with the key, the result's type WILL be undefined.
     function at(Item memory item, string memory k) internal pure returns (Item memory result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x40, result) // Free the default allocation. We'll allocate manually.
-            result := 0x60 // Initialize to the zero pointer.
-        }
         if (isObject(item)) {
+            uint256 n = bytes(k).length;
             bytes32 kHash = keccak256(bytes(k));
             Item[] memory r = children(item);
             // We'll just do a linear search. The alternatives are very bloated.
-            for (uint256 i = r.length << 5; i != 0;) {
-                /// @solidity memory-safe-assembly
-                assembly {
-                    item := mload(add(r, i))
-                    i := sub(i, 0x20)
-                }
-                if (keccak256(bytes(key(item))) != kHash) continue;
-                result = item;
-                break;
+            for (uint256 i = r.length; i != 0;) {
+                Item memory c = r[--i];
+                // Only a key of the same length can match.
+                if ((c._data >> _BITPOS_KEY_LENGTH) & _BITMASK_POINTER != n) continue;
+                if (keccak256(bytes(key(c))) == kHash) return c;
             }
         }
     }
@@ -268,12 +377,8 @@ library JSONParserLib {
     /// @dev Returns the item's parent.
     /// If the item does not have a parent, the result's type will be undefined.
     function parent(Item memory item) internal pure returns (Item memory result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x40, result) // Free the default allocation. We've already allocated.
-            result := and(shr(_BITPOS_SIBLING_OR_PARENT, mload(item)), _BITMASK_POINTER)
-            if iszero(result) { result := 0x60 } // Reset to the zero pointer.
-        }
+        uint256 p = (item._data >> _BITPOS_SIBLING_OR_PARENT) & _BITMASK_POINTER;
+        if (p != 0) result = _item(p);
     }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -284,59 +389,28 @@ library JSONParserLib {
     /// Reverts if `s` is not a valid uint256 string matching the RegEx `^[0-9]+$`,
     /// or if the parsed number is too big for a uint256.
     function parseUint(string memory s) internal pure returns (uint256 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let n := mload(s)
-            let preMulOverflowThres := div(not(0), 10)
-            for { let i := 0 } 1 {} {
-                i := add(i, 1)
-                let digit := sub(and(mload(add(s, i)), 0xff), 48)
-                let mulOverflowed := gt(result, preMulOverflowThres)
-                let product := mul(10, result)
-                result := add(product, digit)
-                n := mul(n, iszero(or(or(mulOverflowed, lt(result, product)), gt(digit, 9))))
-                if iszero(lt(i, n)) { break }
-            }
-            if iszero(n) {
-                mstore(0x00, 0x10182796) // `ParsingFailed()`.
-                revert(0x1c, 0x04)
-            }
-        }
+        result = _parseDigits(bytes(s), 0);
     }
 
     /// @dev Parses a signed integer from a string (in decimal, i.e. base 10).
     /// Reverts if `s` is not a valid int256 string matching the RegEx `^[+-]?[0-9]+$`,
     /// or if the parsed number cannot fit within `[-2**255 .. 2**255 - 1]`.
     function parseInt(string memory s) internal pure returns (int256 result) {
-        uint256 n = bytes(s).length;
-        uint256 sign;
-        uint256 isNegative;
-        /// @solidity memory-safe-assembly
-        assembly {
-            if n {
-                let c := and(mload(add(s, 1)), 0xff)
-                isNegative := eq(c, 45)
-                if or(eq(c, 43), isNegative) {
-                    sign := c
-                    s := add(s, 1)
-                    mstore(s, sub(n, 1))
-                }
-                if iszero(or(sign, lt(sub(c, 48), 10))) { s := 0x60 }
-            }
+        bytes memory b = bytes(s);
+        bool isNegative;
+        uint256 start;
+        if (b.length != 0) {
+            uint256 c = uint8(b[0]);
+            isNegative = c == 45;
+            if (isNegative || c == 43) start = 1;
         }
-        uint256 x = parseUint(s);
-        /// @solidity memory-safe-assembly
-        assembly {
-            if iszero(lt(x, add(shl(255, 1), isNegative))) {
-                mstore(0x00, 0x10182796) // `ParsingFailed()`.
-                revert(0x1c, 0x04)
-            }
-            if sign {
-                mstore(s, sign)
-                s := sub(s, 1)
-                mstore(s, n)
-            }
-            result := xor(x, mul(xor(x, add(not(x), 1)), isNegative))
+        uint256 x = _parseDigits(b, start);
+        if (isNegative) {
+            if (x > 1 << 255) _fail();
+            result = x == 1 << 255 ? type(int256).min : -int256(x);
+        } else {
+            if (x >= 1 << 255) _fail();
+            result = int256(x);
         }
     }
 
@@ -344,26 +418,28 @@ library JSONParserLib {
     /// Reverts if `s` is not a valid uint256 hex string matching the RegEx
     /// `^(0[xX])?[0-9a-fA-F]+$`, or if the parsed number cannot fit within `[0 .. 2**256 - 1]`.
     function parseUintFromHex(string memory s) internal pure returns (uint256 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let n := mload(s)
-            // Skip two if starts with '0x' or '0X'.
-            let i := shl(1, and(eq(0x3078, or(shr(240, mload(add(s, 0x20))), 0x20)), gt(n, 1)))
-            for {} 1 {} {
-                i := add(i, 1)
-                let c :=
-                    byte(
-                        and(0x1f, shr(and(mload(add(s, i)), 0xff), 0x3e4088843e41bac000000000000)),
-                        0x3010a071000000b0104040208000c05090d060e0f
-                    )
-                n := mul(n, iszero(or(iszero(c), shr(252, result))))
-                result := add(shl(4, result), sub(c, 1))
-                if iszero(lt(i, n)) { break }
-            }
-            if iszero(n) {
-                mstore(0x00, 0x10182796) // `ParsingFailed()`.
-                revert(0x1c, 0x04)
-            }
+        bytes memory b = bytes(s);
+        uint256 n = b.length;
+        uint256 i;
+        // Skip two if starts with '0x' or '0X'.
+        if (n > 1 && uint8(b[0]) == 48 && uint8(b[1]) | 32 == 120) i = 2;
+        if (i >= n) _fail();
+        if (n < 32) {
+            // Too short for a word: a digit at a time. A nibble may not leave the word.
+            do {
+                uint256 c = uint8(b[i]);
+                if ((((_HEX_DIGITS >> c) & 1) ^ 1) | (result >> 252) != 0) _fail();
+                result = (result << 4) | ((c & 15) + 9 * (c >> 6));
+            } while (++i < n);
+            return result;
+        }
+        // 32 digits a word, the last word ending with the string.
+        while (true) {
+            (uint256 w, uint256 k) = _digitsWord(b, i);
+            if (_hexDigits(w) != _HIGH_BITS || result >> (256 - (k << 2)) != 0) _fail();
+            result = (result << (k << 2)) | _hexValue(w);
+            i += k;
+            if (i == n) return result;
         }
     }
 
@@ -372,454 +448,531 @@ library JSONParserLib {
     /// Reverts if the string is invalid.
     /// As you can see, it's pretty complex for a deceptively simple looking task.
     function decodeString(string memory s) internal pure returns (string memory result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            function fail() {
-                mstore(0x00, 0x10182796) // `ParsingFailed()`.
-                revert(0x1c, 0x04)
-            }
-
-            function decodeUnicodeEscapeSequence(pIn_, end_) -> _unicode, _pOut {
-                _pOut := add(pIn_, 4)
-                let b_ := iszero(gt(_pOut, end_))
-                let t_ := mload(pIn_) // Load the whole word.
-                for { let i_ := 0 } iszero(eq(i_, 4)) { i_ := add(i_, 1) } {
-                    let c_ := sub(byte(i_, t_), 48)
-                    if iszero(and(shr(c_, 0x7e0000007e03ff), b_)) { fail() } // Not hexadecimal.
-                    c_ := sub(c_, add(mul(gt(c_, 16), 7), shl(5, gt(c_, 48))))
-                    _unicode := add(shl(4, _unicode), c_)
-                }
-            }
-
-            function decodeUnicodeCodePoint(pIn_, end_) -> _unicode, _pOut {
-                _unicode, _pOut := decodeUnicodeEscapeSequence(pIn_, end_)
-                if iszero(or(lt(_unicode, 0xd800), gt(_unicode, 0xdbff))) {
-                    let t_ := mload(_pOut) // Load the whole word.
-                    end_ := mul(end_, eq(shr(240, t_), 0x5c75)) // Fail if not starting with '\\u'.
-                    t_, _pOut := decodeUnicodeEscapeSequence(add(_pOut, 2), end_)
-                    _unicode := add(0x10000, add(shl(10, and(0x3ff, _unicode)), and(0x3ff, t_)))
-                }
-            }
-
-            function appendCodePointAsUTF8(pIn_, c_) -> _pOut {
-                if iszero(gt(c_, 0x7f)) {
-                    mstore8(pIn_, c_)
-                    _pOut := add(pIn_, 1)
-                    leave
-                }
-                mstore8(0x1f, c_)
-                mstore8(0x1e, shr(6, c_))
-                if iszero(gt(c_, 0x7ff)) {
-                    mstore(pIn_, shl(240, or(0xc080, and(0x1f3f, mload(0x00)))))
-                    _pOut := add(pIn_, 2)
-                    leave
-                }
-                mstore8(0x1d, shr(12, c_))
-                if iszero(gt(c_, 0xffff)) {
-                    mstore(pIn_, shl(232, or(0xe08080, and(0x0f3f3f, mload(0x00)))))
-                    _pOut := add(pIn_, 3)
-                    leave
-                }
-                mstore8(0x1c, shr(18, c_))
-                mstore(pIn_, shl(224, or(0xf0808080, and(0x073f3f3f, mload(0x00)))))
-                _pOut := add(pIn_, shl(2, lt(c_, 0x110000)))
-            }
-
-            function chr(p_) -> _c {
-                _c := byte(0, mload(p_))
-            }
-
-            let n := mload(s)
-            let end := add(add(s, n), 0x1f)
-            if iszero(and(gt(n, 1), eq(0x2222, or(and(0xff00, mload(add(s, 2))), chr(end))))) {
-                fail() // Fail if not double-quoted.
-            }
-            let out := add(mload(0x40), 0x20)
-            for { let curr := add(s, 0x21) } iszero(eq(curr, end)) {} {
-                let c := chr(curr)
-                curr := add(curr, 1)
-                // Not '\\'.
-                if iszero(eq(c, 92)) {
-                    // Not '"'.
-                    if iszero(eq(c, 34)) {
-                        mstore8(out, c)
-                        out := add(out, 1)
-                        continue
-                    }
-                    curr := end
-                }
-                if iszero(eq(curr, end)) {
-                    let escape := chr(curr)
-                    curr := add(curr, 1)
-                    // '"', '/', '\\'.
-                    if and(shr(escape, 0x100000000000800400000000), 1) {
-                        mstore8(out, escape)
-                        out := add(out, 1)
-                        continue
-                    }
-                    // 'u'.
-                    if eq(escape, 117) {
-                        escape, curr := decodeUnicodeCodePoint(curr, end)
-                        out := appendCodePointAsUTF8(out, escape)
-                        continue
-                    }
-                    // `{'b':'\b', 'f':'\f', 'n':'\n', 'r':'\r', 't':'\t'}`.
-                    escape := byte(sub(escape, 85), 0x080000000c000000000000000a0000000d0009)
-                    if escape {
-                        mstore8(out, escape)
-                        out := add(out, 1)
-                        continue
-                    }
-                }
-                fail()
-                break
-            }
-            mstore(out, 0) // Zeroize the last slot.
-            result := mload(0x40)
-            mstore(result, sub(out, add(result, 0x20))) // Store the length.
-            mstore(0x40, add(out, 0x20)) // Allocate the memory.
+        bytes memory b = bytes(s);
+        uint256 n = b.length;
+        // Fail if not double-quoted.
+        if (n < 2 || uint8(b[0]) != 34 || uint8(b[n - 1]) != 34) _fail();
+        uint256 end = n - 1;
+        // Runs of plain bytes are read a word at a time: from a zero-padded copy of a string
+        // shorter than a word, and through the last word of a longer one, shifted to start at
+        // the run.
+        if (n < 32) {
+            bytes memory padded = new bytes(32);
+            _copyFresh(padded, b, 0, n);
+            (b, n) = (padded, 32);
         }
+        // Every escape decodes to fewer bytes than it takes, and whole words are written, which
+        // needs a word of room past the end.
+        bytes memory out = new bytes(end + 31);
+        uint256 o;
+        for (uint256 i = 1; i != end;) {
+            // A run of plain bytes, which the closing '"' always stops.
+            uint256 w = n - i >= 32
+                ? uint256(_readBytes32(b, i))
+                : uint256(_readBytes32(b, n - 32)) << ((32 - (n - i)) << 3);
+            uint256 m = _quotesAndBackslashes(w);
+            uint256 k = m == 0 ? 32 : _leadingZeroBytes(m);
+            _writeBytes32(out, o, bytes32(w));
+            o += k;
+            i += k;
+            if (k == 32 || i == end) continue;
+            // A '"' before the end fails, and a '\\' escapes the byte after it.
+            if (uint8(b[i]) == 34 || ++i == end) _fail();
+            uint256 c = uint8(b[i++]);
+            if (c == 117) {
+                // 'u'.
+                (c, i) = _decodeUnicodeCodePoint(b, i, end);
+                o = _appendCodePointAsUTF8(out, o, c);
+                continue;
+            }
+            if ((_SELF_ESCAPES >> c) & 1 == 0) {
+                // `{'b':'\b', 'f':'\f', 'n':'\n', 'r':'\r', 't':'\t'}`.
+                if (c == 98) c = 8;
+                else if (c == 102) c = 12;
+                else if (c == 110) c = 10;
+                else if (c == 114) c = 13;
+                else if (c == 116) c = 9;
+                else _fail();
+            }
+            out[o++] = bytes1(uint8(c));
+        }
+        // Clear what the whole words wrote past the end.
+        _writeBytes32(out, o, 0);
+        _setLength(out, o);
+        result = string(out);
     }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                      PRIVATE HELPERS                       */
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
-    /// @dev Performs a query on the input with the given mode.
-    function _query(bytes32 input, uint256 mode) private pure returns (bytes32 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            function fail() {
-                mstore(0x00, 0x10182796) // `ParsingFailed()`.
-                revert(0x1c, 0x04)
-            }
+    /// @dev Reverts with `ParsingFailed()`.
+    function _fail() private pure {
+        revert ParsingFailed();
+    }
 
-            function chr(p_) -> _c {
-                _c := byte(0, mload(p_))
-            }
+    /// @dev Returns `p`, which reverts, as upstream does, if it does not fit the 32 bits
+    /// it is packed into. No string offset or memory address reaches that in practice.
+    /// @custom:solar-inline
+    function _pointer(uint256 p) private pure returns (uint256) {
+        if (p > _BITMASK_POINTER) revert();
+        return p;
+    }
 
-            function skipWhitespace(pIn_, end_) -> _pOut {
-                for { _pOut := pIn_ } 1 { _pOut := add(_pOut, 1) } {
-                    if iszero(and(shr(chr(_pOut), 0x100002600), 1)) { leave } // Not in ' \n\r\t'.
+    /// @dev Allocates an item holding `data`, and returns its address.
+    /// @custom:solar-inline
+    function _newItem(uint256 data) private pure returns (uint256) {
+        return _pointer(_addr(Item(data)));
+    }
+
+    /// @dev Returns the first position from `p` on that is not whitespace, and its byte,
+    /// or, past the end, the '"' that upstream places there.
+    /// @custom:solar-inline
+    function _skipWhitespace(bytes memory b, uint256 p) private pure returns (uint256, uint256 c) {
+        while (p < b.length) {
+            c = uint8(b[p]);
+            if ((_WHITESPACE >> c) & 1 == 0) return (p, c);
+            ++p;
+        }
+        return (p, 34);
+    }
+
+    /// @dev Returns the first position from `p` on that is not a digit, and its byte,
+    /// or, past the end, the '"' that upstream places there.
+    /// @custom:solar-inline
+    function _skipDigits(bytes memory b, uint256 p) private pure returns (uint256, uint256 c) {
+        while (p < b.length) {
+            c = uint8(b[p]);
+            if ((_DIGITS >> c) & 1 == 0) return (p, c);
+            ++p;
+        }
+        return (p, 34);
+    }
+
+    /// @dev Returns the byte of `b` at `p`, or, past its end, the '"' that upstream places there.
+    /// @custom:solar-inline
+    function _charAt(bytes memory b, uint256 p) private pure returns (uint256) {
+        return p < b.length ? uint8(b[p]) : 34;
+    }
+
+    /// @dev Returns the end and the type of the 'true', 'null' or 'false' at `p`.
+    /// @custom:solar-inline
+    function _parseLiteral(bytes memory b, uint256 p) private pure returns (uint256, uint256) {
+        uint256 n = b.length;
+        if (n - p >= 4) {
+            bytes4 w = _readBytes4(b, p);
+            if (w == "true") return (p + 4, TYPE_BOOLEAN);
+            if (w == "null") return (p + 4, TYPE_NULL);
+            if (w == "fals" && n - p != 4 && b[p + 4] == "e") return (p + 5, TYPE_BOOLEAN);
+        }
+        _fail();
+    }
+
+    /// @dev Returns the end of the string at `p`. Like upstream, it does not check
+    /// that a key starts with '"'.
+    function _parseString(bytes memory b, uint256 p) private pure returns (uint256 end) {
+        uint256 n = b.length;
+        if (p >= n) _fail();
+        while (true) {
+            if (++p >= n) _fail();
+            p = _skipToQuoteOrBackslash(b, p, n);
+            if (p >= n) _fail();
+            if (uint8(b[p]) == 34) return end = p + 1;
+            // '\\'.
+            if (++p >= n) _fail();
+            uint256 c = uint8(b[p]);
+            if (c == 117) {
+                // 'u', then 4 hexadecimal digits.
+                if (n - p <= 4) _fail();
+                for (uint256 k = 1; k != 5; ++k) {
+                    if ((_HEX_DIGITS >> uint8(b[p + k])) & 1 == 0) _fail();
                 }
-            }
-
-            function setP(packed_, bitpos_, p_) -> _packed {
-                // Perform an out-of-gas revert if `p_` exceeds `_BITMASK_POINTER`.
-                returndatacopy(returndatasize(), returndatasize(), gt(p_, _BITMASK_POINTER))
-                _packed := or(and(not(shl(bitpos_, _BITMASK_POINTER)), packed_), shl(bitpos_, p_))
-            }
-
-            function getP(packed_, bitpos_) -> _p {
-                _p := and(_BITMASK_POINTER, shr(bitpos_, packed_))
-            }
-
-            function mallocItem(s_, packed_, pStart_, pCurr_, type_) -> _item {
-                _item := mload(0x40)
-                // forgefmt: disable-next-item
-                packed_ := setP(setP(packed_, _BITPOS_VALUE, sub(pStart_, add(s_, 0x20))),
-                    _BITPOS_VALUE_LENGTH, sub(pCurr_, pStart_))
-                mstore(_item, or(packed_, type_))
-                mstore(0x40, add(_item, 0x20)) // Allocate memory.
-            }
-
-            function parseValue(s_, sibling_, pIn_, end_) -> _item, _pOut {
-                let packed_ := setP(mload(0x00), _BITPOS_SIBLING_OR_PARENT, sibling_)
-                _pOut := skipWhitespace(pIn_, end_)
-                if iszero(lt(_pOut, end_)) { leave }
-                for { let c_ := chr(_pOut) } 1 {} {
-                    // If starts with '"'.
-                    if eq(c_, 34) {
-                        let pStart_ := _pOut
-                        _pOut := parseStringSub(s_, packed_, _pOut, end_)
-                        _item := mallocItem(s_, packed_, pStart_, _pOut, TYPE_STRING)
-                        break
-                    }
-                    // If starts with '['.
-                    if eq(c_, 91) {
-                        _item, _pOut := parseArray(s_, packed_, _pOut, end_)
-                        break
-                    }
-                    // If starts with '{'.
-                    if eq(c_, 123) {
-                        _item, _pOut := parseObject(s_, packed_, _pOut, end_)
-                        break
-                    }
-                    // If starts with any in '0123456789-'.
-                    if and(shr(c_, shl(45, 0x1ff9)), 1) {
-                        _item, _pOut := parseNumber(s_, packed_, _pOut, end_)
-                        break
-                    }
-                    if iszero(gt(add(_pOut, 4), end_)) {
-                        let pStart_ := _pOut
-                        let w_ := shr(224, mload(_pOut))
-                        // 'true' in hex format.
-                        if eq(w_, 0x74727565) {
-                            _pOut := add(_pOut, 4)
-                            _item := mallocItem(s_, packed_, pStart_, _pOut, TYPE_BOOLEAN)
-                            break
-                        }
-                        // 'null' in hex format.
-                        if eq(w_, 0x6e756c6c) {
-                            _pOut := add(_pOut, 4)
-                            _item := mallocItem(s_, packed_, pStart_, _pOut, TYPE_NULL)
-                            break
-                        }
-                    }
-                    if iszero(gt(add(_pOut, 5), end_)) {
-                        let pStart_ := _pOut
-                        let w_ := shr(216, mload(_pOut))
-                        // 'false' in hex format.
-                        if eq(w_, 0x66616c7365) {
-                            _pOut := add(_pOut, 5)
-                            _item := mallocItem(s_, packed_, pStart_, _pOut, TYPE_BOOLEAN)
-                            break
-                        }
-                    }
-                    fail()
-                    break
-                }
-                _pOut := skipWhitespace(_pOut, end_)
-            }
-
-            function parseArray(s_, packed_, pIn_, end_) -> _item, _pOut {
-                let j_ := 0
-                for { _pOut := add(pIn_, 1) } 1 { _pOut := add(_pOut, 1) } {
-                    if iszero(lt(_pOut, end_)) { fail() }
-                    if iszero(_item) {
-                        _pOut := skipWhitespace(_pOut, end_)
-                        if eq(chr(_pOut), 93) { break } // ']'.
-                    }
-                    _item, _pOut := parseValue(s_, _item, _pOut, end_)
-                    if _item {
-
-                        // forgefmt: disable-next-item
-                        mstore(_item, setP(or(_PARENT_IS_ARRAY, mload(_item)),
-                            _BITPOS_KEY, j_))
-                        j_ := add(j_, 1)
-                        let c_ := chr(_pOut)
-                        if eq(c_, 93) { break } // ']'.
-                        if eq(c_, 44) { continue } // ','.
-                    }
-                    _pOut := end_
-                }
-                _pOut := add(_pOut, 1)
-                packed_ := setP(packed_, _BITPOS_CHILD, _item)
-                _item := mallocItem(s_, packed_, pIn_, _pOut, TYPE_ARRAY)
-            }
-
-            function parseObject(s_, packed_, pIn_, end_) -> _item, _pOut {
-                for { _pOut := add(pIn_, 1) } 1 { _pOut := add(_pOut, 1) } {
-                    if iszero(lt(_pOut, end_)) { fail() }
-                    if iszero(_item) {
-                        _pOut := skipWhitespace(_pOut, end_)
-                        if eq(chr(_pOut), 125) { break } // '}'.
-                    }
-                    _pOut := skipWhitespace(_pOut, end_)
-                    let pKeyStart_ := _pOut
-                    let pKeyEnd_ := parseStringSub(s_, _item, _pOut, end_)
-                    _pOut := skipWhitespace(pKeyEnd_, end_)
-                    // If ':'.
-                    if eq(chr(_pOut), 58) {
-                        _item, _pOut := parseValue(s_, _item, add(_pOut, 1), end_)
-                        if _item {
-
-                            // forgefmt: disable-next-item
-                            mstore(_item, setP(setP(or(_PARENT_IS_OBJECT, mload(_item)),
-                                _BITPOS_KEY_LENGTH, sub(pKeyEnd_, pKeyStart_)),
-                                    _BITPOS_KEY, sub(pKeyStart_, add(s_, 0x20))))
-                            let c_ := chr(_pOut)
-                            if eq(c_, 125) { break } // '}'.
-                            if eq(c_, 44) { continue } // ','.
-                        }
-                    }
-                    _pOut := end_
-                }
-                _pOut := add(_pOut, 1)
-                packed_ := setP(packed_, _BITPOS_CHILD, _item)
-                _item := mallocItem(s_, packed_, pIn_, _pOut, TYPE_OBJECT)
-            }
-
-            function checkStringU(p_, o_) {
-                // If not in '0123456789abcdefABCDEF', revert.
-                if iszero(and(shr(sub(chr(add(p_, o_)), 48), 0x7e0000007e03ff), 1)) { fail() }
-                if iszero(eq(o_, 5)) { checkStringU(p_, add(o_, 1)) }
-            }
-
-            function parseStringSub(s_, packed_, pIn_, end_) -> _pOut {
-                if iszero(lt(pIn_, end_)) { fail() }
-                for { _pOut := add(pIn_, 1) } 1 {} {
-                    let c_ := chr(_pOut)
-                    if eq(c_, 34) { break } // '"'.
-                    // Not '\'.
-                    if iszero(eq(c_, 92)) {
-                        _pOut := add(_pOut, 1)
-                        continue
-                    }
-                    c_ := chr(add(_pOut, 1))
-                    // '"', '\', '//', 'b', 'f', 'n', 'r', 't'.
-                    if and(shr(sub(c_, 34), 0x510110400000000002001), 1) {
-                        _pOut := add(_pOut, 2)
-                        continue
-                    }
-                    // 'u'.
-                    if eq(c_, 117) {
-                        checkStringU(_pOut, 2)
-                        _pOut := add(_pOut, 6)
-                        continue
-                    }
-                    _pOut := end_
-                    break
-                }
-                if iszero(lt(_pOut, end_)) { fail() }
-                _pOut := add(_pOut, 1)
-            }
-
-            function skip0To9s(pIn_, end_, atLeastOne_) -> _pOut {
-                for { _pOut := pIn_ } 1 { _pOut := add(_pOut, 1) } {
-                    if iszero(lt(sub(chr(_pOut), 48), 10)) { break } // Not '0'..'9'.
-                }
-                if and(atLeastOne_, eq(pIn_, _pOut)) { fail() }
-            }
-
-            function parseNumber(s_, packed_, pIn_, end_) -> _item, _pOut {
-                _pOut := pIn_
-                if eq(chr(_pOut), 45) { _pOut := add(_pOut, 1) } // '-'.
-                if iszero(lt(sub(chr(_pOut), 48), 10)) { fail() } // Not '0'..'9'.
-                let c_ := chr(_pOut)
-                _pOut := add(_pOut, 1)
-                if iszero(eq(c_, 48)) { _pOut := skip0To9s(_pOut, end_, 0) } // Not '0'.
-                if eq(chr(_pOut), 46) { _pOut := skip0To9s(add(_pOut, 1), end_, 1) } // '.'.
-                let t_ := mload(_pOut)
-                // 'E', 'e'.
-                if eq(
-                    or(0x20, byte(0, t_)),
-                    101
-                ) {
-
-                    // forgefmt: disable-next-item
-                    _pOut := skip0To9s(add(byte(sub(byte(1, t_), 14), 0x010001), // '+', '-'.
-                        add(_pOut, 1)), end_, 1)
-                }
-                _item := mallocItem(s_, packed_, pIn_, _pOut, TYPE_NUMBER)
-            }
-
-            function copyStr(s_, offset_, len_) -> _sCopy {
-                _sCopy := mload(0x40)
-                s_ := add(s_, offset_)
-                let w_ := not(0x1f)
-                for { let i_ := and(add(len_, 0x1f), w_) } 1 {} {
-                    mstore(add(_sCopy, i_), mload(add(s_, i_)))
-                    i_ := add(i_, w_) // `sub(i_, 0x20)`.
-                    if iszero(i_) { break }
-                }
-                mstore(_sCopy, len_) // Copy the length.
-                mstore(add(add(_sCopy, 0x20), len_), 0) // Zeroize the last slot.
-                mstore(0x40, add(add(_sCopy, 0x40), len_)) // Allocate memory.
-            }
-
-            function value(item_) -> _value {
-                let packed_ := mload(item_)
-                _value := getP(packed_, _BITPOS_VALUE) // The offset in the string.
-                if iszero(and(_VALUE_INITED, packed_)) {
-                    let s_ := getP(packed_, _BITPOS_STRING)
-                    _value := copyStr(s_, _value, getP(packed_, _BITPOS_VALUE_LENGTH))
-                    packed_ := setP(packed_, _BITPOS_VALUE, _value)
-                    mstore(s_, or(_VALUE_INITED, packed_))
-                }
-            }
-
-            function children(item_) -> _arr {
-                _arr := 0x60 // Initialize to the zero pointer.
-                let packed_ := mload(item_)
-                for {} iszero(gt(and(_BITMASK_TYPE, packed_), TYPE_OBJECT)) {} {
-                    if or(iszero(packed_), iszero(item_)) { break }
-                    if and(packed_, _CHILDREN_INITED) {
-                        _arr := getP(packed_, _BITPOS_CHILD)
-                        break
-                    }
-                    _arr := mload(0x40)
-                    let o_ := add(_arr, 0x20)
-                    for { let h_ := getP(packed_, _BITPOS_CHILD) } h_ {} {
-                        mstore(o_, h_)
-                        let q_ := mload(h_)
-                        let y_ := getP(q_, _BITPOS_SIBLING_OR_PARENT)
-                        mstore(h_, setP(q_, _BITPOS_SIBLING_OR_PARENT, item_))
-                        h_ := y_
-                        o_ := add(o_, 0x20)
-                    }
-                    let w_ := not(0x1f)
-                    let n_ := add(w_, sub(o_, _arr))
-                    mstore(_arr, shr(5, n_))
-                    mstore(0x40, o_) // Allocate memory.
-                    packed_ := setP(packed_, _BITPOS_CHILD, _arr)
-                    mstore(item_, or(_CHILDREN_INITED, packed_))
-                    // Reverse the array.
-                    if iszero(lt(n_, 0x40)) {
-                        let lo_ := add(_arr, 0x20)
-                        let hi_ := add(_arr, n_)
-                        for {} 1 {} {
-                            let temp_ := mload(lo_)
-                            mstore(lo_, mload(hi_))
-                            mstore(hi_, temp_)
-                            hi_ := add(hi_, w_)
-                            lo_ := add(lo_, 0x20)
-                            if iszero(lt(lo_, hi_)) { break }
-                        }
-                    }
-                    break
-                }
-            }
-
-            function getStr(item_, bitpos_, bitposLength_, bitmaskInited_) -> _result {
-                _result := 0x60 // Initialize to the zero pointer.
-                let packed_ := mload(item_)
-                if or(iszero(item_), iszero(packed_)) { leave }
-                _result := getP(packed_, bitpos_)
-                if iszero(and(bitmaskInited_, packed_)) {
-                    let s_ := getP(packed_, _BITPOS_STRING)
-                    _result := copyStr(s_, _result, getP(packed_, bitposLength_))
-                    mstore(item_, or(bitmaskInited_, setP(packed_, bitpos_, _result)))
-                }
-            }
-
-            switch mode
-            // Get value.
-            case 0 { result := getStr(input, _BITPOS_VALUE, _BITPOS_VALUE_LENGTH, _VALUE_INITED) }
-            // Get key.
-            case 1 { result := getStr(input, _BITPOS_KEY, _BITPOS_KEY_LENGTH, _KEY_INITED) }
-            // Get children.
-            case 3 { result := children(input) }
-            // Parse.
-            default {
-                let p := add(input, 0x20)
-                let e := add(p, mload(input))
-                if iszero(eq(p, e)) {
-                    let c := chr(e)
-                    mstore8(e, 34) // Place a '"' at the end to speed up parsing.
-                    // The `34 << 248` makes `mallocItem` preserve '"' at the end.
-                    mstore(0x00, setP(shl(248, 34), _BITPOS_STRING, input))
-                    result, p := parseValue(input, 0, p, e)
-                    mstore8(e, c) // Restore the original char at the end.
-                }
-                if or(lt(p, e), iszero(result)) { fail() }
+                p += 4;
+            } else if ((_ESCAPES >> c) & 1 == 0) {
+                _fail();
             }
         }
     }
 
-    /// @dev Casts the input to a bytes32.
-    function _toInput(string memory input) private pure returns (bytes32 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := input
+    /// @dev Returns the first position from `p`, which is below `n`, the length of `b`,
+    /// of a '"' or a '\\', or `n` if there is none. It tests a word at a time, the last
+    /// one shifted so that it starts at `p`.
+    /// @custom:solar-inline
+    function _skipToQuoteOrBackslash(bytes memory b, uint256 p, uint256 n)
+        private
+        pure
+        returns (uint256)
+    {
+        if (n < 32) {
+            while (p < n && (_QUOTE_OR_BACKSLASH >> uint8(b[p])) & 1 == 0) ++p;
+            return p;
+        }
+        uint256 m;
+        while (n - p >= 32) {
+            m = _quotesAndBackslashes(uint256(_readBytes32(b, p)));
+            if (m != 0) return p + _leadingZeroBytes(m);
+            p += 32;
+        }
+        // The zero bytes shifted in are neither.
+        m = _quotesAndBackslashes(uint256(_readBytes32(b, n - 32)) << ((32 - (n - p)) << 3));
+        return m == 0 ? n : p + _leadingZeroBytes(m);
+    }
+
+    /// @dev Returns `w` with 0x80 in each byte that is a '"' or a '\\', and 0 in the others.
+    /// @custom:solar-inline
+    function _quotesAndBackslashes(uint256 w) private pure returns (uint256) {
+        uint256 low = 0x7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f;
+        uint256 x = w ^ 0x2222222222222222222222222222222222222222222222222222222222222222;
+        uint256 y = w ^ 0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c;
+        // Each byte's high bit becomes whether the byte is nonzero. No carry leaves a byte.
+        x |= (x & low) + low;
+        y |= (y & low) + low;
+        return ~(x & y | low);
+    }
+
+    /// @dev Returns how many bytes of `m`, which is not zero, come before its first
+    /// nonzero byte.
+    /// @custom:solar-inline
+    function _leadingZeroBytes(uint256 m) private pure returns (uint256 r) {
+        if (m >> 128 == 0) {
+            r = 16;
+            m <<= 128;
+        }
+        if (m >> 192 == 0) {
+            r |= 8;
+            m <<= 64;
+        }
+        if (m >> 224 == 0) {
+            r |= 4;
+            m <<= 32;
+        }
+        if (m >> 240 == 0) {
+            r |= 2;
+            m <<= 16;
+        }
+        if (m >> 248 == 0) r |= 1;
+    }
+
+    /// @dev Returns the end of the number at `p`, which starts with `c`, and the byte there,
+    /// or, past the end, the '"' that upstream places there.
+    /// @custom:solar-inline
+    function _parseNumber(bytes memory b, uint256 p, uint256 c)
+        private
+        pure
+        returns (uint256, uint256)
+    {
+        if (c == 45) {
+            // '-'.
+            c = _charAt(b, ++p);
+            if ((_DIGITS >> c) & 1 == 0) _fail();
+        }
+        // Nothing more after a leading '0'.
+        if (c == 48) c = _charAt(b, ++p);
+        else (p, c) = _skipDigits(b, p + 1);
+        if (c == 46) {
+            // '.'.
+            uint256 q;
+            (q, c) = _skipDigits(b, ++p);
+            if (q == p) _fail();
+            p = q;
+        }
+        if (c | 32 == 101) {
+            // 'e' or 'E', then '+' or '-'.
+            c = _charAt(b, ++p);
+            if (c == 43 || c == 45) ++p;
+            uint256 q;
+            (q, c) = _skipDigits(b, p);
+            if (q == p) _fail();
+            p = q;
+        }
+        return (p, c);
+    }
+
+    /// @dev Parses the key at `p`, and the ':' after it. Returns the position and the
+    /// first byte of the item after it, and the item's parent flag and key offsets.
+    /// @custom:solar-inline
+    function _parseKey(bytes memory b, uint256 p)
+        private
+        pure
+        returns (uint256, uint256 c, uint256 meta)
+    {
+        uint256 end = _parseString(b, p);
+        meta = _PARENT_IS_OBJECT | (p << _BITPOS_KEY) | ((end - p) << _BITPOS_KEY_LENGTH);
+        (p, c) = _skipWhitespace(b, end);
+        // ':'.
+        if (c != 58) _fail();
+        (p, c) = _skipWhitespace(b, p + 1);
+        return (p, c, meta);
+    }
+
+    /// @dev Returns the string at `bitpos` of `item`, copying it out of the parsed string
+    /// and caching it on the first read.
+    /// @custom:solar-inline
+    function _getStr(Item memory item, uint256 bitpos, uint256 bitposLength, uint256 inited)
+        private
+        pure
+        returns (string memory result)
+    {
+        uint256 d = item._data;
+        if (d == 0) return result;
+        uint256 o = (d >> bitpos) & _BITMASK_POINTER;
+        if (d & inited != 0) return _string(o);
+        bytes memory s = bytes(_string((d >> _BITPOS_STRING) & _BITMASK_POINTER));
+        uint256 n = (d >> bitposLength) & _BITMASK_POINTER;
+        bytes memory copy = new bytes(n);
+        _copyFresh(copy, s, o, n);
+        uint256 copyAddress = _pointer(_addr(copy));
+        item._data = d ^ ((o ^ copyAddress) << bitpos) | inited;
+        result = string(copy);
+    }
+
+    /// @dev Decodes the 4 hexadecimal digits at `i`, which must end by `end`.
+    function _decodeUnicodeEscapeSequence(bytes memory b, uint256 i, uint256 end)
+        private
+        pure
+        returns (uint256)
+    {
+        if (end < 4 || i > end - 4) _fail();
+        // The digits in the low bytes of a word, whose zero bytes above count as '0's.
+        uint256 w = uint32(_readBytes4(b, i));
+        if (_hexDigits(w) & 0x80808080 != 0x80808080) _fail();
+        return _hexValue(w);
+    }
+
+    /// @dev Decodes the code point whose escape's digits are at `i`, with the low
+    /// surrogate's escape after a high surrogate's.
+    /// @custom:solar-inline
+    function _decodeUnicodeCodePoint(bytes memory b, uint256 i, uint256 end)
+        private
+        pure
+        returns (uint256 u, uint256)
+    {
+        u = _decodeUnicodeEscapeSequence(b, i, end);
+        i += 4;
+        if (u >= 0xd800 && u <= 0xdbff) {
+            // Fail if not followed by '\\u'.
+            if (i + 1 >= end || uint8(b[i]) != 92 || uint8(b[i + 1]) != 117) _fail();
+            uint256 t = _decodeUnicodeEscapeSequence(b, i + 2, end);
+            i += 6;
+            u = 0x10000 + ((u & 0x3ff) << 10) + (t & 0x3ff);
+        }
+        return (u, i);
+    }
+
+    /// @dev Writes `c` encoded as UTF-8 into `out` at `o`, as the start of a word that `out` has
+    /// room for, and returns the position after the encoding.
+    /// @custom:solar-inline
+    function _appendCodePointAsUTF8(bytes memory out, uint256 o, uint256 c)
+        private
+        pure
+        returns (uint256)
+    {
+        uint256 e;
+        uint256 n;
+        if (c <= 0x7f) {
+            (e, n) = (c, 1);
+        } else if (c <= 0x7ff) {
+            (e, n) = (0xc080 | ((c << 2) & 0x1f00) | (c & 0x3f), 2);
+        } else if (c <= 0xffff) {
+            (e, n) = (0xe08080 | ((c << 4) & 0x0f0000) | ((c << 2) & 0x3f00) | (c & 0x3f), 3);
+        } else {
+            e = 0xf0808080 | ((c << 6) & 0x07000000) | ((c << 4) & 0x3f0000) | ((c << 2) & 0x3f00)
+                | (c & 0x3f);
+            n = 4;
+        }
+        _writeBytes32(out, o, bytes32(e << (256 - (n << 3))));
+        return o + n;
+    }
+
+    /// @dev Parses the digits of `b` from `i` on.
+    function _parseDigits(bytes memory b, uint256 i) private pure returns (uint256 result) {
+        uint256 n = b.length;
+        if (i >= n) _fail();
+        if (n < 32) {
+            // Too short for a word: a digit at a time.
+            do {
+                uint256 digit = uint8(b[i]) ^ 48;
+                if (digit > 9 || result > type(uint256).max / 10) _fail();
+                result *= 10;
+                if (digit > type(uint256).max - result) _fail();
+                result += digit;
+            } while (++i < n);
+            return result;
+        }
+        // 32 digits a word, the last word ending with the string.
+        while (true) {
+            (uint256 w, uint256 k) = _digitsWord(b, i);
+            if (_decimalDigits(w) != _HIGH_BITS) _fail();
+            uint256 v = _decimalValue(w);
+            uint256 scale = 10 ** k;
+            if (result > (type(uint256).max - v) / scale) _fail();
+            result = result * scale + v;
+            i += k;
+            if (i == n) return result;
         }
     }
 
-    /// @dev Casts the input to a bytes32.
-    function _toInput(Item memory input) private pure returns (bytes32 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := input
+    /// @dev Returns the next word of digits of `b`, which is at least 32 bytes long, from `i`,
+    /// which is below its length, and how many digits it holds: 32, or the rest of `b` in the
+    /// low bytes of its last word, after as many '0's.
+    /// @custom:solar-inline
+    function _digitsWord(bytes memory b, uint256 i) private pure returns (uint256 w, uint256 k) {
+        uint256 n = b.length;
+        k = n - i;
+        if (k >= 32) return (uint256(_readBytes32(b, i)), 32);
+        uint256 low = type(uint256).max >> ((32 - k) << 3);
+        w = (uint256(_readBytes32(b, n - 32)) & low) | (_ZEROS & ~low);
+    }
+
+    /// @dev Returns `w` with 0x80 in each byte that is a decimal digit, and 0 in the others.
+    function _decimalDigits(uint256 w) private pure returns (uint256) {
+        uint256 t = w & _LOW_BITS;
+        // At least '0' and at most '9', each byte apart: no carry leaves a byte.
+        return (t + 0x5050505050505050505050505050505050505050505050505050505050505050)
+            & ~(t + 0x4646464646464646464646464646464646464646464646464646464646464646) & ~w
+            & _HIGH_BITS;
+    }
+
+    /// @dev Returns `w` with 0x80 in each byte that is a hexadecimal digit, and 0 in the others.
+    function _hexDigits(uint256 w) private pure returns (uint256) {
+        uint256 t = w & _LOW_BITS;
+        // A lowercase letter is a letter, either case, with 0x20 set.
+        uint256 l = t | 0x2020202020202020202020202020202020202020202020202020202020202020;
+        uint256 digits = (t + 0x5050505050505050505050505050505050505050505050505050505050505050)
+            & ~(t + 0x4646464646464646464646464646464646464646464646464646464646464646);
+        uint256 letters = (l + 0x1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f)
+            & ~(l + 0x1919191919191919191919191919191919191919191919191919191919191919);
+        return (digits | letters) & ~w & _HIGH_BITS;
+    }
+
+    /// @dev Returns the value of the 32 decimal digits in `w`.
+    function _decimalValue(uint256 w) private pure returns (uint256 v) {
+        // Each byte's digit, then pairs, fours, eights and sixteens of digits.
+        v = w & 0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f;
+        uint256 m = 0x00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff;
+        v = ((v >> 8) & m) * 10 + (v & m);
+        m = 0x0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff;
+        v = ((v >> 16) & m) * 100 + (v & m);
+        m = 0x00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff;
+        v = ((v >> 32) & m) * 10000 + (v & m);
+        m = 0x0000000000000000ffffffffffffffff0000000000000000ffffffffffffffff;
+        v = ((v >> 64) & m) * 100000000 + (v & m);
+        v = (v >> 128) * 10000000000000000 + (v & type(uint128).max);
+    }
+
+    /// @dev Returns the value of the 32 hexadecimal digits in `w`.
+    function _hexValue(uint256 w) private pure returns (uint256 v) {
+        // Each byte's digit: its low nibble, and 9 more for a letter.
+        v = (w & 0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f)
+            + ((w >> 6) & 0x0101010101010101010101010101010101010101010101010101010101010101) * 9;
+        // Pairs of nibbles into bytes, then pairs of bytes, halves and quarters together.
+        v = (v | (v >> 4)) & 0x00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff;
+        v = (v | (v >> 8)) & 0x0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff;
+        v = (v | (v >> 16)) & 0x00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff;
+        v = (v | (v >> 32)) & 0x0000000000000000ffffffffffffffff0000000000000000ffffffffffffffff;
+        v = (v | (v >> 64)) & type(uint128).max;
+    }
+
+    /// @dev Copies `count` bytes from `src` at `srcOffset` to the start of `dst`, which the
+    /// caller has just allocated. Solar copies with `mcopy`, behind a test that keeps the
+    /// loop if `src` reaches into `dst`.
+    /// @custom:solar-inline
+    function _copyFresh(bytes memory dst, bytes memory src, uint256 srcOffset, uint256 count)
+        private
+        pure
+    {
+        for (uint256 k; k < count; ++k) {
+            dst[k] = src[srcOffset + k];
+        }
+    }
+
+    /// @dev The 32 bytes of `b` at `p`.
+    /// @custom:solar-inline
+    function _readBytes32(bytes memory b, uint256 p) private pure returns (bytes32 result) {
+        for (uint256 k; k < 32; ++k) {
+            result |= bytes32(b[p + k]) >> (8 * k);
+        }
+    }
+
+    /// @dev Writes `w` into `b` at `p`.
+    /// @custom:solar-inline
+    function _writeBytes32(bytes memory b, uint256 p, bytes32 w) private pure {
+        for (uint256 k; k < 32; ++k) {
+            b[p + k] = w[k];
+        }
+    }
+
+    /// @dev The 4 bytes of `b` at `p`.
+    /// @custom:solar-inline
+    function _readBytes4(bytes memory b, uint256 p) private pure returns (bytes4 result) {
+        for (uint256 k; k < 4; ++k) {
+            result |= bytes4(b[p + k]) >> (8 * k);
+        }
+    }
+
+    /// @dev The address of `item`.
+    /// @custom:solar-trusted
+    /// @custom:solar-inline
+    function _addr(Item memory item) private pure returns (uint256 result) {
+        assembly ("memory-safe") {
+            result := item
+        }
+    }
+
+    /// @dev The address of `a`.
+    /// @custom:solar-trusted
+    /// @custom:solar-inline
+    function _addr(uint256[] memory a) private pure returns (uint256 result) {
+        assembly ("memory-safe") {
+            result := a
+        }
+    }
+
+    /// @dev The address of `s`.
+    /// @custom:solar-trusted
+    /// @custom:solar-inline
+    function _addr(bytes memory s) private pure returns (uint256 result) {
+        assembly ("memory-safe") {
+            result := s
+        }
+    }
+
+    /// @dev The item at `p`, an item's address that an item's packed data holds.
+    /// @custom:solar-trusted
+    /// @custom:solar-inline
+    function _item(uint256 p) private pure returns (Item memory result) {
+        assembly ("memory-safe") {
+            result := p
+        }
+    }
+
+    /// @dev The children at `p`, the address of an array of items' addresses that an
+    /// item's packed data holds.
+    /// @custom:solar-trusted
+    /// @custom:solar-inline
+    function _items(uint256 p) private pure returns (Item[] memory result) {
+        assembly ("memory-safe") {
+            result := p
+        }
+    }
+
+    /// @dev The string at `p`, the parsed string's address or a cached copy's that an
+    /// item's packed data holds.
+    /// @custom:solar-trusted
+    /// @custom:solar-inline
+    function _string(uint256 p) private pure returns (string memory result) {
+        assembly ("memory-safe") {
+            result := p
+        }
+    }
+
+    /// @dev Shrinks `b` to its first `n` bytes in place. The caller has cleared the bytes
+    /// past `n` in its last word, so they read as zero padding.
+    /// @custom:solar-trusted
+    function _setLength(bytes memory b, uint256 n) private pure {
+        if (n > b.length) _fail();
+        assembly ("memory-safe") {
+            mstore(b, n)
         }
     }
 }
