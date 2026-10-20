@@ -1517,7 +1517,8 @@ library LibString {
 
     /// @dev Copies `count` bytes from `src` at `srcOffset` to `dst` at
     /// `dstOffset`, front to back. Callers pass a `dst` they have just
-    /// allocated, so the ranges never overlap and a word copy may move them.
+    /// allocated; Solar inlines the loop into them and copies with `mcopy`,
+    /// behind a test that keeps the loop if `src` reaches into `dst`.
     /// @custom:solar-inline
     function _copyFresh(
         bytes memory dst,
