@@ -39,6 +39,7 @@ LIBRARIES = [
     "EfficientHashLib",
     "LibBytes",
     "LibString",
+    "LibSort",
     "tokens/ERC20",
 ]
 
