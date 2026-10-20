@@ -719,7 +719,9 @@ library JSONParserLib {
         if (d & inited != 0) return _string(o);
         bytes memory s = bytes(_string((d >> _BITPOS_STRING) & _BITMASK_POINTER));
         uint256 n = (d >> bitposLength) & _BITMASK_POINTER;
-        bytes memory copy = new bytes(n);
+        // Whole words, cut to `n` bytes after the copy: legacy solc's `new bytes(n)` clears only
+        // `n` bytes, and the rest of the last word must read as zero padding.
+        bytes memory copy = _newPadded(n);
         _copyFresh(copy, s, o, n);
         uint256 copyAddress = _pointer(_addr(copy));
         item._data = d ^ ((o ^ copyAddress) << bitpos) | inited;
@@ -972,9 +974,22 @@ library JSONParserLib {
         }
     }
 
+    /// @dev A fresh buffer of `n` bytes in whole words, zero past `n` in its last word under every
+    /// compiler: legacy solc's `new bytes(n)` clears only `n` bytes.
+    /// @custom:solar-trusted
+    /// @custom:solar-inline
+    function _newPadded(uint256 n) private pure returns (bytes memory b) {
+        b = new bytes((n + 31) & ~uint256(31));
+        /// @solidity memory-safe-assembly
+        assembly {
+            mstore(b, n)
+        }
+    }
+
     /// @dev Shrinks `b` to its first `n` bytes in place. The caller has cleared the bytes
     /// past `n` in its last word, so they read as zero padding.
     /// @custom:solar-trusted
+    /// @custom:solar-inline
     function _setLength(bytes memory b, uint256 n) private pure {
         if (n > b.length) _fail();
         /// @solidity memory-safe-assembly
