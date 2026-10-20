@@ -15,6 +15,12 @@ pragma solidity ^0.8.4;
 /// After using the registry to deploy a ERC6551 clone pointing to this relay proxy,
 /// users must send 0 ETH to the clone before clicking on "Is this a proxy?" on Etherscan.
 /// Verification of this relay proxy on Etherscan is optional.
+///
+/// The checked port delegates with Solidity's `delegatecall` of `msg.data`, then returns or
+/// reverts with the implementation's return data through trusted helpers, since a fallback
+/// that declares no return value cannot end the call with raw data in Solidity. Trusted
+/// helpers also read and write the ERC-1967 implementation slot, which Solidity cannot name.
+/// @custom:solar-safe memory arithmetic
 contract ERC6551Proxy {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                         IMMUTABLES                         */
@@ -45,34 +51,64 @@ contract ERC6551Proxy {
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     fallback() external payable virtual {
-        bytes32 implementation;
-        /// @solidity memory-safe-assembly
-        assembly {
-            mstore(0x40, returndatasize()) // Optimization trick to change `6080604052` into `3d604052`.
-            implementation := sload(_ERC1967_IMPLEMENTATION_SLOT)
-        }
+        bytes32 implementation = _erc6551ProxySload(_ERC1967_IMPLEMENTATION_SLOT);
         if (implementation == bytes32(0)) {
             implementation = _defaultImplementation;
-            /// @solidity memory-safe-assembly
-            assembly {
-                // Only initialize if the calldatasize is zero, so that staticcalls to
-                // functions (which will have 4-byte function selectors) won't revert.
-                // Some users may be fine without Etherscan proxy detection and thus may
-                // choose to not initialize the ERC1967 implementation slot.
-                if iszero(calldatasize()) { sstore(_ERC1967_IMPLEMENTATION_SLOT, implementation) }
+            // Only initialize if the calldatasize is zero, so that staticcalls to
+            // functions (which will have 4-byte function selectors) won't revert.
+            // Some users may be fine without Etherscan proxy detection and thus may
+            // choose to not initialize the ERC1967 implementation slot.
+            if (msg.data.length == 0) {
+                _erc6551ProxySstore(_ERC1967_IMPLEMENTATION_SLOT, implementation);
             }
         }
+        (bool success,) = address(uint160(uint256(implementation))).delegatecall(msg.data);
+        if (!success) _erc6551ProxyRevertReturndata();
+        _erc6551ProxyReturnReturndata();
+    }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      PRIVATE HELPERS                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev The word in storage slot `slot`. Solidity cannot name a slot it did not allocate.
+    /// @custom:solar-trusted
+    function _erc6551ProxySload(bytes32 slot) private view returns (bytes32 value) {
         /// @solidity memory-safe-assembly
         assembly {
-            calldatacopy(returndatasize(), returndatasize(), calldatasize())
-            // forgefmt: disable-next-item
-            if iszero(delegatecall(gas(), implementation,
-                returndatasize(), calldatasize(), codesize(), returndatasize())) {
-                returndatacopy(0x00, 0x00, returndatasize())
-                revert(0x00, returndatasize())
-            }
-            returndatacopy(0x00, 0x00, returndatasize())
-            return(0x00, returndatasize())
+            value := sload(slot)
+        }
+    }
+
+    /// @dev Stores `value` in storage slot `slot`.
+    /// @custom:solar-trusted
+    function _erc6551ProxySstore(bytes32 slot, bytes32 value) private {
+        /// @solidity memory-safe-assembly
+        assembly {
+            sstore(slot, value)
+        }
+    }
+
+    /// @dev Ends the call, returning the last call's return data. Solidity returns data only
+    /// from a function that declares it.
+    /// @custom:solar-trusted
+    function _erc6551ProxyReturnReturndata() private pure {
+        /// @solidity memory-safe-assembly
+        assembly {
+            let m := mload(0x40)
+            returndatacopy(m, 0x00, returndatasize())
+            return(m, returndatasize())
+        }
+    }
+
+    /// @dev Reverts with the last call's return data, which Solidity holds only as a copy.
+    /// @custom:solar-trusted
+    function _erc6551ProxyRevertReturndata() private pure {
+        /// @solidity memory-safe-assembly
+        assembly {
+            let m := mload(0x40)
+            returndatacopy(m, 0x00, returndatasize())
+            revert(m, returndatasize())
         }
     }
 }
