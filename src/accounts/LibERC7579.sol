@@ -1,9 +1,26 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.4;
+pragma solidity ^0.8.5;
 
 /// @notice Library for handling ERC7579 mode and execution data.
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/accounts/LibERC7579.sol)
 /// @author Modified from OpenZeppelin (https://github.com/OpenZeppelin/openzeppelin-contracts/blob/main/contracts/account/utils/draft-ERC7579Utils.sol)
+///
+/// The checked port reads `executionData` through calldata slices, so every offset and length
+/// it follows is checked against the bytes it lies in. The checked decoders keep the assembly's
+/// bounds checks, stated against the slice: a batch, a call or `opData` that does not fit
+/// `executionData` reverts with `DecodingError()`. Solidity cannot view bytes as an array or
+/// tell where an array starts, so the trusted `_toBytes32Array` views the first words of a slice
+/// as a `bytes32[]` once they are checked to lie in it, and the trusted `_offset` gives the
+/// calldata offset `getExecution` reads from. `reencodeBatch` writes its result with
+/// `abi.encodePacked` and drops the zeros it does not need with the trusted `_truncate`.
+/// Deliberate differences, on data the checked decoders reject: the `Unchecked` decoders,
+/// `getExecution` and `reencodeBatch` read through Solidity's bounds checks, so a field past the
+/// end of `executionData` (of calldata, for `getExecution`) reverts where the assembly reads on
+/// or runs out of gas; `getExecution` returns `target` cleaned to 160 bits; a pointer count too
+/// large to address reverts with `DecodingError()` where the assembly runs out of gas; and
+/// `executionData` that ends within the first word of calldata, which only a slice of
+/// `msg.data` can, is checked against its own length where the assembly's bound wraps around.
+/// @custom:solar-safe memory arithmetic
 library LibERC7579 {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                       CUSTOM ERRORS                        */
@@ -44,12 +61,9 @@ library LibERC7579 {
         pure
         returns (bytes32 result)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := or(shl(8, byte(0, callType)), byte(0, execType))
-            result := or(shr(224, selector), shl(64, result))
-            result := or(shr(80, payload), shl(176, result))
-        }
+        // Bytes 0 and 1 are the types, bytes 2 to 5 stay zero, then the selector and payload.
+        result = bytes32(callType) | (bytes32(execType) >> 8) | (bytes32(selector) >> 48)
+            | (bytes32(payload) >> 80);
     }
 
     /// @dev Returns the call type of the mode.
@@ -83,17 +97,11 @@ library LibERC7579 {
         pure
         returns (address target, uint256 value, bytes calldata data)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            if iszero(gt(executionData.length, 0x33)) {
-                mstore(0x00, 0xba597e7e) // `DecodingError()`.
-                revert(0x1c, 0x04)
-            }
-            target := shr(96, calldataload(executionData.offset))
-            value := calldataload(add(executionData.offset, 0x14))
-            data.offset := add(executionData.offset, 0x34)
-            data.length := sub(executionData.length, 0x34)
-        }
+        // `abi.encodePacked(target, value, data)`.
+        if (executionData.length < 0x34) revert DecodingError();
+        target = address(bytes20(executionData));
+        value = _load(executionData, 0x14);
+        data = executionData[0x34:];
     }
 
     /// @dev Decodes a single call execution without bounds checks.
@@ -102,13 +110,9 @@ library LibERC7579 {
         pure
         returns (address target, uint256 value, bytes calldata data)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            target := shr(96, calldataload(executionData.offset))
-            value := calldataload(add(executionData.offset, 0x14))
-            data.offset := add(executionData.offset, 0x34)
-            data.length := sub(executionData.length, 0x34)
-        }
+        target = address(bytes20(executionData[:0x14]));
+        value = _load(executionData, 0x14);
+        data = executionData[0x34:];
     }
 
     /// @dev Decodes a single delegate execution.
@@ -118,16 +122,10 @@ library LibERC7579 {
         pure
         returns (address target, bytes calldata data)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            if iszero(gt(executionData.length, 0x13)) {
-                mstore(0x00, 0xba597e7e) // `DecodingError()`.
-                revert(0x1c, 0x04)
-            }
-            target := shr(96, calldataload(executionData.offset))
-            data.offset := add(executionData.offset, 0x14)
-            data.length := sub(executionData.length, 0x14)
-        }
+        // `abi.encodePacked(target, data)`.
+        if (executionData.length < 0x14) revert DecodingError();
+        target = address(bytes20(executionData));
+        data = executionData[0x14:];
     }
 
     /// @dev Decodes a single delegate execution without bounds checks.
@@ -136,12 +134,8 @@ library LibERC7579 {
         pure
         returns (address target, bytes calldata data)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            target := shr(96, calldataload(executionData.offset))
-            data.offset := add(executionData.offset, 0x14)
-            data.length := sub(executionData.length, 0x14)
-        }
+        target = address(bytes20(executionData[:0x14]));
+        data = executionData[0x14:];
     }
 
     /// @dev Decodes a batch.
@@ -151,35 +145,32 @@ library LibERC7579 {
         pure
         returns (bytes32[] calldata pointers)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let u := calldataload(executionData.offset)
-            let s := add(executionData.offset, u)
-            let e := sub(add(executionData.offset, executionData.length), 0x20)
-            pointers.offset := add(s, 0x20)
-            pointers.length := calldataload(s)
-            if or(shr(64, u), gt(add(s, shl(5, pointers.length)), e)) {
-                mstore(0x00, 0xba597e7e) // `DecodingError()`.
-                revert(0x1c, 0x04)
-            }
-            if pointers.length {
-                // Perform bounds checks on the decoded `pointers`.
-                // Loop runs out-of-gas if `pointers.length` is big enough to cause overflows.
-                for { let i := pointers.length } 1 {} {
-                    i := sub(i, 1)
-                    let p := calldataload(add(pointers.offset, shl(5, i)))
-                    let c := add(pointers.offset, p)
-                    let q := calldataload(add(c, 0x40))
-                    let o := add(c, q)
-                    // forgefmt: disable-next-item
-                    if or(shr(64, or(calldataload(o), or(p, q))),
-                        or(gt(add(c, 0x40), e), gt(add(o, calldataload(o)), e))) {
-                        mstore(0x00, 0xba597e7e) // `DecodingError()`.
-                        revert(0x1c, 0x04)
-                    }
-                    if iszero(i) { break }
-                }
-            }
+        // The offset of the calls, their count, and a pointer word per call. Every offset and
+        // length read must be below `2**64`, so no sum below can wrap.
+        uint256 end = executionData.length;
+        uint256 base;
+        {
+            if (end < 0x20) revert DecodingError();
+            uint256 u = _load(executionData, 0);
+            if (u >> 64 != 0 || u + 0x20 > end) revert DecodingError();
+            base = u + 0x20;
+            bytes calldata words = executionData[base:];
+            uint256 n = _load(executionData, u);
+            if (n > words.length >> 5) revert DecodingError();
+            pointers = _toBytes32Array(words, n);
+        }
+        // Each call's three head words, and its `data` with its length word, from `base`.
+        for (uint256 i; i < pointers.length; ++i) {
+            uint256 c = uint256(pointers[i]);
+            if (c >> 64 != 0) revert DecodingError();
+            c += base;
+            if (c + 0x60 > end) revert DecodingError();
+            uint256 o = _load(executionData, c + 0x40);
+            if (o >> 64 != 0) revert DecodingError();
+            o += c;
+            if (o + 0x20 > end) revert DecodingError();
+            uint256 n = _load(executionData, o);
+            if (n >> 64 != 0 || o + 0x20 + n > end) revert DecodingError();
         }
     }
 
@@ -191,12 +182,8 @@ library LibERC7579 {
         pure
         returns (bytes32[] calldata pointers)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let o := add(executionData.offset, calldataload(executionData.offset))
-            pointers.offset := add(o, 0x20)
-            pointers.length := calldataload(o)
-        }
+        uint256 u = _load(executionData, 0);
+        pointers = _toBytes32Array(executionData[u + 0x20:], _load(executionData, u));
     }
 
     /// @dev Decodes a batch and optional `opData`.
@@ -209,18 +196,13 @@ library LibERC7579 {
         opData = emptyCalldataBytes();
         pointers = decodeBatch(executionData);
         if (hasOpData(executionData)) {
-            /// @solidity memory-safe-assembly
-            assembly {
-                let e := sub(add(executionData.offset, executionData.length), 0x20)
-                let p := calldataload(add(0x20, executionData.offset))
-                let q := add(executionData.offset, p)
-                opData.offset := add(q, 0x20)
-                opData.length := calldataload(q)
-                if or(shr(64, or(opData.length, p)), gt(add(q, opData.length), e)) {
-                    mstore(0x00, 0xba597e7e) // `DecodingError()`.
-                    revert(0x1c, 0x04)
-                }
-            }
+            // The offset of `opData`, its length word and its bytes.
+            uint256 end = executionData.length;
+            uint256 p = _load(executionData, 0x20);
+            if (p >> 64 != 0 || p + 0x20 > end) revert DecodingError();
+            uint256 n = _load(executionData, p);
+            if (n >> 64 != 0 || p + 0x20 + n > end) revert DecodingError();
+            opData = executionData[p + 0x20:p + 0x20 + n];
         }
     }
 
@@ -235,23 +217,14 @@ library LibERC7579 {
         opData = emptyCalldataBytes();
         pointers = decodeBatchUnchecked(executionData);
         if (hasOpData(executionData)) {
-            /// @solidity memory-safe-assembly
-            assembly {
-                let q := add(executionData.offset, calldataload(add(0x20, executionData.offset)))
-                opData.offset := add(q, 0x20)
-                opData.length := calldataload(q)
-            }
+            uint256 p = _load(executionData, 0x20);
+            opData = executionData[p + 0x20:p + 0x20 + _load(executionData, p)];
         }
     }
 
     /// @dev Returns whether the `executionData` has optional `opData`.
     function hasOpData(bytes calldata executionData) internal pure returns (bool result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := iszero(
-                or(lt(executionData.length, 0x40), lt(calldataload(executionData.offset), 0x40))
-            )
-        }
+        return executionData.length >= 0x40 && _load(executionData, 0) >= 0x40;
     }
 
     /// @dev Returns the `i`th execution at `pointers`, without bounds checks.
@@ -261,15 +234,13 @@ library LibERC7579 {
         pure
         returns (address target, uint256 value, bytes calldata data)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let c := add(pointers.offset, calldataload(add(pointers.offset, shl(5, i))))
-            target := calldataload(c)
-            value := calldataload(add(c, 0x20))
-            let o := add(c, calldataload(add(c, 0x40)))
-            data.offset := add(o, 0x20)
-            data.length := calldataload(o)
-        }
+        // The calls lie after `pointers`, at the offsets its words give from its start.
+        bytes calldata a = msg.data[_offset(pointers):];
+        uint256 c = _load(a, i * 0x20);
+        target = address(uint160(_load(a, c)));
+        value = _load(a, c + 0x20);
+        uint256 o = c + _load(a, c + 0x40);
+        data = a[o + 0x20:o + 0x20 + _load(a, o)];
     }
 
     /// @dev Reencodes `executionData` such that it has `opData` added to it.
@@ -281,26 +252,13 @@ library LibERC7579 {
         pure
         returns (bytes memory result)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := add(0x64, mload(0x40)) // Give some space for `reencodeBatchAsExecuteCalldata`.
-            let s := calldataload(executionData.offset) // Offset of `calls`.
-            let n := sub(executionData.length, s) // Byte length of `calls`.
-            mstore(add(result, 0x20), 0x40) // Store the new offset of `calls`.
-            calldatacopy(add(result, 0x60), add(executionData.offset, s), n)
-            mstore(add(result, 0x40), add(0x40, n)) // Store the new offset of `opData`.
-            let o := add(add(result, 0x60), n) // Start offset of `opData` destination in memory.
-            let d := sub(opData, o) // Offset difference between `opData` source and `o`.
-            let end := add(mload(opData), add(0x20, o)) // End of `opData` destination in memory.
-            for {} 1 {} {
-                mstore(o, mload(add(o, d)))
-                o := add(o, 0x20)
-                if iszero(lt(o, end)) { break }
-            }
-            mstore(result, sub(o, add(result, 0x20))) // Store the length of `result`.
-            calldatacopy(end, calldatasize(), 0x40) // Zeroize the bytes after `end`.
-            mstore(0x40, add(0x20, o)) // Allocate memory.
-        }
+        // The bytes from the offset of the calls on, then `opData` padded to whole words. Two
+        // words of zeros keep the result zero right padded once it is cut to that length.
+        bytes calldata calls = executionData[_load(executionData, 0):];
+        result = abi.encodePacked(
+            uint256(0x40), 0x40 + calls.length, calls, opData.length, opData, bytes32(0), bytes32(0)
+        );
+        _truncate(result, _reencodedLength(calls.length, opData.length));
     }
 
     /// @dev `abi.encodeWithSignature("execute(bytes32,bytes)", mode, reencodeBatch(executionData, opData))`.
@@ -309,16 +267,23 @@ library LibERC7579 {
         bytes calldata executionData,
         bytes memory opData
     ) internal pure returns (bytes memory result) {
-        result = reencodeBatch(executionData, opData);
-        /// @solidity memory-safe-assembly
-        assembly {
-            let n := mload(result)
-            result := sub(result, 0x64)
-            mstore(add(result, 0x44), 0x40) // Offset of `executionData`.
-            mstore(add(result, 0x24), mode)
-            mstore(add(result, 0x04), 0xe9ae5c53) // `execute(bytes32,bytes)`.
-            mstore(result, add(0x64, n))
-        }
+        // `reencodeBatch`, written after `execute(bytes32,bytes)`'s head and its length.
+        bytes calldata calls = executionData[_load(executionData, 0):];
+        uint256 n = _reencodedLength(calls.length, opData.length);
+        result = abi.encodePacked(
+            bytes4(0xe9ae5c53),
+            mode,
+            uint256(0x40),
+            n,
+            uint256(0x40),
+            0x40 + calls.length,
+            calls,
+            opData.length,
+            opData,
+            bytes32(0),
+            bytes32(0)
+        );
+        _truncate(result, 0x64 + n);
     }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -327,10 +292,64 @@ library LibERC7579 {
 
     /// @dev Helper function to return empty calldata bytes.
     function emptyCalldataBytes() internal pure returns (bytes calldata result) {
+        return msg.data[:0];
+    }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      PRIVATE HELPERS                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev The word at `offset` in `b`.
+    /// @custom:solar-inline
+    function _load(bytes calldata b, uint256 offset) private pure returns (uint256) {
+        return uint256(bytes32(b[offset:offset + 0x20]));
+    }
+
+    /// @dev The length of `reencodeBatch`'s result for calls of `callsLength` bytes and
+    /// `opData` of `opDataLength` bytes: two offsets, the calls, then `opData` with its length
+    /// word, padded to whole words.
+    function _reencodedLength(uint256 callsLength, uint256 opDataLength)
+        private
+        pure
+        returns (uint256)
+    {
+        return 0x60 + callsLength + (opDataLength + 0x1f) / 0x20 * 0x20;
+    }
+
+    /// @dev Views the first `n` words of `b` as an array, once they are checked to lie in it.
+    /// Solidity cannot convert calldata bytes to an array.
+    /// @custom:solar-trusted
+    function _toBytes32Array(bytes calldata b, uint256 n)
+        private
+        pure
+        returns (bytes32[] calldata a)
+    {
+        if (n > b.length >> 5) n = new uint256[](0)[0];
         /// @solidity memory-safe-assembly
         assembly {
-            result.offset := 0
-            result.length := 0
+            a.offset := b.offset
+            a.length := n
+        }
+    }
+
+    /// @dev The calldata offset at which `a` starts. Solidity cannot read where a calldata
+    /// array lies.
+    /// @custom:solar-trusted
+    function _offset(bytes32[] calldata a) private pure returns (uint256 o) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            o := a.offset
+        }
+    }
+
+    /// @dev Shrinks `b` to its first `n` bytes in place. Solidity cannot spell a shorter length
+    /// for an existing buffer.
+    /// @custom:solar-trusted
+    function _truncate(bytes memory b, uint256 n) private pure {
+        if (n > b.length) n = new uint256[](0)[0];
+        /// @solidity memory-safe-assembly
+        assembly {
+            mstore(b, n)
         }
     }
 }
