@@ -1,25 +1,28 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @notice Checked Solidity implementation of the pinned Solady MerkleProofLib API.
-/// @dev A proof is folded one sibling at a time, hashing the smaller word of
-/// each pair first, as the assembly orders the two words in scratch space.
-///
-/// A multiproof rebuilds the root through a queue that starts with the leaves
-/// and grows by one hash per flag; each hash takes its second input from the
-/// queue or from the proof, as its flag says. The assembly reads its queue and
-/// its proof without bounds, and its final check that every proof element was
-/// used turns any read past either into `false`. This port returns `false` as
-/// soon as a read would pass the written queue or the proof, which gives the
-/// same result without reading memory nothing wrote. The queue is a new array,
-/// where the assembly uses free memory without reserving it.
-///
-/// One deliberate difference from the assembly: a calldata flag is read as a
-/// `bool`, so a flag word other than zero or one reverts where the assembly
-/// treats it as true. `emptyProof`, `emptyLeaves` and `emptyFlags` keep the
-/// assembly, since no Solidity expression is an empty calldata array.
+/// @notice Gas optimized verification of proof of inclusion for a leaf in a Merkle tree.
+/// @author Solady (https://github.com/vectorized/solady/blob/main/src/utils/MerkleProofLib.sol)
+/// @author Modified from Solmate (https://github.com/transmissions11/solmate/blob/main/src/utils/MerkleProofLib.sol)
+/// @author Modified from OpenZeppelin (https://github.com/OpenZeppelin/openzeppelin-contracts/blob/master/contracts/utils/cryptography/MerkleProof.sol)
+/// @dev The checked port folds a proof one sibling at a time, hashing the smaller word of each
+/// pair first, as the assembly orders the two words in scratch space. A multiproof rebuilds
+/// the root through a queue that starts with the leaves and grows by one hash per flag; each
+/// hash takes its second input from the queue or from the proof, as its flag says. The
+/// assembly reads its queue and its proof without bounds, and its final check that every
+/// proof element was used turns any read past either into `false`. The port returns `false`
+/// as soon as a read would pass the written queue or the proof, which gives the same result
+/// without reading memory nothing wrote. The queue is a new array, where the assembly uses
+/// free memory without reserving it. One deliberate difference: a calldata flag is read as a
+/// `bool`, so a flag word other than zero or one reverts where the assembly treats it as
+/// true. `emptyProof`, `emptyLeaves` and `emptyFlags` stay trusted assembly, since no Solidity
+/// expression is an empty calldata array.
 /// @custom:solar-safe memory arithmetic
 library MerkleProofLib {
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*            MERKLE PROOF VERIFICATION OPERATIONS            */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
     /// @dev Returns whether `leaf` exists in the Merkle tree with `root`, given `proof`.
     function verify(bytes32[] memory proof, bytes32 root, bytes32 leaf)
         internal
@@ -56,7 +59,10 @@ library MerkleProofLib {
     /// Note:
     /// - Breaking the invariant `flags.length == (leaves.length - 1) + proof.length`
     ///   will always return false.
+    /// - The sum of the lengths of `proof` and `leaves` must never overflow.
     /// - Any non-zero word in the `flags` array is treated as true.
+    /// - The memory offset of `proof` must be non-zero
+    ///   (i.e. `proof` is not pointing to the scratch space).
     function verifyMultiProof(
         bytes32[] memory proof,
         bytes32 root,
@@ -79,6 +85,9 @@ library MerkleProofLib {
     /// Note:
     /// - Breaking the invariant `flags.length == (leaves.length - 1) + proof.length`
     ///   will always return false.
+    /// - Any non-zero word in the `flags` array is treated as true.
+    /// - The calldata offset of `proof` must be non-zero
+    ///   (i.e. `proof` is from a regular Solidity function with a 4-byte selector).
     /// - A flag word other than zero or one reverts.
     function verifyMultiProofCalldata(
         bytes32[] calldata proof,
@@ -95,6 +104,43 @@ library MerkleProofLib {
         (bool complete, bytes32 computed) = _rebuildCalldata(hashes, leaves.length, proof, flags);
         return complete && computed == root;
     }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                   EMPTY CALLDATA HELPERS                   */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev Returns an empty calldata bytes32 array.
+    /// Solidity cannot spell a calldata array of its own, so this keeps the
+    /// upstream assembly.
+    /// @custom:solar-trusted
+    function emptyProof() internal pure returns (bytes32[] calldata proof) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            proof.length := 0
+        }
+    }
+
+    /// @dev Returns an empty calldata bytes32 array.
+    /// @custom:solar-trusted
+    function emptyLeaves() internal pure returns (bytes32[] calldata leaves) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            leaves.length := 0
+        }
+    }
+
+    /// @dev Returns an empty calldata bool array.
+    /// @custom:solar-trusted
+    function emptyFlags() internal pure returns (bool[] calldata flags) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            flags.length := 0
+        }
+    }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      PRIVATE HELPERS                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     /// @dev Runs the queue whose first `back` entries `hashes` holds, one hash
     /// per flag, and returns the last hash and whether every read stayed in the
@@ -162,38 +208,5 @@ library MerkleProofLib {
             ++back;
         }
         return (used == proof.length, hashes[back - 1]);
-    }
-
-    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
-    /*                   EMPTY CALLDATA HELPERS                   */
-    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
-
-    /// @dev Returns an empty calldata bytes32 array.
-    /// Solidity cannot spell a calldata array of its own, so this keeps the
-    /// upstream assembly.
-    /// @custom:solar-trusted
-    function emptyProof() internal pure returns (bytes32[] calldata proof) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            proof.length := 0
-        }
-    }
-
-    /// @dev Returns an empty calldata bytes32 array.
-    /// @custom:solar-trusted
-    function emptyLeaves() internal pure returns (bytes32[] calldata leaves) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            leaves.length := 0
-        }
-    }
-
-    /// @dev Returns an empty calldata bool array.
-    /// @custom:solar-trusted
-    function emptyFlags() internal pure returns (bool[] calldata flags) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            flags.length := 0
-        }
     }
 }

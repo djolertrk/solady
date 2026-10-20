@@ -93,7 +93,8 @@ library FixedPointMathLib {
         z = rawMul(x, y) / WAD;
     }
 
-    /// @dev Equivalent to `(x * y) / WAD` rounded towards zero.
+    /// @dev Equivalent to `(x * y) / WAD` rounded down.
+    /// The quotient rounds towards zero.
     function sMulWad(int256 x, int256 y) internal pure returns (int256 z) {
         z = rawMul(x, y);
         // Equivalent to `require((x == 0 || z / x == y) && !(x == -1 && y == type(int256).min))`.
@@ -108,7 +109,8 @@ library FixedPointMathLib {
         z = rawMul(x, y) / WAD;
     }
 
-    /// @dev Equivalent to `(x * y) / WAD` rounded towards zero, but without overflow checks.
+    /// @dev Equivalent to `(x * y) / WAD` rounded down, but without overflow checks.
+    /// The quotient rounds towards zero.
     function rawSMulWad(int256 x, int256 y) internal pure returns (int256 z) {
         z = rawMul(x, y) / int256(WAD);
     }
@@ -134,7 +136,8 @@ library FixedPointMathLib {
         z = rawMul(x, WAD) / y;
     }
 
-    /// @dev Equivalent to `(x * WAD) / y` rounded towards zero.
+    /// @dev Equivalent to `(x * WAD) / y` rounded down.
+    /// The quotient rounds towards zero.
     function sDivWad(int256 x, int256 y) internal pure returns (int256 z) {
         z = rawMul(x, int256(WAD));
         // Equivalent to `require(y != 0 && ((x * WAD) / WAD == x))`.
@@ -147,7 +150,8 @@ library FixedPointMathLib {
         z = rawDiv(rawMul(x, WAD), y);
     }
 
-    /// @dev Equivalent to `(x * WAD) / y` rounded towards zero, but without overflow and divide by zero checks.
+    /// @dev Equivalent to `(x * WAD) / y` rounded down, but without overflow and divide by zero checks.
+    /// The quotient rounds towards zero.
     function rawSDivWad(int256 x, int256 y) internal pure returns (int256 z) {
         z = rawSDiv(rawMul(x, int256(WAD)), y);
     }
@@ -919,7 +923,7 @@ library FixedPointMathLib {
     /// @dev Returns `a + (b - a) * (t - begin) / (end - begin)`,
     /// with `t` clamped between `begin` and `end` (inclusive).
     /// Agnostic to the order of (`a`, `b`) and (`end`, `begin`).
-    /// If `begin == end`, returns `t <= begin ? a : b`.
+    /// If `begins == end`, returns `t <= begin ? a : b`.
     function lerp(uint256 a, uint256 b, uint256 t, uint256 begin, uint256 end)
         internal
         pure
@@ -936,7 +940,7 @@ library FixedPointMathLib {
     /// @dev Returns `a + (b - a) * (t - begin) / (end - begin)`.
     /// with `t` clamped between `begin` and `end` (inclusive).
     /// Agnostic to the order of (`a`, `b`) and (`end`, `begin`).
-    /// If `begin == end`, returns `t <= begin ? a : b`.
+    /// If `begins == end`, returns `t <= begin ? a : b`.
     function lerp(int256 a, int256 b, int256 t, int256 begin, int256 end)
         internal
         pure

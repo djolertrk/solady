@@ -23,8 +23,8 @@ library LibPRNG {
     /// @dev The initial length must be greater than zero and less than `2**32 - 1`.
     error InvalidInitialLazyShufflerLength();
 
-    /// @dev The new length must not be less than the current length,
-    /// and must be less than `2**32 - 1`.
+    /// @dev The new length must not be less than the current length.
+    /// It must also be less than `2**32 - 1`.
     error InvalidNewLazyShufflerLength();
 
     /// @dev The lazy shuffler has not been initialized.

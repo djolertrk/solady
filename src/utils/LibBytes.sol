@@ -1,20 +1,18 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @notice Checked Solidity replacements for the byte operations of LibBytes.
+/// @notice Library for byte related operations.
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/utils/LibBytes.sol)
-/// @dev The searches, copies and comparisons are the ones LibString uses, in
-/// checked Solidity; a read outside an object reverts where the original reads
-/// whatever memory follows it. The `BytesStorage` layout is the
-/// original's: a value of up to 254 bytes keeps its length in the low byte of
-/// the struct's slot and its first 31 bytes above it, a longer one keeps
-/// `0xff` there and its length above, and the rest of the value fills the
-/// words derived from the slot, which the trusted helpers below move in whole
-/// words: Solidity has no spelling of a slot derived from a struct's. Stores
-/// write zeros past the end of the value, where the original copies whatever
-/// memory or calldata follows it. `uint8At` returns zero from the length on,
-/// as the original does since its stale-byte fix; the pinned release could
-/// return a byte left there by a longer value.
+/// @dev The checked port's searches, copies and comparisons are the ones LibString uses, in
+/// checked Solidity; a read outside an object reverts where upstream reads whatever memory
+/// follows it. The `BytesStorage` layout is upstream's: a value of up to 254 bytes keeps its
+/// length in the low byte of the struct's slot and its first 31 bytes above it, a longer one
+/// keeps `0xff` there and its length above, and the rest of the value fills the words derived
+/// from the slot, which the trusted helpers move in whole words: Solidity has no spelling of a
+/// slot derived from a struct's. Stores write zeros past the end of the value, where upstream
+/// copies whatever memory or calldata follows it. `uint8At` returns zero from the length on,
+/// as upstream does since its stale-byte fix; the pinned release could return a byte left
+/// there by a longer value.
 /// @custom:solar-safe memory arithmetic
 library LibBytes {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -39,6 +37,7 @@ library LibBytes {
     /// of the word-at-a-time scans.
     uint256 private constant LANES_7F =
         0x7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f;
+
     uint256 private constant LANES_01 =
         0x0101010101010101010101010101010101010101010101010101010101010101;
 

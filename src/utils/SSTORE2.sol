@@ -1,34 +1,50 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @notice Checked Solidity implementation of the pinned Solady SSTORE2 API.
-/// @dev A data contract holds `data` as its code after one STOP byte, so it
-/// cannot be called. Writing deploys it with the trusted `_createDeploy`;
-/// reading copies a range of it with the trusted `_codeRead`, checked against
-/// the code's size, where the assembly copies past the end and trims. The creation code is `abi.encodePacked` of a fixed
-/// prefix and `data`, written where it is used, which this compiler lays out over
-/// the length word of `data` instead of copying it, as the assembly does. Two
-/// deliberate differences from the assembly: data too long for the two-byte
-/// length the creation code pushes fails with `DeploymentFailed()` instead of
-/// running out of gas, and reading an account without code fails with
-/// `Panic(0x11)` instead of running out of gas.
+/// @notice Read and write to persistent storage at a fraction of the cost.
+/// @author Solady (https://github.com/vectorized/solady/blob/main/src/utils/SSTORE2.sol)
+/// @author Saw-mon-and-Natalie (https://github.com/Saw-mon-and-Natalie)
+/// @author Modified from Solmate (https://github.com/transmissions11/solmate/blob/main/src/utils/SSTORE2.sol)
+/// @author Modified from 0xSequence (https://github.com/0xSequence/sstore2/blob/master/contracts/SSTORE2.sol)
+/// @author Modified from SSTORE3 (https://github.com/Philogy/sstore3)
+/// @dev The checked port keeps a data contract's layout: `data` as its code after one STOP
+/// byte, so it cannot be called. Writing deploys it with the trusted `_createDeploy`; reading
+/// copies a range of it with the trusted `_codeCopyInto`, checked against the code's size,
+/// where the assembly copies past the end and trims. The creation code is `abi.encodePacked`
+/// of a fixed prefix and `data`. Two deliberate differences, both where the assembly runs out
+/// of gas: data too long for the two-byte length the creation code pushes fails with
+/// `DeploymentFailed()`, and reading an account without code fails with `Panic(0x11)`.
 /// @custom:solar-safe memory arithmetic
 library SSTORE2 {
-    /// @dev The creation code of the CREATE3 proxy.
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                         CONSTANTS                          */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev The proxy initialization code.
     bytes internal constant _CREATE3_PROXY_INITCODE = hex"67363d3d37363d34f03d5260086018f3";
 
     /// @dev Hash of the `_CREATE3_PROXY_INITCODE`.
+    /// Equivalent to `keccak256(abi.encodePacked(hex"67363d3d37363d34f03d5260086018f3"))`.
     bytes32 internal constant CREATE3_PROXY_INITCODE_HASH =
         0x21c35dbe1b344a2488cf3321d6ce542f8e9f305544ff09e4993a62319a497c1f;
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                        CUSTOM ERRORS                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     /// @dev Unable to deploy the storage contract.
     error DeploymentFailed();
 
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                         WRITE LOGIC                        */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
     /// @dev Writes `data` into the bytecode of a storage contract and returns its address.
     function write(bytes memory data) internal returns (address pointer) {
-        return _createDeploy(
-            abi.encodePacked(hex"61", _codeSize(data), hex"80600a3d393df300", data), 0
-        );
+        return
+            _createDeploy(
+                abi.encodePacked(hex"61", _codeSize(data), hex"80600a3d393df300", data), 0
+            );
     }
 
     /// @dev Writes `data` into the bytecode of a storage contract with `salt`
@@ -43,8 +59,8 @@ library SSTORE2 {
     }
 
     /// @dev Writes `data` into the bytecode of a storage contract and returns its address.
-    /// This uses the so-called "CREATE3" workflow, which means that `pointer`
-    /// is agnostic to `data`, and only depends on `salt`.
+    /// This uses the so-called "CREATE3" workflow,
+    /// which means that `pointer` is agnostic to `data, and only depends on `salt`.
     function writeDeterministic(bytes memory data, bytes32 salt)
         internal
         returns (address pointer)
@@ -61,6 +77,10 @@ library SSTORE2 {
         );
         if (!success || pointer.code.length == 0) revert DeploymentFailed();
     }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                    ADDRESS CALCULATIONS                    */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     /// @dev Returns the initialization code hash of the storage contract for `data`.
     /// Used for mining vanity addresses with create2crunch.
@@ -79,6 +99,7 @@ library SSTORE2 {
 
     /// @dev Returns the CREATE2 address of the storage contract for `data`
     /// deployed with `salt` by `deployer`.
+    /// Note: The returned result has dirty upper 96 bits. Please clean if used in assembly.
     function predictCounterfactualAddress(bytes memory data, bytes32 salt, address deployer)
         internal
         pure
@@ -101,6 +122,10 @@ library SSTORE2 {
         return _proxyDeployment(_createPredict2(deployer, salt, CREATE3_PROXY_INITCODE_HASH));
     }
 
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                         READ LOGIC                         */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
     /// @dev Equivalent to `read(pointer, 0, 2 ** 256 - 1)`.
     function read(address pointer) internal view returns (bytes memory data) {
         return read(pointer, 0, type(uint256).max);
@@ -114,6 +139,8 @@ library SSTORE2 {
     /// @dev Returns a slice of the data on `pointer` from `start` to `end`.
     /// `start` and `end` will be clamped to the range `[0, args.length]`.
     /// The `pointer` MUST be deployed via the SSTORE2 write functions.
+    /// Otherwise, the behavior is undefined.
+    /// Out-of-gas reverts if `pointer` does not have any code.
     function read(address pointer, uint256 start, uint256 end)
         internal
         view
@@ -126,6 +153,10 @@ library SSTORE2 {
         if (start >= end) return "";
         return _codeRead(pointer, start + 1, end - start);
     }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      PRIVATE HELPERS                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     /// @dev The code size the creation code of the storage contract for `data`
     /// pushes: `data` and the STOP byte before it. The creation code,
@@ -142,8 +173,6 @@ library SSTORE2 {
     function _proxyDeployment(address proxy) private pure returns (address) {
         return address(uint160(uint256(keccak256(abi.encodePacked(hex"d694", proxy, hex"01")))));
     }
-
-
 
     /// @dev Calls `target` with `payload`, `value` wei and `gasLimit` gas, and
     /// copies at most `maxCopy` bytes of the response into a new buffer sized to
@@ -171,7 +200,10 @@ library SSTORE2 {
 
     /// @dev Deploys `initcode` with `value` wei and returns the new address.
     /// @custom:solar-trusted
-    function _createDeploy(bytes memory initcode, uint256 value) private returns (address deployed) {
+    function _createDeploy(bytes memory initcode, uint256 value)
+        private
+        returns (address deployed)
+    {
         assembly ("memory-safe") {
             deployed := create(value, add(initcode, 0x20), mload(initcode))
         }
@@ -198,7 +230,9 @@ library SSTORE2 {
         returns (address)
     {
         return address(
-            uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), deployer, salt, initcodeHash))))
+            uint160(
+                uint256(keccak256(abi.encodePacked(bytes1(0xff), deployer, salt, initcodeHash)))
+            )
         );
     }
 
@@ -212,25 +246,25 @@ library SSTORE2 {
         _codeCopyInto(out, 0, target, start, count);
     }
 
-
     /// @dev Copies `count` bytes of `target`'s code from `start` into `dst`
     /// at `dstOffset`.
     /// @custom:solar-trusted
-    function _codeCopyInto(bytes memory dst, uint256 dstOffset, address target, uint256 start, uint256 count)
-        private
-        view
-    {
-        if (count > dst.length || dstOffset > dst.length - count) count = _outOfBounds();
+    function _codeCopyInto(
+        bytes memory dst,
+        uint256 dstOffset,
+        address target,
+        uint256 start,
+        uint256 count
+    ) private view {
+        if (count > dst.length || dstOffset > dst.length - count) {
+            count = _outOfBounds();
+        }
         uint256 size = target.code.length;
         if (count > size || start > size - count) count = _outOfBounds();
         assembly ("memory-safe") {
             extcodecopy(target, add(add(dst, 0x20), dstOffset), start, count)
         }
     }
-
-
-
-
 
     /// @dev Raises the `Panic(0x32)` an out-of-range index raises, which is the
     /// portable spelling of a failed range check.

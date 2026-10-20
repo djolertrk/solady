@@ -1,185 +1,379 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @notice Checked Solidity hashing without assembly.
-/// @dev The upstream library exists because `abi.encode` allocates before
-/// hashing. Here every fixed-arity hash is the plain `keccak256(abi.encode(...))`
-/// the source would write anyway, and the compiler decides where the words
-/// live: one or two words go to scratch space, more are built at the free
-/// pointer without moving it.
+/// @notice Library for efficiently performing keccak256 hashes.
+/// @author Solady (https://github.com/vectorized/solady/blob/main/src/utils/EfficientHashLib.sol)
+/// @dev To avoid stack-too-deep, you can use:
+/// ```
+/// bytes32[] memory buffer = EfficientHashLib.malloc(10);
+/// EfficientHashLib.set(buffer, 0, value0);
+/// ..
+/// EfficientHashLib.set(buffer, 9, value9);
+/// bytes32 finalHash = EfficientHashLib.hash(buffer);
+/// ```
 ///
-/// `free` cannot rewind the free-memory pointer from checked Solidity, so it
-/// is a no-op that keeps the API shape; a buffer is reclaimed by going out of
-/// scope, not by calling it.
-/// The 13- and 14-word overloads are left out: solc's legacy pipeline cannot
-/// compile a wrapper that takes them, so they cannot be measured side by side.
+/// The checked port hashes every fixed arity with the plain `keccak256(abi.encode(...))`
+/// the source would write anyway, and the compiler decides where the words live: one or two
+/// words go to scratch space, more are built at the free pointer without moving it. A range is
+/// copied into a new buffer and hashed there. `free` rewinds the free-memory pointer as
+/// upstream does, in trusted assembly, since checked Solidity cannot move it.
 /// @custom:solar-safe memory arithmetic
 library EfficientHashLib {
-    /// @dev `keccak256` of the word.
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*               MALLOC-LESS HASHING OPERATIONS               */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev Returns `keccak256(abi.encode(v0))`.
     function hash(bytes32 v0) internal pure returns (bytes32) {
         return keccak256(abi.encode(v0));
     }
-    /// @dev `keccak256` of the word.
+
+    /// @dev Returns `keccak256(abi.encode(v0))`.
     function hash(uint256 v0) internal pure returns (bytes32) {
         return keccak256(abi.encode(v0));
     }
-    /// @dev `keccak256` of the 2 words.
-    function hash(
-        bytes32 v0, bytes32 v1
-    ) internal pure returns (bytes32) {
+
+    /// @dev Returns `keccak256(abi.encode(v0, v1))`.
+    function hash(bytes32 v0, bytes32 v1) internal pure returns (bytes32) {
         return keccak256(abi.encode(v0, v1));
     }
-    /// @dev `keccak256` of the 2 words.
-    function hash(
-        uint256 v0, uint256 v1
-    ) internal pure returns (bytes32) {
+
+    /// @dev Returns `keccak256(abi.encode(v0, v1))`.
+    function hash(uint256 v0, uint256 v1) internal pure returns (bytes32) {
         return keccak256(abi.encode(v0, v1));
     }
-    /// @dev `keccak256` of the 3 words.
-    function hash(
-        bytes32 v0, bytes32 v1, bytes32 v2
-    ) internal pure returns (bytes32) {
+
+    /// @dev Returns `keccak256(abi.encode(v0, v1, v2))`.
+    function hash(bytes32 v0, bytes32 v1, bytes32 v2) internal pure returns (bytes32) {
         return keccak256(abi.encode(v0, v1, v2));
     }
-    /// @dev `keccak256` of the 3 words.
-    function hash(
-        uint256 v0, uint256 v1, uint256 v2
-    ) internal pure returns (bytes32) {
+
+    /// @dev Returns `keccak256(abi.encode(v0, v1, v2))`.
+    function hash(uint256 v0, uint256 v1, uint256 v2) internal pure returns (bytes32) {
         return keccak256(abi.encode(v0, v1, v2));
     }
-    /// @dev `keccak256` of the 4 words.
-    function hash(
-        bytes32 v0, bytes32 v1, bytes32 v2, bytes32 v3
-    ) internal pure returns (bytes32) {
+
+    /// @dev Returns `keccak256(abi.encode(v0, v1, v2, v3))`.
+    function hash(bytes32 v0, bytes32 v1, bytes32 v2, bytes32 v3) internal pure returns (bytes32) {
         return keccak256(abi.encode(v0, v1, v2, v3));
     }
-    /// @dev `keccak256` of the 4 words.
-    function hash(
-        uint256 v0, uint256 v1, uint256 v2, uint256 v3
-    ) internal pure returns (bytes32) {
+
+    /// @dev Returns `keccak256(abi.encode(v0, v1, v2, v3))`.
+    function hash(uint256 v0, uint256 v1, uint256 v2, uint256 v3) internal pure returns (bytes32) {
         return keccak256(abi.encode(v0, v1, v2, v3));
     }
-    /// @dev `keccak256` of the 5 words.
-    function hash(
-        bytes32 v0, bytes32 v1, bytes32 v2, bytes32 v3, bytes32 v4
-    ) internal pure returns (bytes32) {
+
+    /// @dev Returns `keccak256(abi.encode(v0, .., v4))`.
+    function hash(bytes32 v0, bytes32 v1, bytes32 v2, bytes32 v3, bytes32 v4)
+        internal
+        pure
+        returns (bytes32)
+    {
         return keccak256(abi.encode(v0, v1, v2, v3, v4));
     }
-    /// @dev `keccak256` of the 5 words.
-    function hash(
-        uint256 v0, uint256 v1, uint256 v2, uint256 v3, uint256 v4
-    ) internal pure returns (bytes32) {
+
+    /// @dev Returns `keccak256(abi.encode(v0, .., v4))`.
+    function hash(uint256 v0, uint256 v1, uint256 v2, uint256 v3, uint256 v4)
+        internal
+        pure
+        returns (bytes32)
+    {
         return keccak256(abi.encode(v0, v1, v2, v3, v4));
     }
-    /// @dev `keccak256` of the 6 words.
-    function hash(
-        bytes32 v0, bytes32 v1, bytes32 v2, bytes32 v3, bytes32 v4, bytes32 v5
-    ) internal pure returns (bytes32) {
+
+    /// @dev Returns `keccak256(abi.encode(v0, .., v5))`.
+    function hash(bytes32 v0, bytes32 v1, bytes32 v2, bytes32 v3, bytes32 v4, bytes32 v5)
+        internal
+        pure
+        returns (bytes32)
+    {
         return keccak256(abi.encode(v0, v1, v2, v3, v4, v5));
     }
-    /// @dev `keccak256` of the 6 words.
-    function hash(
-        uint256 v0, uint256 v1, uint256 v2, uint256 v3, uint256 v4, uint256 v5
-    ) internal pure returns (bytes32) {
+
+    /// @dev Returns `keccak256(abi.encode(v0, .., v5))`.
+    function hash(uint256 v0, uint256 v1, uint256 v2, uint256 v3, uint256 v4, uint256 v5)
+        internal
+        pure
+        returns (bytes32)
+    {
         return keccak256(abi.encode(v0, v1, v2, v3, v4, v5));
     }
-    /// @dev `keccak256` of the 7 words.
+
+    /// @dev Returns `keccak256(abi.encode(v0, .., v6))`.
     function hash(
-        bytes32 v0, bytes32 v1, bytes32 v2, bytes32 v3, bytes32 v4, bytes32 v5, bytes32 v6
+        bytes32 v0,
+        bytes32 v1,
+        bytes32 v2,
+        bytes32 v3,
+        bytes32 v4,
+        bytes32 v5,
+        bytes32 v6
     ) internal pure returns (bytes32) {
         return keccak256(abi.encode(v0, v1, v2, v3, v4, v5, v6));
     }
-    /// @dev `keccak256` of the 7 words.
+
+    /// @dev Returns `keccak256(abi.encode(v0, .., v6))`.
     function hash(
-        uint256 v0, uint256 v1, uint256 v2, uint256 v3, uint256 v4, uint256 v5, uint256 v6
+        uint256 v0,
+        uint256 v1,
+        uint256 v2,
+        uint256 v3,
+        uint256 v4,
+        uint256 v5,
+        uint256 v6
     ) internal pure returns (bytes32) {
         return keccak256(abi.encode(v0, v1, v2, v3, v4, v5, v6));
     }
-    /// @dev `keccak256` of the 8 words.
+
+    /// @dev Returns `keccak256(abi.encode(v0, .., v7))`.
     function hash(
-        bytes32 v0, bytes32 v1, bytes32 v2, bytes32 v3, bytes32 v4, bytes32 v5, bytes32 v6, bytes32 v7
+        bytes32 v0,
+        bytes32 v1,
+        bytes32 v2,
+        bytes32 v3,
+        bytes32 v4,
+        bytes32 v5,
+        bytes32 v6,
+        bytes32 v7
     ) internal pure returns (bytes32) {
         return keccak256(abi.encode(v0, v1, v2, v3, v4, v5, v6, v7));
     }
-    /// @dev `keccak256` of the 8 words.
+
+    /// @dev Returns `keccak256(abi.encode(v0, .., v7))`.
     function hash(
-        uint256 v0, uint256 v1, uint256 v2, uint256 v3, uint256 v4, uint256 v5, uint256 v6, uint256 v7
+        uint256 v0,
+        uint256 v1,
+        uint256 v2,
+        uint256 v3,
+        uint256 v4,
+        uint256 v5,
+        uint256 v6,
+        uint256 v7
     ) internal pure returns (bytes32) {
         return keccak256(abi.encode(v0, v1, v2, v3, v4, v5, v6, v7));
     }
-    /// @dev `keccak256` of the 9 words.
+
+    /// @dev Returns `keccak256(abi.encode(v0, .., v8))`.
     function hash(
-        bytes32 v0, bytes32 v1, bytes32 v2, bytes32 v3, bytes32 v4, bytes32 v5, bytes32 v6, bytes32 v7, bytes32 v8
+        bytes32 v0,
+        bytes32 v1,
+        bytes32 v2,
+        bytes32 v3,
+        bytes32 v4,
+        bytes32 v5,
+        bytes32 v6,
+        bytes32 v7,
+        bytes32 v8
     ) internal pure returns (bytes32) {
         return keccak256(abi.encode(v0, v1, v2, v3, v4, v5, v6, v7, v8));
     }
-    /// @dev `keccak256` of the 9 words.
+
+    /// @dev Returns `keccak256(abi.encode(v0, .., v8))`.
     function hash(
-        uint256 v0, uint256 v1, uint256 v2, uint256 v3, uint256 v4, uint256 v5, uint256 v6, uint256 v7, uint256 v8
+        uint256 v0,
+        uint256 v1,
+        uint256 v2,
+        uint256 v3,
+        uint256 v4,
+        uint256 v5,
+        uint256 v6,
+        uint256 v7,
+        uint256 v8
     ) internal pure returns (bytes32) {
         return keccak256(abi.encode(v0, v1, v2, v3, v4, v5, v6, v7, v8));
     }
-    /// @dev `keccak256` of the 10 words.
+
+    /// @dev Returns `keccak256(abi.encode(v0, .., v9))`.
     function hash(
-        bytes32 v0, bytes32 v1, bytes32 v2, bytes32 v3, bytes32 v4, bytes32 v5, bytes32 v6, bytes32 v7, bytes32 v8, bytes32 v9
+        bytes32 v0,
+        bytes32 v1,
+        bytes32 v2,
+        bytes32 v3,
+        bytes32 v4,
+        bytes32 v5,
+        bytes32 v6,
+        bytes32 v7,
+        bytes32 v8,
+        bytes32 v9
     ) internal pure returns (bytes32) {
         return keccak256(abi.encode(v0, v1, v2, v3, v4, v5, v6, v7, v8, v9));
     }
-    /// @dev `keccak256` of the 10 words.
+
+    /// @dev Returns `keccak256(abi.encode(v0, .., v9))`.
     function hash(
-        uint256 v0, uint256 v1, uint256 v2, uint256 v3, uint256 v4, uint256 v5, uint256 v6, uint256 v7, uint256 v8, uint256 v9
+        uint256 v0,
+        uint256 v1,
+        uint256 v2,
+        uint256 v3,
+        uint256 v4,
+        uint256 v5,
+        uint256 v6,
+        uint256 v7,
+        uint256 v8,
+        uint256 v9
     ) internal pure returns (bytes32) {
         return keccak256(abi.encode(v0, v1, v2, v3, v4, v5, v6, v7, v8, v9));
     }
-    /// @dev `keccak256` of the 11 words.
+
+    /// @dev Returns `keccak256(abi.encode(v0, .., v10))`.
     function hash(
-        bytes32 v0, bytes32 v1, bytes32 v2, bytes32 v3, bytes32 v4, bytes32 v5, bytes32 v6, bytes32 v7, bytes32 v8, bytes32 v9, bytes32 v10
+        bytes32 v0,
+        bytes32 v1,
+        bytes32 v2,
+        bytes32 v3,
+        bytes32 v4,
+        bytes32 v5,
+        bytes32 v6,
+        bytes32 v7,
+        bytes32 v8,
+        bytes32 v9,
+        bytes32 v10
     ) internal pure returns (bytes32) {
         return keccak256(abi.encode(v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10));
     }
-    /// @dev `keccak256` of the 11 words.
+
+    /// @dev Returns `keccak256(abi.encode(v0, .., v10))`.
     function hash(
-        uint256 v0, uint256 v1, uint256 v2, uint256 v3, uint256 v4, uint256 v5, uint256 v6, uint256 v7, uint256 v8, uint256 v9, uint256 v10
+        uint256 v0,
+        uint256 v1,
+        uint256 v2,
+        uint256 v3,
+        uint256 v4,
+        uint256 v5,
+        uint256 v6,
+        uint256 v7,
+        uint256 v8,
+        uint256 v9,
+        uint256 v10
     ) internal pure returns (bytes32) {
         return keccak256(abi.encode(v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10));
     }
-    /// @dev `keccak256` of the 12 words.
+
+    /// @dev Returns `keccak256(abi.encode(v0, .., v11))`.
     function hash(
-        bytes32 v0, bytes32 v1, bytes32 v2, bytes32 v3, bytes32 v4, bytes32 v5, bytes32 v6, bytes32 v7, bytes32 v8, bytes32 v9, bytes32 v10, bytes32 v11
+        bytes32 v0,
+        bytes32 v1,
+        bytes32 v2,
+        bytes32 v3,
+        bytes32 v4,
+        bytes32 v5,
+        bytes32 v6,
+        bytes32 v7,
+        bytes32 v8,
+        bytes32 v9,
+        bytes32 v10,
+        bytes32 v11
     ) internal pure returns (bytes32) {
         return keccak256(abi.encode(v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11));
     }
-    /// @dev `keccak256` of the 12 words.
+
+    /// @dev Returns `keccak256(abi.encode(v0, .., v11))`.
     function hash(
-        uint256 v0, uint256 v1, uint256 v2, uint256 v3, uint256 v4, uint256 v5, uint256 v6, uint256 v7, uint256 v8, uint256 v9, uint256 v10, uint256 v11
+        uint256 v0,
+        uint256 v1,
+        uint256 v2,
+        uint256 v3,
+        uint256 v4,
+        uint256 v5,
+        uint256 v6,
+        uint256 v7,
+        uint256 v8,
+        uint256 v9,
+        uint256 v10,
+        uint256 v11
     ) internal pure returns (bytes32) {
         return keccak256(abi.encode(v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11));
     }
-    /// @dev `keccak256` of the 13 words.
+
+    /// @dev Returns `keccak256(abi.encode(v0, .., v12))`.
     function hash(
-        bytes32 v0, bytes32 v1, bytes32 v2, bytes32 v3, bytes32 v4, bytes32 v5, bytes32 v6, bytes32 v7, bytes32 v8, bytes32 v9, bytes32 v10, bytes32 v11, bytes32 v12
+        bytes32 v0,
+        bytes32 v1,
+        bytes32 v2,
+        bytes32 v3,
+        bytes32 v4,
+        bytes32 v5,
+        bytes32 v6,
+        bytes32 v7,
+        bytes32 v8,
+        bytes32 v9,
+        bytes32 v10,
+        bytes32 v11,
+        bytes32 v12
     ) internal pure returns (bytes32) {
         return keccak256(abi.encode(v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12));
     }
-    /// @dev `keccak256` of the 13 words.
+
+    /// @dev Returns `keccak256(abi.encode(v0, .., v12))`.
     function hash(
-        uint256 v0, uint256 v1, uint256 v2, uint256 v3, uint256 v4, uint256 v5, uint256 v6, uint256 v7, uint256 v8, uint256 v9, uint256 v10, uint256 v11, uint256 v12
+        uint256 v0,
+        uint256 v1,
+        uint256 v2,
+        uint256 v3,
+        uint256 v4,
+        uint256 v5,
+        uint256 v6,
+        uint256 v7,
+        uint256 v8,
+        uint256 v9,
+        uint256 v10,
+        uint256 v11,
+        uint256 v12
     ) internal pure returns (bytes32) {
         return keccak256(abi.encode(v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12));
     }
-    /// @dev `keccak256` of the 14 words.
+
+    /// @dev Returns `keccak256(abi.encode(v0, .., v13))`.
     function hash(
-        bytes32 v0, bytes32 v1, bytes32 v2, bytes32 v3, bytes32 v4, bytes32 v5, bytes32 v6, bytes32 v7, bytes32 v8, bytes32 v9, bytes32 v10, bytes32 v11, bytes32 v12, bytes32 v13
+        bytes32 v0,
+        bytes32 v1,
+        bytes32 v2,
+        bytes32 v3,
+        bytes32 v4,
+        bytes32 v5,
+        bytes32 v6,
+        bytes32 v7,
+        bytes32 v8,
+        bytes32 v9,
+        bytes32 v10,
+        bytes32 v11,
+        bytes32 v12,
+        bytes32 v13
     ) internal pure returns (bytes32) {
         return keccak256(abi.encode(v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13));
     }
-    /// @dev `keccak256` of the 14 words.
+
+    /// @dev Returns `keccak256(abi.encode(v0, .., v13))`.
     function hash(
-        uint256 v0, uint256 v1, uint256 v2, uint256 v3, uint256 v4, uint256 v5, uint256 v6, uint256 v7, uint256 v8, uint256 v9, uint256 v10, uint256 v11, uint256 v12, uint256 v13
+        uint256 v0,
+        uint256 v1,
+        uint256 v2,
+        uint256 v3,
+        uint256 v4,
+        uint256 v5,
+        uint256 v6,
+        uint256 v7,
+        uint256 v8,
+        uint256 v9,
+        uint256 v10,
+        uint256 v11,
+        uint256 v12,
+        uint256 v13
     ) internal pure returns (bytes32) {
         return keccak256(abi.encode(v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13));
     }
-    /// @dev Sets `buffer[i]`, returning the buffer so calls chain.
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*             BYTES32 BUFFER HASHING OPERATIONS              */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev Returns `keccak256(abi.encode(buffer[0], .., buffer[buffer.length - 1]))`.
+    function hash(bytes32[] memory buffer) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(buffer));
+    }
+
+    /// @dev Sets `buffer[i]` to `value`, without a bounds check.
+    /// Returns the `buffer` for function chaining.
     function set(bytes32[] memory buffer, uint256 i, bytes32 value)
         internal
         pure
@@ -189,7 +383,8 @@ library EfficientHashLib {
         return buffer;
     }
 
-    /// @dev Sets `buffer[i]`, returning the buffer so calls chain.
+    /// @dev Sets `buffer[i]` to `value`, without a bounds check.
+    /// Returns the `buffer` for function chaining.
     function set(bytes32[] memory buffer, uint256 i, uint256 value)
         internal
         pure
@@ -199,12 +394,7 @@ library EfficientHashLib {
         return buffer;
     }
 
-    /// @dev `keccak256` of the words of `buffer`, as `abi.encode` lays them out.
-    function hash(bytes32[] memory buffer) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked(buffer));
-    }
-
-    /// @dev A zeroed buffer of `n` words.
+    /// @dev Returns `new bytes32[](n)`, without zeroing out the memory.
     function malloc(uint256 n) internal pure returns (bytes32[] memory buffer) {
         return new bytes32[](n);
     }
@@ -221,20 +411,26 @@ library EfficientHashLib {
         }
     }
 
-    /// @dev Whether `b` is exactly the 32 bytes of `a`.
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      EQUALITY CHECKS                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev Returns `a == abi.decode(b, (bytes32))`.
     function eq(bytes32 a, bytes memory b) internal pure returns (bool) {
         return b.length == 32 && _readBytes32(b, 0) == a;
     }
 
-    /// @dev Whether `a` is exactly the 32 bytes of `b`.
+    /// @dev Returns `abi.decode(a, (bytes32)) == a`.
     function eq(bytes memory a, bytes32 b) internal pure returns (bool) {
         return eq(b, a);
     }
 
-    /// @dev `keccak256` of `b` from `start` to `end`, both clamped to the
-    /// length, and of nothing when the range is empty or reversed: the upstream
-    /// clamp, spelled so that `start <= end <= b.length` is visible where the
-    /// range is read.
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*               BYTE SLICE HASHING OPERATIONS                */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev Returns the keccak256 of the slice from `start` to `end` (exclusive).
+    /// `start` and `end` are byte offsets.
     function hash(bytes memory b, uint256 start, uint256 end) internal pure returns (bytes32) {
         uint256 n = b.length;
         if (end > n) end = n;
@@ -242,17 +438,18 @@ library EfficientHashLib {
         return _keccak256Range(b, start, end - start);
     }
 
-    /// @dev `keccak256` of `b` from `start` to its end.
+    /// @dev Returns the keccak256 of the slice from `start` to the end of the bytes.
     function hash(bytes memory b, uint256 start) internal pure returns (bytes32) {
         return hash(b, start, b.length);
     }
 
-    /// @dev `keccak256` of `b`.
+    /// @dev Returns the keccak256 of the bytes.
     function hash(bytes memory b) internal pure returns (bytes32) {
         return keccak256(b);
     }
 
-    /// @dev `keccak256` of `b` from `start` to `end`, clamped as above.
+    /// @dev Returns the keccak256 of the slice from `start` to `end` (exclusive).
+    /// `start` and `end` are byte offsets.
     function hashCalldata(bytes calldata b, uint256 start, uint256 end)
         internal
         pure
@@ -264,22 +461,27 @@ library EfficientHashLib {
         return keccak256(b[start:end]);
     }
 
-    /// @dev `keccak256` of `b` from `start` to its end.
+    /// @dev Returns the keccak256 of the slice from `start` to the end of the bytes.
     function hashCalldata(bytes calldata b, uint256 start) internal pure returns (bytes32) {
         return hashCalldata(b, start, b.length);
     }
 
-    /// @dev `keccak256` of `b`.
+    /// @dev Returns the keccak256 of the bytes.
     function hashCalldata(bytes calldata b) internal pure returns (bytes32) {
         return keccak256(b);
     }
 
-    /// @dev `sha256` of the word.
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      SHA2-256 HELPERS                      */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev Returns `sha256(abi.encode(b))`. Yes, it's more efficient.
     function sha2(bytes32 b) internal view returns (bytes32) {
         return sha256(abi.encode(b));
     }
 
-    /// @dev `sha256` of `b` from `start` to `end`, clamped as above.
+    /// @dev Returns the sha256 of the slice from `start` to `end` (exclusive).
+    /// `start` and `end` are byte offsets.
     function sha2(bytes memory b, uint256 start, uint256 end) internal view returns (bytes32) {
         uint256 n = b.length;
         if (end > n) end = n;
@@ -288,17 +490,18 @@ library EfficientHashLib {
         return sha256(part);
     }
 
-    /// @dev `sha256` of `b` from `start` to its end.
+    /// @dev Returns the sha256 of the slice from `start` to the end of the bytes.
     function sha2(bytes memory b, uint256 start) internal view returns (bytes32) {
         return sha2(b, start, b.length);
     }
 
-    /// @dev `sha256` of `b`.
+    /// @dev Returns the sha256 of the bytes.
     function sha2(bytes memory b) internal view returns (bytes32) {
         return sha256(b);
     }
 
-    /// @dev `sha256` of `b` from `start` to `end`, clamped as above.
+    /// @dev Returns the sha256 of the slice from `start` to `end` (exclusive).
+    /// `start` and `end` are byte offsets.
     function sha2Calldata(bytes calldata b, uint256 start, uint256 end)
         internal
         view
@@ -310,23 +513,23 @@ library EfficientHashLib {
         return sha256(b[start:end]);
     }
 
-    /// @dev `sha256` of `b` from `start` to its end.
+    /// @dev Returns the sha256 of the slice from `start` to the end of the bytes.
     function sha2Calldata(bytes calldata b, uint256 start) internal view returns (bytes32) {
         return sha2Calldata(b, start, b.length);
     }
 
-    /// @dev `sha256` of `b`.
+    /// @dev Returns the sha256 of the bytes.
     function sha2Calldata(bytes calldata b) internal view returns (bytes32) {
         return sha256(b);
     }
 
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      PRIVATE HELPERS                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
     /// @dev The 32 bytes of `b` at `offset`.
     /// @custom:solar-inline
-    function _readBytes32(bytes memory b, uint256 offset)
-        private
-        pure
-        returns (bytes32 result)
-    {
+    function _readBytes32(bytes memory b, uint256 offset) private pure returns (bytes32 result) {
         for (uint256 k; k < 32; ++k) {
             result |= bytes32(b[offset + k]) >> (8 * k);
         }

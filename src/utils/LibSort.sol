@@ -1,93 +1,82 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @notice Checked Solidity sorting without type punning or sentinel reads.
-/// @dev Each element type has its own implementation, so no array is read as
-/// another type. Sorting is a median-of-three quicksort with insertion-sort
-/// leaves. Shrinking an array in place has no Solidity spelling, so the APIs
-/// that do it, and the set operations that build a result at its largest
-/// size, go through `_truncate`, the library's only trusted code.
+/// @notice Optimized sorts and operations for sorted arrays.
+/// @author Solady (https://github.com/Vectorized/solady/blob/main/src/utils/LibSort.sol)
+/// @dev The checked port gives each element type its own implementation, so no array is read
+/// as another type. Sorting is a median-of-three quicksort with insertion-sort leaves.
+/// Shrinking an array in place has no Solidity spelling, so the APIs that do it, and the set
+/// operations that build a result at its largest size, go through `_truncate`, the library's
+/// only trusted code.
 /// @custom:solar-safe memory arithmetic
 library LibSort {
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      INSERTION SORT                        */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    // - Faster on small arrays (32 or lesser elements).
+    // - Faster on almost sorted arrays.
+    // - Smaller bytecode (about 300 bytes smaller than sort, which uses intro-quicksort).
+    // - May be suitable for view functions intended for off-chain querying.
+
+    /// @dev Sorts the array in-place with insertion sort.
     function insertionSort(uint256[] memory a) internal pure {
         _sortAll(a);
     }
 
-    function sort(uint256[] memory a) internal pure {
-        _sortAll(a);
-    }
-
-    function reverse(uint256[] memory a) internal pure {
-        if (a.length < 2) return;
-        for (uint256 i; i < a.length / 2; ++i) {
-            uint256 j = a.length - 1 - i;
-            (a[i], a[j]) = (a[j], a[i]);
-        }
-    }
-
-    function copy(uint256[] memory a) internal pure returns (uint256[] memory result) {
-        return _copy(a);
-    }
-
-    function isSorted(uint256[] memory a) internal pure returns (bool result) {
-        for (uint256 i = 1; i < a.length; ++i) {
-            if (a[i - 1] > a[i]) return false;
-        }
-        return true;
-    }
-
-    function isSortedAndUniquified(uint256[] memory a) internal pure returns (bool result) {
-        for (uint256 i = 1; i < a.length; ++i) {
-            if (a[i - 1] >= a[i]) return false;
-        }
-        return true;
-    }
-
-    function hasDuplicate(uint256[] memory a) internal pure returns (bool result) {
-        return _hasDuplicate(a);
-    }
-
-    /// @dev Removes duplicate elements from a ascendingly sorted memory array.
-    function uniquifySorted(uint256[] memory a) internal pure {
-        _uniquifySorted(a);
-    }
-
+    /// @dev Sorts the array in-place with insertion sort.
     function insertionSort(int256[] memory a) internal pure {
         _sortAll(a);
     }
 
+    /// @dev Sorts the array in-place with insertion sort.
+    function insertionSort(address[] memory a) internal pure {
+        _sortAll(a);
+    }
+
+    /// @dev Sorts the array in-place with insertion sort.
+    function insertionSort(bytes32[] memory a) internal pure {
+        _sortAll(a);
+    }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      INTRO-QUICKSORT                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    // - Faster on larger arrays (more than 32 elements).
+    // - Robust performance.
+    // - Larger bytecode.
+
+    /// @dev Sorts the array in-place with intro-quicksort.
+    function sort(uint256[] memory a) internal pure {
+        _sortAll(a);
+    }
+
+    /// @dev Sorts the array in-place with intro-quicksort.
     function sort(int256[] memory a) internal pure {
         _sortAll(a);
     }
 
-    function reverse(int256[] memory a) internal pure {
-        if (a.length < 2) return;
-        for (uint256 i; i < a.length / 2; ++i) {
-            uint256 j = a.length - 1 - i;
-            (a[i], a[j]) = (a[j], a[i]);
-        }
+    /// @dev Sorts the array in-place with intro-quicksort.
+    function sort(address[] memory a) internal pure {
+        _sortAll(a);
     }
 
-    function copy(int256[] memory a) internal pure returns (int256[] memory result) {
-        return _copy(a);
+    /// @dev Sorts the array in-place with intro-quicksort.
+    function sort(bytes32[] memory a) internal pure {
+        _sortAll(a);
     }
 
-    function isSorted(int256[] memory a) internal pure returns (bool result) {
-        for (uint256 i = 1; i < a.length; ++i) {
-            if (a[i - 1] > a[i]) return false;
-        }
-        return true;
-    }
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                  OTHER USEFUL OPERATIONS                   */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
-    function isSortedAndUniquified(int256[] memory a) internal pure returns (bool result) {
-        for (uint256 i = 1; i < a.length; ++i) {
-            if (a[i - 1] >= a[i]) return false;
-        }
-        return true;
-    }
+    // For performance, the `uniquifySorted` methods will not revert if the
+    // array is not sorted -- it will simply remove consecutive duplicate elements.
 
-    function hasDuplicate(int256[] memory a) internal pure returns (bool result) {
-        return _hasDuplicate(a);
+    /// @dev Removes duplicate elements from a ascendingly sorted memory array.
+    function uniquifySorted(uint256[] memory a) internal pure {
+        _uniquifySorted(a);
     }
 
     /// @dev Removes duplicate elements from a ascendingly sorted memory array.
@@ -95,85 +84,9 @@ library LibSort {
         _uniquifySorted(a);
     }
 
-    function insertionSort(address[] memory a) internal pure {
-        _sortAll(a);
-    }
-
-    function sort(address[] memory a) internal pure {
-        _sortAll(a);
-    }
-
-    function reverse(address[] memory a) internal pure {
-        if (a.length < 2) return;
-        for (uint256 i; i < a.length / 2; ++i) {
-            uint256 j = a.length - 1 - i;
-            (a[i], a[j]) = (a[j], a[i]);
-        }
-    }
-
-    function copy(address[] memory a) internal pure returns (address[] memory result) {
-        return _copy(a);
-    }
-
-    function isSorted(address[] memory a) internal pure returns (bool result) {
-        for (uint256 i = 1; i < a.length; ++i) {
-            if (a[i - 1] > a[i]) return false;
-        }
-        return true;
-    }
-
-    function isSortedAndUniquified(address[] memory a) internal pure returns (bool result) {
-        for (uint256 i = 1; i < a.length; ++i) {
-            if (a[i - 1] >= a[i]) return false;
-        }
-        return true;
-    }
-
-    function hasDuplicate(address[] memory a) internal pure returns (bool result) {
-        return _hasDuplicate(a);
-    }
-
     /// @dev Removes duplicate elements from a ascendingly sorted memory array.
     function uniquifySorted(address[] memory a) internal pure {
         _uniquifySorted(a);
-    }
-
-    function insertionSort(bytes32[] memory a) internal pure {
-        _sortAll(a);
-    }
-
-    function sort(bytes32[] memory a) internal pure {
-        _sortAll(a);
-    }
-
-    function reverse(bytes32[] memory a) internal pure {
-        if (a.length < 2) return;
-        for (uint256 i; i < a.length / 2; ++i) {
-            uint256 j = a.length - 1 - i;
-            (a[i], a[j]) = (a[j], a[i]);
-        }
-    }
-
-    function copy(bytes32[] memory a) internal pure returns (bytes32[] memory result) {
-        return _copy(a);
-    }
-
-    function isSorted(bytes32[] memory a) internal pure returns (bool result) {
-        for (uint256 i = 1; i < a.length; ++i) {
-            if (a[i - 1] > a[i]) return false;
-        }
-        return true;
-    }
-
-    function isSortedAndUniquified(bytes32[] memory a) internal pure returns (bool result) {
-        for (uint256 i = 1; i < a.length; ++i) {
-            if (a[i - 1] >= a[i]) return false;
-        }
-        return true;
-    }
-
-    function hasDuplicate(bytes32[] memory a) internal pure returns (bool result) {
-        return _hasDuplicate(a);
     }
 
     /// @dev Removes duplicate elements from a ascendingly sorted memory array.
@@ -207,11 +120,6 @@ library LibSort {
         if (h != 0) index = h - 1;
     }
 
-    /// @dev Returns whether `a` contains `needle`.
-    function inSorted(uint256[] memory a, uint256 needle) internal pure returns (bool found) {
-        (found,) = searchSorted(a, needle);
-    }
-
     /// @dev Returns whether `a` contains `needle`, and the index of `needle`.
     /// `index` precedence: equal to > nearest before > nearest after.
     function searchSorted(int256[] memory a, int256 needle)
@@ -238,11 +146,6 @@ library LibSort {
         if (h != 0) index = h - 1;
     }
 
-    /// @dev Returns whether `a` contains `needle`.
-    function inSorted(int256[] memory a, int256 needle) internal pure returns (bool found) {
-        (found,) = searchSorted(a, needle);
-    }
-
     /// @dev Returns whether `a` contains `needle`, and the index of `needle`.
     /// `index` precedence: equal to > nearest before > nearest after.
     function searchSorted(address[] memory a, address needle)
@@ -267,11 +170,6 @@ library LibSort {
             }
         }
         if (h != 0) index = h - 1;
-    }
-
-    /// @dev Returns whether `a` contains `needle`.
-    function inSorted(address[] memory a, address needle) internal pure returns (bool found) {
-        (found,) = searchSorted(a, needle);
     }
 
     /// @dev Returns whether `a` contains `needle`, and the index of `needle`.
@@ -301,8 +199,143 @@ library LibSort {
     }
 
     /// @dev Returns whether `a` contains `needle`.
+    function inSorted(uint256[] memory a, uint256 needle) internal pure returns (bool found) {
+        (found,) = searchSorted(a, needle);
+    }
+
+    /// @dev Returns whether `a` contains `needle`.
+    function inSorted(int256[] memory a, int256 needle) internal pure returns (bool found) {
+        (found,) = searchSorted(a, needle);
+    }
+
+    /// @dev Returns whether `a` contains `needle`.
+    function inSorted(address[] memory a, address needle) internal pure returns (bool found) {
+        (found,) = searchSorted(a, needle);
+    }
+
+    /// @dev Returns whether `a` contains `needle`.
     function inSorted(bytes32[] memory a, bytes32 needle) internal pure returns (bool found) {
         (found,) = searchSorted(a, needle);
+    }
+
+    /// @dev Reverses the array in-place.
+    function reverse(uint256[] memory a) internal pure {
+        if (a.length < 2) return;
+        for (uint256 i; i < a.length / 2; ++i) {
+            uint256 j = a.length - 1 - i;
+            (a[i], a[j]) = (a[j], a[i]);
+        }
+    }
+
+    /// @dev Reverses the array in-place.
+    function reverse(int256[] memory a) internal pure {
+        if (a.length < 2) return;
+        for (uint256 i; i < a.length / 2; ++i) {
+            uint256 j = a.length - 1 - i;
+            (a[i], a[j]) = (a[j], a[i]);
+        }
+    }
+
+    /// @dev Reverses the array in-place.
+    function reverse(address[] memory a) internal pure {
+        if (a.length < 2) return;
+        for (uint256 i; i < a.length / 2; ++i) {
+            uint256 j = a.length - 1 - i;
+            (a[i], a[j]) = (a[j], a[i]);
+        }
+    }
+
+    /// @dev Reverses the array in-place.
+    function reverse(bytes32[] memory a) internal pure {
+        if (a.length < 2) return;
+        for (uint256 i; i < a.length / 2; ++i) {
+            uint256 j = a.length - 1 - i;
+            (a[i], a[j]) = (a[j], a[i]);
+        }
+    }
+
+    /// @dev Returns a copy of the array.
+    function copy(uint256[] memory a) internal pure returns (uint256[] memory result) {
+        return _copy(a);
+    }
+
+    /// @dev Returns a copy of the array.
+    function copy(int256[] memory a) internal pure returns (int256[] memory result) {
+        return _copy(a);
+    }
+
+    /// @dev Returns a copy of the array.
+    function copy(address[] memory a) internal pure returns (address[] memory result) {
+        return _copy(a);
+    }
+
+    /// @dev Returns a copy of the array.
+    function copy(bytes32[] memory a) internal pure returns (bytes32[] memory result) {
+        return _copy(a);
+    }
+
+    /// @dev Returns whether the array is sorted in ascending order.
+    function isSorted(uint256[] memory a) internal pure returns (bool result) {
+        for (uint256 i = 1; i < a.length; ++i) {
+            if (a[i - 1] > a[i]) return false;
+        }
+        return true;
+    }
+
+    /// @dev Returns whether the array is sorted in ascending order.
+    function isSorted(int256[] memory a) internal pure returns (bool result) {
+        for (uint256 i = 1; i < a.length; ++i) {
+            if (a[i - 1] > a[i]) return false;
+        }
+        return true;
+    }
+
+    /// @dev Returns whether the array is sorted in ascending order.
+    function isSorted(address[] memory a) internal pure returns (bool result) {
+        for (uint256 i = 1; i < a.length; ++i) {
+            if (a[i - 1] > a[i]) return false;
+        }
+        return true;
+    }
+
+    /// @dev Returns whether the array is sorted in ascending order.
+    function isSorted(bytes32[] memory a) internal pure returns (bool result) {
+        for (uint256 i = 1; i < a.length; ++i) {
+            if (a[i - 1] > a[i]) return false;
+        }
+        return true;
+    }
+
+    /// @dev Returns whether the array is strictly ascending (sorted and uniquified).
+    function isSortedAndUniquified(uint256[] memory a) internal pure returns (bool result) {
+        for (uint256 i = 1; i < a.length; ++i) {
+            if (a[i - 1] >= a[i]) return false;
+        }
+        return true;
+    }
+
+    /// @dev Returns whether the array is strictly ascending (sorted and uniquified).
+    function isSortedAndUniquified(int256[] memory a) internal pure returns (bool result) {
+        for (uint256 i = 1; i < a.length; ++i) {
+            if (a[i - 1] >= a[i]) return false;
+        }
+        return true;
+    }
+
+    /// @dev Returns whether the array is strictly ascending (sorted and uniquified).
+    function isSortedAndUniquified(address[] memory a) internal pure returns (bool result) {
+        for (uint256 i = 1; i < a.length; ++i) {
+            if (a[i - 1] >= a[i]) return false;
+        }
+        return true;
+    }
+
+    /// @dev Returns whether the array is strictly ascending (sorted and uniquified).
+    function isSortedAndUniquified(bytes32[] memory a) internal pure returns (bool result) {
+        for (uint256 i = 1; i < a.length; ++i) {
+            if (a[i - 1] >= a[i]) return false;
+        }
+        return true;
     }
 
     /// @dev Returns the sorted set difference of `a` and `b`.
@@ -311,6 +344,36 @@ library LibSort {
         internal
         pure
         returns (uint256[] memory c)
+    {
+        c = _difference(a, b);
+    }
+
+    /// @dev Returns the sorted set difference between `a` and `b`.
+    /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
+    function difference(int256[] memory a, int256[] memory b)
+        internal
+        pure
+        returns (int256[] memory c)
+    {
+        c = _difference(a, b);
+    }
+
+    /// @dev Returns the sorted set difference between `a` and `b`.
+    /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
+    function difference(address[] memory a, address[] memory b)
+        internal
+        pure
+        returns (address[] memory c)
+    {
+        c = _difference(a, b);
+    }
+
+    /// @dev Returns the sorted set difference between `a` and `b`.
+    /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
+    function difference(bytes32[] memory a, bytes32[] memory b)
+        internal
+        pure
+        returns (bytes32[] memory c)
     {
         c = _difference(a, b);
     }
@@ -325,26 +388,6 @@ library LibSort {
         c = _intersection(a, b);
     }
 
-    /// @dev Returns the sorted set union of `a` and `b`.
-    /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
-    function union(uint256[] memory a, uint256[] memory b)
-        internal
-        pure
-        returns (uint256[] memory c)
-    {
-        c = _union(a, b);
-    }
-
-    /// @dev Returns the sorted set difference of `a` and `b`.
-    /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
-    function difference(int256[] memory a, int256[] memory b)
-        internal
-        pure
-        returns (int256[] memory c)
-    {
-        c = _difference(a, b);
-    }
-
     /// @dev Returns the sorted set intersection between `a` and `b`.
     /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
     function intersection(int256[] memory a, int256[] memory b)
@@ -355,26 +398,6 @@ library LibSort {
         c = _intersection(a, b);
     }
 
-    /// @dev Returns the sorted set union of `a` and `b`.
-    /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
-    function union(int256[] memory a, int256[] memory b)
-        internal
-        pure
-        returns (int256[] memory c)
-    {
-        c = _union(a, b);
-    }
-
-    /// @dev Returns the sorted set difference of `a` and `b`.
-    /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
-    function difference(address[] memory a, address[] memory b)
-        internal
-        pure
-        returns (address[] memory c)
-    {
-        c = _difference(a, b);
-    }
-
     /// @dev Returns the sorted set intersection between `a` and `b`.
     /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
     function intersection(address[] memory a, address[] memory b)
@@ -383,26 +406,6 @@ library LibSort {
         returns (address[] memory c)
     {
         c = _intersection(a, b);
-    }
-
-    /// @dev Returns the sorted set union of `a` and `b`.
-    /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
-    function union(address[] memory a, address[] memory b)
-        internal
-        pure
-        returns (address[] memory c)
-    {
-        c = _union(a, b);
-    }
-
-    /// @dev Returns the sorted set difference of `a` and `b`.
-    /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
-    function difference(bytes32[] memory a, bytes32[] memory b)
-        internal
-        pure
-        returns (bytes32[] memory c)
-    {
-        c = _difference(a, b);
     }
 
     /// @dev Returns the sorted set intersection between `a` and `b`.
@@ -416,6 +419,32 @@ library LibSort {
     }
 
     /// @dev Returns the sorted set union of `a` and `b`.
+    /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
+    function union(uint256[] memory a, uint256[] memory b)
+        internal
+        pure
+        returns (uint256[] memory c)
+    {
+        c = _union(a, b);
+    }
+
+    /// @dev Returns the sorted set union of `a` and `b`.
+    /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
+    function union(int256[] memory a, int256[] memory b) internal pure returns (int256[] memory c) {
+        c = _union(a, b);
+    }
+
+    /// @dev Returns the sorted set union between `a` and `b`.
+    /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
+    function union(address[] memory a, address[] memory b)
+        internal
+        pure
+        returns (address[] memory c)
+    {
+        c = _union(a, b);
+    }
+
+    /// @dev Returns the sorted set union between `a` and `b`.
     /// Note: Behaviour is undefined if inputs are not sorted and uniquified.
     function union(bytes32[] memory a, bytes32[] memory b)
         internal
@@ -452,6 +481,30 @@ library LibSort {
     function groupSum(int256[] memory keys, uint256[] memory values) internal pure {
         _groupSum(keys, values);
     }
+
+    /// @dev Returns if `a` has any duplicate. Does NOT mutate `a`. `O(n)`.
+    function hasDuplicate(uint256[] memory a) internal pure returns (bool result) {
+        return _hasDuplicate(a);
+    }
+
+    /// @dev Returns if `a` has any duplicate. Does NOT mutate `a`. `O(n)`.
+    function hasDuplicate(address[] memory a) internal pure returns (bool result) {
+        return _hasDuplicate(a);
+    }
+
+    /// @dev Returns if `a` has any duplicate. Does NOT mutate `a`. `O(n)`.
+    function hasDuplicate(bytes32[] memory a) internal pure returns (bool result) {
+        return _hasDuplicate(a);
+    }
+
+    /// @dev Returns if `a` has any duplicate. Does NOT mutate `a`. `O(n)`.
+    function hasDuplicate(int256[] memory a) internal pure returns (bool result) {
+        return _hasDuplicate(a);
+    }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      PRIVATE HELPERS                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     /// @dev Sorts `a[low:high]`: median-of-three Hoare partitions down to twelve
     /// elements, then insertion sort. The smaller part recurses and the larger
@@ -569,8 +622,7 @@ library LibSort {
         uint256 mask = capacity - 1;
         for (uint256 i = a.length; i != 0;) {
             --i;
-            uint256 slot = mulmod(a[i], 0x100000000000000000000000000000051, ~uint256(0xbc))
-                & mask;
+            uint256 slot = mulmod(a[i], 0x100000000000000000000000000000051, ~uint256(0xbc)) & mask;
             while (seen[slot] != 0) {
                 if (a[seen[slot] - 1] == a[i]) return true;
                 slot = (slot + 1) & mask;
@@ -620,7 +672,11 @@ library LibSort {
     }
 
     /// @dev The sorted union of sorted, duplicate-free `a` and `b`.
-    function _union(uint256[] memory a, uint256[] memory b) private pure returns (uint256[] memory c) {
+    function _union(uint256[] memory a, uint256[] memory b)
+        private
+        pure
+        returns (uint256[] memory c)
+    {
         c = new uint256[](a.length + b.length);
         uint256 i;
         uint256 j;
@@ -646,7 +702,11 @@ library LibSort {
     }
 
     /// @dev The sorted intersection of sorted, duplicate-free `a` and `b`.
-    function _intersection(uint256[] memory a, uint256[] memory b) private pure returns (uint256[] memory c) {
+    function _intersection(uint256[] memory a, uint256[] memory b)
+        private
+        pure
+        returns (uint256[] memory c)
+    {
         c = new uint256[](a.length < b.length ? a.length : b.length);
         uint256 i;
         uint256 j;
@@ -668,7 +728,11 @@ library LibSort {
     }
 
     /// @dev The sorted difference of sorted, duplicate-free `a` and `b`.
-    function _difference(uint256[] memory a, uint256[] memory b) private pure returns (uint256[] memory c) {
+    function _difference(uint256[] memory a, uint256[] memory b)
+        private
+        pure
+        returns (uint256[] memory c)
+    {
         c = new uint256[](a.length);
         uint256 i;
         uint256 j;
@@ -848,8 +912,8 @@ library LibSort {
         uint256 mask = capacity - 1;
         for (uint256 i = a.length; i != 0;) {
             --i;
-            uint256 slot = mulmod(uint256(a[i]), 0x100000000000000000000000000000051, ~uint256(0xbc))
-                & mask;
+            uint256 slot =
+                mulmod(uint256(a[i]), 0x100000000000000000000000000000051, ~uint256(0xbc)) & mask;
             while (seen[slot] != 0) {
                 if (a[seen[slot] - 1] == a[i]) return true;
                 slot = (slot + 1) & mask;
@@ -925,7 +989,11 @@ library LibSort {
     }
 
     /// @dev The sorted intersection of sorted, duplicate-free `a` and `b`.
-    function _intersection(int256[] memory a, int256[] memory b) private pure returns (int256[] memory c) {
+    function _intersection(int256[] memory a, int256[] memory b)
+        private
+        pure
+        returns (int256[] memory c)
+    {
         c = new int256[](a.length < b.length ? a.length : b.length);
         uint256 i;
         uint256 j;
@@ -947,7 +1015,11 @@ library LibSort {
     }
 
     /// @dev The sorted difference of sorted, duplicate-free `a` and `b`.
-    function _difference(int256[] memory a, int256[] memory b) private pure returns (int256[] memory c) {
+    function _difference(int256[] memory a, int256[] memory b)
+        private
+        pure
+        returns (int256[] memory c)
+    {
         c = new int256[](a.length);
         uint256 i;
         uint256 j;
@@ -1125,8 +1197,9 @@ library LibSort {
         uint256 mask = capacity - 1;
         for (uint256 i = a.length; i != 0;) {
             --i;
-            uint256 slot = mulmod(uint256(uint160(a[i])), 0x100000000000000000000000000000051, ~uint256(0xbc))
-                & mask;
+            uint256 slot = mulmod(
+                uint256(uint160(a[i])), 0x100000000000000000000000000000051, ~uint256(0xbc)
+            ) & mask;
             while (seen[slot] != 0) {
                 if (a[seen[slot] - 1] == a[i]) return true;
                 slot = (slot + 1) & mask;
@@ -1162,7 +1235,11 @@ library LibSort {
     }
 
     /// @dev The sorted union of sorted, duplicate-free `a` and `b`.
-    function _union(address[] memory a, address[] memory b) private pure returns (address[] memory c) {
+    function _union(address[] memory a, address[] memory b)
+        private
+        pure
+        returns (address[] memory c)
+    {
         c = new address[](a.length + b.length);
         uint256 i;
         uint256 j;
@@ -1188,7 +1265,11 @@ library LibSort {
     }
 
     /// @dev The sorted intersection of sorted, duplicate-free `a` and `b`.
-    function _intersection(address[] memory a, address[] memory b) private pure returns (address[] memory c) {
+    function _intersection(address[] memory a, address[] memory b)
+        private
+        pure
+        returns (address[] memory c)
+    {
         c = new address[](a.length < b.length ? a.length : b.length);
         uint256 i;
         uint256 j;
@@ -1210,7 +1291,11 @@ library LibSort {
     }
 
     /// @dev The sorted difference of sorted, duplicate-free `a` and `b`.
-    function _difference(address[] memory a, address[] memory b) private pure returns (address[] memory c) {
+    function _difference(address[] memory a, address[] memory b)
+        private
+        pure
+        returns (address[] memory c)
+    {
         c = new address[](a.length);
         uint256 i;
         uint256 j;
@@ -1388,8 +1473,8 @@ library LibSort {
         uint256 mask = capacity - 1;
         for (uint256 i = a.length; i != 0;) {
             --i;
-            uint256 slot = mulmod(uint256(a[i]), 0x100000000000000000000000000000051, ~uint256(0xbc))
-                & mask;
+            uint256 slot =
+                mulmod(uint256(a[i]), 0x100000000000000000000000000000051, ~uint256(0xbc)) & mask;
             while (seen[slot] != 0) {
                 if (a[seen[slot] - 1] == a[i]) return true;
                 slot = (slot + 1) & mask;
@@ -1439,7 +1524,11 @@ library LibSort {
     }
 
     /// @dev The sorted union of sorted, duplicate-free `a` and `b`.
-    function _union(bytes32[] memory a, bytes32[] memory b) private pure returns (bytes32[] memory c) {
+    function _union(bytes32[] memory a, bytes32[] memory b)
+        private
+        pure
+        returns (bytes32[] memory c)
+    {
         c = new bytes32[](a.length + b.length);
         uint256 i;
         uint256 j;
@@ -1465,7 +1554,11 @@ library LibSort {
     }
 
     /// @dev The sorted intersection of sorted, duplicate-free `a` and `b`.
-    function _intersection(bytes32[] memory a, bytes32[] memory b) private pure returns (bytes32[] memory c) {
+    function _intersection(bytes32[] memory a, bytes32[] memory b)
+        private
+        pure
+        returns (bytes32[] memory c)
+    {
         c = new bytes32[](a.length < b.length ? a.length : b.length);
         uint256 i;
         uint256 j;
@@ -1487,7 +1580,11 @@ library LibSort {
     }
 
     /// @dev The sorted difference of sorted, duplicate-free `a` and `b`.
-    function _difference(bytes32[] memory a, bytes32[] memory b) private pure returns (bytes32[] memory c) {
+    function _difference(bytes32[] memory a, bytes32[] memory b)
+        private
+        pure
+        returns (bytes32[] memory c)
+    {
         c = new bytes32[](a.length);
         uint256 i;
         uint256 j;

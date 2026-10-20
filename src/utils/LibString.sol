@@ -3,13 +3,21 @@ pragma solidity ^0.8.20;
 
 import {LibBytes} from "./LibBytes.sol";
 
-/// @notice Checked Solidity replacements for the LibString APIs.
-/// @dev As in the original, the byte operations are LibBytes', and
-/// `StringStorage` wraps a `BytesStorage`, whose storage operations keep the
-/// original's packed layout. `bytesStorage` and `directReturn` keep assembly
-/// in trusted declarations: Solidity reads a storage struct's member only in
-/// a `view` function, and a `return` statement leaves only the function it is
-/// in.
+/// @notice Library for converting numbers into strings and other string operations.
+/// @author Solady (https://github.com/vectorized/solady/blob/main/src/utils/LibString.sol)
+/// @author Modified from Solmate (https://github.com/transmissions11/solmate/blob/main/src/utils/LibString.sol)
+///
+/// @dev Note:
+/// For performance and bytecode compactness, most of the string operations are restricted to
+/// byte strings (7-bit ASCII), except where otherwise specified.
+/// Usage of byte string operations on charsets with runes spanning two or more bytes
+/// can lead to undefined behavior.
+///
+/// The checked port keeps upstream's split: the byte operations are LibBytes', and the string
+/// storage operations go through `bytesStorage`, which views a `StringStorage` as a
+/// `BytesStorage` at the same slot with upstream's packed layout. `bytesStorage` and
+/// `directReturn` stay trusted assembly: Solidity cannot retype a storage reference, and a
+/// `return` statement leaves only the function it is in.
 /// @custom:solar-safe memory arithmetic
 library LibString {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -20,7 +28,7 @@ library LibString {
     /// Uses less gas and bytecode than Solidity's native string storage. It's meta af.
     /// Packs length with the first 31 bytes if <255 bytes, so it’s mad tight.
     struct StringStorage {
-        LibBytes.BytesStorage _spacer;
+        bytes32 _spacer;
     }
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -76,30 +84,41 @@ library LibString {
     /// @dev Nibble-spreading masks, one per halving of the packing.
     uint256 private constant MASK_64 =
         0x0000000000000000ffffffffffffffff0000000000000000ffffffffffffffff;
+
     uint256 private constant MASK_32 =
         0x00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff;
+
     uint256 private constant MASK_16 =
         0x0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff;
+
     uint256 private constant MASK_8 =
         0x00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff;
+
     uint256 private constant MASK_4 =
         0x0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f;
 
     /// @dev One copy of the value in every byte.
     uint256 private constant SPREAD_1 =
         0x0101010101010101010101010101010101010101010101010101010101010101;
+
     uint256 private constant SPREAD_5 =
         0x0505050505050505050505050505050505050505050505050505050505050505;
+
     uint256 private constant SPREAD_6 =
         0x0606060606060606060606060606060606060606060606060606060606060606;
+
     uint256 private constant SPREAD_ASCII_0 =
         0x3030303030303030303030303030303030303030303030303030303030303030;
+
     uint256 private constant SPREAD_1F =
         0x1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f;
+
     uint256 private constant SPREAD_20 =
         0x2020202020202020202020202020202020202020202020202020202020202020;
+
     uint256 private constant LANES_7F =
         0x7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f;
+
     uint256 private constant LANES_01 =
         0x0101010101010101010101010101010101010101010101010101010101010101;
 
@@ -122,12 +141,12 @@ library LibString {
 
     /// @dev Sets the value of the string storage `$` to `s`.
     function set(StringStorage storage $, string memory s) internal {
-        LibBytes.set($._spacer, bytes(s));
+        LibBytes.set(bytesStorage($), bytes(s));
     }
 
     /// @dev Sets the value of the string storage `$` to `s`.
     function setCalldata(StringStorage storage $, string calldata s) internal {
-        LibBytes.setCalldata($._spacer, bytes(s));
+        LibBytes.setCalldata(bytesStorage($), bytes(s));
     }
 
     /// @dev Sets the value of the string storage `$` to the empty string.
@@ -137,27 +156,26 @@ library LibString {
 
     /// @dev Returns whether the value stored is `$` is the empty string "".
     function isEmpty(StringStorage storage $) internal view returns (bool) {
-        return LibBytes.isEmpty($._spacer);
+        return uint256($._spacer) & 0xff == uint256(0);
     }
 
     /// @dev Returns the length of the value stored in `$`.
     function length(StringStorage storage $) internal view returns (uint256) {
-        return LibBytes.length($._spacer);
+        return LibBytes.length(bytesStorage($));
     }
 
     /// @dev Returns the value stored in `$`.
     function get(StringStorage storage $) internal view returns (string memory) {
-        return string(LibBytes.get($._spacer));
+        return string(LibBytes.get(bytesStorage($)));
     }
 
     /// @dev Returns the uint8 at index `i`. If out-of-bounds, returns 0.
     function uint8At(StringStorage storage $, uint256 i) internal view returns (uint8) {
-        return LibBytes.uint8At($._spacer, i);
+        return LibBytes.uint8At(bytesStorage($), i);
     }
 
     /// @dev Helper to cast `$` to a `BytesStorage`.
-    /// Solidity reads a struct member only in a view, so this keeps the
-    /// upstream assembly.
+    /// Solidity cannot retype a storage reference, so this keeps the upstream assembly.
     /// @custom:solar-trusted
     function bytesStorage(StringStorage storage $)
         internal
@@ -513,14 +531,21 @@ library LibString {
         if (s[0] == 0) return "";
         bytes32 word;
         uint256 length;
-        if (s[1] == 0) (word, length) = (s & bytes32(bytes1(0xff)), 1);
-        else if (s[2] == 0) (word, length) = (s & bytes32(bytes2(0xffff)), 2);
-        else if (s[3] == 0) (word, length) = (s & bytes32(bytes3(0xffffff)), 3);
-        else if (s[4] == 0) (word, length) = (s & bytes32(bytes4(0xffffffff)), 4);
-        else if (s[5] == 0) (word, length) = (s & bytes32(bytes5(0xffffffffff)), 5);
-        else if (s[6] == 0) (word, length) = (s & bytes32(bytes6(0xffffffffffff)), 6);
-        else if (s[7] == 0) (word, length) = (s & bytes32(bytes7(0xffffffffffffff)), 7);
-        else {
+        if (s[1] == 0) {
+            (word, length) = (s & bytes32(bytes1(0xff)), 1);
+        } else if (s[2] == 0) {
+            (word, length) = (s & bytes32(bytes2(0xffff)), 2);
+        } else if (s[3] == 0) {
+            (word, length) = (s & bytes32(bytes3(0xffffff)), 3);
+        } else if (s[4] == 0) {
+            (word, length) = (s & bytes32(bytes4(0xffffffff)), 4);
+        } else if (s[5] == 0) {
+            (word, length) = (s & bytes32(bytes5(0xffffffffff)), 5);
+        } else if (s[6] == 0) {
+            (word, length) = (s & bytes32(bytes6(0xffffffffffff)), 6);
+        } else if (s[7] == 0) {
+            (word, length) = (s & bytes32(bytes7(0xffffffffffffff)), 7);
+        } else {
             uint256 tail = _nullTail(s);
             (word, length) = (s & bytes32(_smallStringMask(tail)), _smallStringLength(tail));
         }
@@ -1242,11 +1267,7 @@ library LibString {
 
     /// @dev The 16 bytes of `b` at `offset`.
     /// @custom:solar-inline
-    function _readBytes16(bytes memory b, uint256 offset)
-        private
-        pure
-        returns (bytes16 result)
-    {
+    function _readBytes16(bytes memory b, uint256 offset) private pure returns (bytes16 result) {
         for (uint256 k; k < 16; ++k) {
             result |= bytes16(b[offset + k]) >> (8 * k);
         }
@@ -1254,11 +1275,7 @@ library LibString {
 
     /// @dev The 32 bytes of `b` at `offset`.
     /// @custom:solar-inline
-    function _readBytes32(bytes memory b, uint256 offset)
-        private
-        pure
-        returns (bytes32 result)
-    {
+    function _readBytes32(bytes memory b, uint256 offset) private pure returns (bytes32 result) {
         for (uint256 k; k < 32; ++k) {
             result |= bytes32(b[offset + k]) >> (8 * k);
         }

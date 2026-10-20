@@ -1,33 +1,40 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {ECDSA} from "./ECDSA.sol";
-
-/// @notice Checked Solidity implementation of the pinned Solady SignatureCheckerLib API.
-/// @dev A signer without code is checked with the `ecrecover` builtin, for
-/// 65-byte and EIP-2098 64-byte signatures alike; a signer with code with
-/// ERC1271. The ERC1271 call sends the calldata the assembly builds, unpadded,
-/// and reads only the answer's length and first word, so a compiler that
-/// bounds the copy of return data copies one word, as the assembly does.
+/// @notice Signature verification helper that supports both ECDSA signatures from EOAs
+/// and ERC1271 signatures from smart contract wallets like Argent and Gnosis safe.
+/// @author Solady (https://github.com/vectorized/solady/blob/main/src/utils/SignatureCheckerLib.sol)
+/// @author Modified from OpenZeppelin (https://github.com/OpenZeppelin/openzeppelin-contracts/blob/master/contracts/utils/cryptography/SignatureChecker.sol)
 ///
-/// An ERC6492 signature ends with the 32-byte magic suffix. Its inner signature
-/// is the third field of the wrapped encoding; one whose range lies past the
-/// signature counts as rejected by ERC1271, where the assembly reads whatever
-/// memory follows. Only the length of a verifier's answer is read.
+/// @dev Note:
+/// - The signature checking functions use the ecrecover precompile (0x1).
+/// - The `bytes memory signature` variants use the identity precompile (0x4)
+///   to copy memory internally.
+/// - Unlike ECDSA signatures, contract signatures are revocable.
+/// - As of Solady version 0.0.134, all `bytes signature` variants accept both
+///   regular 65-byte `(r, s, v)` and EIP-2098 `(r, vs)` short form signatures.
+///   See: https://eips.ethereum.org/EIPS/eip-2098
+///   This is for calldata efficiency on smart accounts prevalent on L2s.
+///
+/// WARNING! Do NOT use signatures as unique identifiers:
+/// - Use a nonce in the digest to prevent replay attacks on the same contract.
+/// - Use EIP-712 for the digest to prevent replay attacks across different chains and contracts.
+///   EIP-712 also enables readable signing of typed data for better user safety.
+/// This implementation does NOT check if a signature is non-malleable.
+///
+/// The checked port checks a signer without code with the `ecrecover` builtin, for 65-byte and
+/// EIP-2098 64-byte signatures alike, and a signer with code with ERC1271. The ERC1271 call
+/// sends the calldata the assembly builds, unpadded, and reads only the answer's length and
+/// first word, so a compiler that bounds the copy of return data copies one word, as the
+/// assembly does. An ERC6492 signature ends with the 32-byte magic suffix. Its inner signature
+/// is the third field of the wrapped encoding; one whose range lies past the signature counts
+/// as rejected by ERC1271, where the assembly reads whatever memory follows. Only the length of
+/// a verifier's answer is read.
 /// @custom:solar-safe memory arithmetic
 library SignatureCheckerLib {
-    /// @dev `bytes4(keccak256("isValidSignature(bytes32,bytes)"))`.
-    bytes4 private constant _ERC1271_MAGIC = 0x1626ba7e;
-
-    /// @dev The suffix of an ERC6492 signature.
-    bytes32 private constant _ERC6492_DETECTION_SUFFIX =
-        0x6492649264926492649264926492649264926492649264926492649264926492;
-
-    /// @dev The non-reverting ERC6492 verifier.
-    address private constant _VERIFIER = 0x0000bc370E4DC924F427d84e2f4B9Ec81626ba7E;
-
-    /// @dev The reverting ERC6492 verifier.
-    address private constant _REVERTING_VERIFIER = 0x00007bd799e4A591FeA53f8A8a3E9f931626Ba7e;
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*               SIGNATURE CHECKING OPERATIONS                */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     /// @dev Returns whether `signature` is valid for `signer` and `hash`.
     /// If `signer.code.length == 0`, then validate with `ecrecover`, else
@@ -52,7 +59,7 @@ library SignatureCheckerLib {
     {
         if (signer == address(0)) return isValid;
         if (signer.code.length == 0) {
-            address recovered = ECDSA.tryRecoverCalldata(hash, signature);
+            address recovered = _tryRecoverCalldata(hash, signature);
             return recovered != address(0) && recovered == signer;
         }
         return isValidERC1271SignatureNowCalldata(signer, hash, signature);
@@ -68,7 +75,7 @@ library SignatureCheckerLib {
     {
         if (signer == address(0)) return isValid;
         if (signer.code.length == 0) {
-            address recovered = ECDSA.tryRecover(hash, r, vs);
+            address recovered = _tryRecover(hash, r, vs);
             return recovered != address(0) && recovered == signer;
         }
         return isValidERC1271SignatureNow(signer, hash, r, vs);
@@ -89,6 +96,10 @@ library SignatureCheckerLib {
         }
         return isValidERC1271SignatureNow(signer, hash, v, r, s);
     }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                     ERC1271 OPERATIONS                     */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     // Note: These ERC1271 operations do NOT have an ECDSA fallback.
 
@@ -149,6 +160,10 @@ library SignatureCheckerLib {
         );
     }
 
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                     ERC6492 OPERATIONS                     */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
     // Note: These ERC6492 operations now include an ECDSA fallback at the very end.
     // The calldata variants are excluded for brevity.
 
@@ -194,8 +209,9 @@ library SignatureCheckerLib {
         if (_isERC6492(signature)) {
             if (!noCode && _innerERC1271(signer, hash, signature)) return true;
             // The reverting verifier always reverts, with the result as its answer.
-            (bool succeeded, bytes memory answer) =
-                _REVERTING_VERIFIER.call(abi.encodePacked(uint256(uint160(signer)), hash, signature));
+            (bool succeeded, bytes memory answer) = _REVERTING_VERIFIER.call(
+                abi.encodePacked(uint256(uint160(signer)), hash, signature)
+            );
             isValid = answer.length > (succeeded ? 1 : 0);
         } else if (!noCode) {
             isValid = isValidERC1271SignatureNow(signer, hash, signature);
@@ -203,12 +219,16 @@ library SignatureCheckerLib {
         if (noCode && !isValid) isValid = _recovers(signer, hash, signature);
     }
 
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                     HASHING OPERATIONS                     */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
     /// @dev Returns an Ethereum Signed Message, created from a `hash`.
     /// This produces a hash corresponding to the one signed with the
     /// [`eth_sign`](https://eth.wiki/json-rpc/API#eth_sign)
     /// JSON-RPC method as part of EIP-191.
     function toEthSignedMessageHash(bytes32 hash) internal pure returns (bytes32 result) {
-        return ECDSA.toEthSignedMessageHash(hash);
+        return keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", hash));
     }
 
     /// @dev Returns an Ethereum Signed Message, created from `s`.
@@ -217,13 +237,62 @@ library SignatureCheckerLib {
     /// JSON-RPC method as part of EIP-191.
     /// Note: Supports lengths of `s` up to 999999 bytes.
     function toEthSignedMessageHash(bytes memory s) internal pure returns (bytes32 result) {
-        return ECDSA.toEthSignedMessageHash(s);
+        // The header is the prefix and the decimal length of `s`. Up to six
+        // digits it fits in a word, spelled as an integer of one byte per
+        // digit, so the header is a fixed prefix that this compiler writes over
+        // the length word of `s` and hashes with it, as the assembly does.
+        uint256 n = s.length;
+        if (n < 10) {
+            return keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n", uint8(48 + n), s));
+        }
+        if (n < 100) {
+            return
+                keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n", uint16(_digits(n)), s));
+        }
+        if (n < 1000) {
+            return
+                keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n", uint24(_digits(n)), s));
+        }
+        if (n < 10000) {
+            return
+                keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n", uint32(_digits(n)), s));
+        }
+        if (n < 100000) {
+            return
+                keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n", uint40(_digits(n)), s));
+        }
+        if (n < 1000000) {
+            return
+                keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n", uint48(_digits(n)), s));
+        }
+        revert();
     }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                   EMPTY CALLDATA HELPERS                   */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     /// @dev Returns an empty calldata bytes.
     function emptySignature() internal pure returns (bytes calldata signature) {
         return msg.data[0:0];
     }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      PRIVATE HELPERS                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev `bytes4(keccak256("isValidSignature(bytes32,bytes)"))`.
+    bytes4 private constant _ERC1271_MAGIC = 0x1626ba7e;
+
+    /// @dev The suffix of an ERC6492 signature.
+    bytes32 private constant _ERC6492_DETECTION_SUFFIX =
+        0x6492649264926492649264926492649264926492649264926492649264926492;
+
+    /// @dev The non-reverting ERC6492 verifier.
+    address private constant _VERIFIER = 0x0000bc370E4DC924F427d84e2f4B9Ec81626ba7E;
+
+    /// @dev The reverting ERC6492 verifier.
+    address private constant _REVERTING_VERIFIER = 0x00007bd799e4A591FeA53f8A8a3E9f931626Ba7e;
 
     /// @dev Whether `signature` recovers to `signer`, which a failed recovery never does.
     function _recovers(address signer, bytes32 hash, bytes memory signature)
@@ -231,16 +300,62 @@ library SignatureCheckerLib {
         view
         returns (bool)
     {
-        address recovered = ECDSA.tryRecover(hash, signature);
+        address recovered = _tryRecover(hash, signature);
         return recovered != address(0) && recovered == signer;
+    }
+
+    /// @dev The signer of `hash` under the 65-byte or EIP-2098 64-byte `signature`,
+    /// or zero if recovery fails.
+    function _tryRecover(bytes32 hash, bytes memory signature) private view returns (address) {
+        uint256 length = signature.length;
+        if (length == 64) {
+            return _tryRecover(hash, _readBytes32(signature, 0), _readBytes32(signature, 32));
+        }
+        if (length == 65) {
+            return ecrecover(
+                hash, uint8(signature[64]), _readBytes32(signature, 0), _readBytes32(signature, 32)
+            );
+        }
+        return address(0);
+    }
+
+    /// @dev `_tryRecover` of a calldata `signature`.
+    function _tryRecoverCalldata(bytes32 hash, bytes calldata signature)
+        private
+        view
+        returns (address)
+    {
+        if (signature.length == 64) {
+            return _tryRecover(hash, bytes32(signature[0:32]), bytes32(signature[32:64]));
+        }
+        if (signature.length == 65) {
+            return ecrecover(
+                hash, uint8(signature[64]), bytes32(signature[0:32]), bytes32(signature[32:64])
+            );
+        }
+        return address(0);
+    }
+
+    /// @dev The signer of `hash` under the EIP-2098 short signature (`r`, `vs`), or zero.
+    function _tryRecover(bytes32 hash, bytes32 r, bytes32 vs) private view returns (address) {
+        return
+            ecrecover(hash, uint8(27 + (uint256(vs) >> 255)), r, bytes32((uint256(vs) << 1) >> 1));
+    }
+
+    /// @dev The decimal digits of `n`, one byte each, the last in the lowest byte.
+    function _digits(uint256 n) private pure returns (uint256 digits) {
+        for (uint256 shift;; shift += 8) {
+            digits |= (48 + n % 10) << shift;
+            n /= 10;
+            if (n == 0) return digits;
+        }
     }
 
     /// @dev Whether `signer` answers the ERC1271 call `payload` with at least a
     /// word, the first of which is the magic value.
     function _erc1271(address signer, bytes memory payload) private view returns (bool) {
         (bool success, bytes memory answer) = signer.staticcall(payload);
-        return success && answer.length >= 32
-            && _readBytes32(answer, 0) == bytes32(_ERC1271_MAGIC);
+        return success && answer.length >= 32 && _readBytes32(answer, 0) == bytes32(_ERC1271_MAGIC);
     }
 
     /// @dev Whether `signature` ends with the ERC6492 magic suffix.
@@ -276,11 +391,7 @@ library SignatureCheckerLib {
 
     /// @dev The 32 bytes of `b` at `offset`.
     /// @custom:solar-inline
-    function _readBytes32(bytes memory b, uint256 offset)
-        private
-        pure
-        returns (bytes32 result)
-    {
+    function _readBytes32(bytes memory b, uint256 offset) private pure returns (bytes32 result) {
         for (uint256 k; k < 32; ++k) {
             result |= bytes32(b[offset + k]) >> (8 * k);
         }

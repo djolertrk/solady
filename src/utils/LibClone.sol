@@ -1,23 +1,88 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @notice Checked Solidity implementation of the pinned Solady LibClone API:
-/// minimal proxies (plain, PUSH0 and with immutable arguments), minimal ERC1967
-/// and ERC1967I proxies, ERC1967 and ERC1967I beacon proxies, each with and
-/// without immutable arguments, and the ERC1967 bootstrap.
-/// @dev Each proxy's creation code is the bytes the assembly writes, assembled
-/// with `abi.encodePacked` around its implementation or beacon, and deployed
-/// with the trusted `_createDeploy`, which fails with the same
-/// `DeploymentFailed()`. A proxy's arguments follow its runtime code and are
-/// read back with the trusted `_codeRead`, checked against the code's size. Three deliberate differences from the
-/// assembly: arguments too long for the two-byte runtime size fail with
-/// `DeploymentFailed()` where the assembly runs out of gas outside a
-/// deployment; reading the arguments of an account whose code is shorter than
-/// the proxy's fails with `Panic(0x11)` instead of running out of gas; and
-/// `argLoad` reads zeros past the end of `args`, where the assembly reads
-/// whatever memory follows, which the `argsOn` functions leave zeroed.
+/// @notice Minimal proxy library.
+/// @author Solady (https://github.com/vectorized/solady/blob/main/src/utils/LibClone.sol)
+/// @author Minimal proxy by 0age (https://github.com/0age)
+/// @author Clones with immutable args by wighawag, zefram.eth, Saw-mon & Natalie
+/// (https://github.com/Saw-mon-and-Natalie/clones-with-immutable-args)
+/// @author Minimal ERC1967 proxy by jtriley-eth (https://github.com/jtriley-eth/minimum-viable-proxy)
+///
+/// @dev Minimal proxy:
+/// Although the sw0nt pattern saves 5 gas over the ERC1167 pattern during runtime,
+/// it is not supported out-of-the-box on Etherscan. Hence, we choose to use the 0age pattern,
+/// which saves 4 gas over the ERC1167 pattern during runtime, and has the smallest bytecode.
+/// - Automatically verified on Etherscan.
+///
+/// @dev Minimal proxy (PUSH0 variant):
+/// This is a new minimal proxy that uses the PUSH0 opcode introduced during Shanghai.
+/// It is optimized first for minimal runtime gas, then for minimal bytecode.
+/// The PUSH0 clone functions are intentionally postfixed with a jarring "_PUSH0" as
+/// many EVM chains may not support the PUSH0 opcode in the early months after Shanghai.
+/// Please use with caution.
+/// - Automatically verified on Etherscan.
+///
+/// @dev Clones with immutable args (CWIA):
+/// The implementation of CWIA here does NOT append the immutable args into the calldata
+/// passed into delegatecall. It is simply an ERC1167 minimal proxy with the immutable arguments
+/// appended to the back of the runtime bytecode.
+/// - Uses the identity precompile (0x4) to copy args during deployment.
+///
+/// @dev Minimal ERC1967 proxy:
+/// A minimal ERC1967 proxy, intended to be upgraded with UUPS.
+/// This is NOT the same as ERC1967Factory's transparent proxy, which includes admin logic.
+/// - Automatically verified on Etherscan.
+///
+/// @dev Minimal ERC1967 proxy with immutable args:
+/// - Uses the identity precompile (0x4) to copy args during deployment.
+/// - Automatically verified on Etherscan.
+///
+/// @dev ERC1967I proxy:
+/// A variant of the minimal ERC1967 proxy, with a special code path that activates
+/// if `calldatasize() == 1`. This code path skips the delegatecall and directly returns the
+/// `implementation` address. The returned implementation is guaranteed to be valid if the
+/// keccak256 of the proxy's code is equal to `ERC1967I_CODE_HASH`.
+///
+/// @dev ERC1967I proxy with immutable args:
+/// A variant of the minimal ERC1967 proxy, with a special code path that activates
+/// if `calldatasize() == 1`. This code path skips the delegatecall and directly returns the
+/// - Uses the identity precompile (0x4) to copy args during deployment.
+///
+/// @dev Minimal ERC1967 beacon proxy:
+/// A minimal beacon proxy, intended to be upgraded with an upgradable beacon.
+/// - Automatically verified on Etherscan.
+///
+/// @dev Minimal ERC1967 beacon proxy with immutable args:
+/// - Uses the identity precompile (0x4) to copy args during deployment.
+/// - Automatically verified on Etherscan.
+///
+/// @dev ERC1967I beacon proxy:
+/// A variant of the minimal ERC1967 beacon proxy, with a special code path that activates
+/// if `calldatasize() == 1`. This code path skips the delegatecall and directly returns the
+/// `implementation` address. The returned implementation is guaranteed to be valid if the
+/// keccak256 of the proxy's code is equal to `ERC1967I_CODE_HASH`.
+///
+/// @dev ERC1967I proxy with immutable args:
+/// A variant of the minimal ERC1967 beacon proxy, with a special code path that activates
+/// if `calldatasize() == 1`. This code path skips the delegatecall and directly returns the
+/// - Uses the identity precompile (0x4) to copy args during deployment.
+///
+/// The checked port builds each proxy's creation code from the bytes the assembly writes,
+/// assembled with `abi.encodePacked` around its implementation or beacon, and deploys it with
+/// the trusted `_createDeploy`, which fails with the same `DeploymentFailed()`. A proxy's
+/// arguments follow its runtime code and are read back with the trusted `_codeCopyInto`,
+/// checked against the code's size. Three deliberate differences: arguments too long for the
+/// two-byte runtime size fail with `DeploymentFailed()` where the assembly runs out of gas
+/// outside a deployment; reading the arguments of an account whose code is shorter than the
+/// proxy's fails with `Panic(0x11)` instead of running out of gas; and `argLoad` reads zeros
+/// past the end of `args`, where the assembly reads whatever memory follows, which the
+/// `argsOn` functions leave zeroed.
 /// @custom:solar-safe memory arithmetic
 library LibClone {
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                         CONSTANTS                          */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
     /// @dev The keccak256 of deployed code for the clone proxy,
     /// with the implementation set to `address(0)`.
     bytes32 internal constant CLONE_CODE_HASH =
@@ -48,19 +113,6 @@ library LibClone {
     /// @dev The keccak256 of the deployed code for the ERC1967 beacon proxy.
     bytes32 internal constant ERC1967I_BEACON_PROXY_CODE_HASH =
         0xf8c46d2793d5aa984eb827aeaba4b63aedcab80119212fce827309788735519a;
-
-    /// @dev Unable to deploy the clone.
-    error DeploymentFailed();
-
-    /// @dev The salt must start with either the zero address or `by`.
-    error SaltDoesNotStartWith();
-
-    /// @dev The ETH transfer has failed.
-    error ETHTransferFailed();
-
-    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
-    /*                    CREATION CODE PIECES                    */
-    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     /// @dev The creation code of a minimal proxy up to its implementation.
     bytes private constant _CLONE_HEAD = hex"602c3d8160093d39f33d3d3d3d363d3d37363d73";
@@ -125,8 +177,22 @@ library LibClone {
     bytes private constant _ERC1967_ARGS_HEAD = hex"3d8160233d3973";
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                       CUSTOM ERRORS                        */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev Unable to deploy the clone.
+    error DeploymentFailed();
+
+    /// @dev The salt must start with either the zero address or `by`.
+    error SaltDoesNotStartWith();
+
+    /// @dev The ETH transfer has failed.
+    error ETHTransferFailed();
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                  MINIMAL PROXY OPERATIONS                  */
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
     /// @dev Deploys a clone of `implementation`.
     function clone(address implementation) internal returns (address instance) {
         instance = clone(0, implementation);
@@ -168,6 +234,7 @@ library LibClone {
     }
 
     /// @dev Returns the address of the clone of `implementation`, with `salt` by `deployer`.
+    /// Note: The returned result has dirty upper 96 bits. Please clean if used in assembly.
     function predictDeterministicAddress(address implementation, bytes32 salt, address deployer)
         internal
         pure
@@ -179,6 +246,7 @@ library LibClone {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*          MINIMAL PROXY OPERATIONS (PUSH0 VARIANT)          */
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
     /// @dev Deploys a PUSH0 clone of `implementation`.
     function clone_PUSH0(address implementation) internal returns (address instance) {
         instance = clone_PUSH0(0, implementation);
@@ -225,6 +293,7 @@ library LibClone {
     }
 
     /// @dev Returns the address of the PUSH0 clone of `implementation`, with `salt` by `deployer`.
+    /// Note: The returned result has dirty upper 96 bits. Please clean if used in assembly.
     function predictDeterministicAddress_PUSH0(
         address implementation,
         bytes32 salt,
@@ -236,6 +305,7 @@ library LibClone {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*           CLONES WITH IMMUTABLE ARGS OPERATIONS            */
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
     /// @dev Deploys a clone of `implementation` with immutable arguments encoded in `args`.
     function clone(address implementation, bytes memory args) internal returns (address instance) {
         instance = clone(0, implementation, args);
@@ -337,6 +407,7 @@ library LibClone {
 
     /// @dev Returns the address of the clone of
     /// `implementation` using immutable arguments encoded in `args`, with `salt`, by `deployer`.
+    /// Note: The returned result has dirty upper 96 bits. Please clean if used in assembly.
     function predictDeterministicAddress(
         address implementation,
         bytes memory data,
@@ -376,6 +447,10 @@ library LibClone {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*              MINIMAL ERC1967 PROXY OPERATIONS              */
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    // Note: The ERC1967 proxy here is intended to be upgraded with UUPS.
+    // This is NOT the same as ERC1967Factory's transparent proxy, which includes admin logic.
+
     /// @dev Deploys a minimal ERC1967 proxy with `implementation`.
     function deployERC1967(address implementation) internal returns (address instance) {
         instance = deployERC1967(0, implementation);
@@ -444,6 +519,7 @@ library LibClone {
     }
 
     /// @dev Returns the address of the ERC1967 proxy of `implementation`, with `salt` by `deployer`.
+    /// Note: The returned result has dirty upper 96 bits. Please clean if used in assembly.
     function predictDeterministicAddressERC1967(
         address implementation,
         bytes32 salt,
@@ -455,6 +531,7 @@ library LibClone {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*    MINIMAL ERC1967 PROXY WITH IMMUTABLE ARGS OPERATIONS    */
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
     /// @dev Deploys a minimal ERC1967 proxy with `implementation` and `args`.
     function deployERC1967(address implementation, bytes memory args)
         internal
@@ -581,6 +658,7 @@ library LibClone {
     }
 
     /// @dev Returns the address of the ERC1967 proxy of `implementation`, `args`, with `salt` by `deployer`.
+    /// Note: The returned result has dirty upper 96 bits. Please clean if used in assembly.
     function predictDeterministicAddressERC1967(
         address implementation,
         bytes memory args,
@@ -622,6 +700,12 @@ library LibClone {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                 ERC1967I PROXY OPERATIONS                  */
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    // Note: This proxy has a special code path that activates if `calldatasize() == 1`.
+    // This code path skips the delegatecall and directly returns the `implementation` address.
+    // The returned implementation is guaranteed to be valid if the keccak256 of the
+    // proxy's code is equal to `ERC1967I_CODE_HASH`.
+
     /// @dev Deploys a ERC1967I proxy with `implementation`.
     function deployERC1967I(address implementation) internal returns (address instance) {
         instance = deployERC1967I(0, implementation);
@@ -691,6 +775,7 @@ library LibClone {
     }
 
     /// @dev Returns the address of the ERC1967I proxy of `implementation`, with `salt` by `deployer`.
+    /// Note: The returned result has dirty upper 96 bits. Please clean if used in assembly.
     function predictDeterministicAddressERC1967I(
         address implementation,
         bytes32 salt,
@@ -704,6 +789,7 @@ library LibClone {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*       ERC1967I PROXY WITH IMMUTABLE ARGS OPERATIONS        */
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
     /// @dev Deploys a minimal ERC1967I proxy with `implementation` and `args`.
     function deployERC1967I(address implementation, bytes memory args) internal returns (address) {
         return deployERC1967I(0, implementation, args);
@@ -827,6 +913,7 @@ library LibClone {
     }
 
     /// @dev Returns the address of the ERC1967I proxy of `implementation`, `args` with `salt` by `deployer`.
+    /// Note: The returned result has dirty upper 96 bits. Please clean if used in assembly.
     function predictDeterministicAddressERC1967I(
         address implementation,
         bytes memory args,
@@ -868,6 +955,16 @@ library LibClone {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                ERC1967 BOOTSTRAP OPERATIONS                */
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    // A bootstrap is a minimal UUPS implementation that allows an ERC1967 proxy
+    // pointing to it to be upgraded. The ERC1967 proxy can then be deployed to a
+    // deterministic address independent of the implementation:
+    // ```
+    //     address bootstrap = LibClone.erc1967Bootstrap();
+    //     address instance = LibClone.deployDeterministicERC1967(0, bootstrap, salt);
+    //     LibClone.bootstrapERC1967(bootstrap, implementation);
+    // ```
+
     /// @dev Deploys the ERC1967 bootstrap if it has not been deployed.
     function erc1967Bootstrap() internal returns (address) {
         return erc1967Bootstrap(address(this));
@@ -883,8 +980,7 @@ library LibClone {
     /// @dev Replaces the implementation at `instance`.
     function bootstrapERC1967(address instance, address implementation) internal {
         // The bootstrap takes the new implementation as its whole calldata.
-        (bool success,,) =
-            _callBounded(instance, 0, gasleft(), abi.encodePacked(implementation), 0);
+        (bool success,,) = _callBounded(instance, 0, gasleft(), abi.encodePacked(implementation), 0);
         if (!success) revert DeploymentFailed();
     }
 
@@ -938,6 +1034,13 @@ library LibClone {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*          MINIMAL ERC1967 BEACON PROXY OPERATIONS           */
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    // Note: If you use this proxy, you MUST make sure that the beacon is a
+    // valid ERC1967 beacon. This means that the beacon must always return a valid
+    // address upon a staticcall to `implementation()`, given sufficient gas.
+    // For performance, the deployment operations and the proxy assumes that the
+    // beacon is always valid and will NOT validate it.
+
     /// @dev Deploys a minimal ERC1967 beacon proxy.
     function deployERC1967BeaconProxy(address beacon) internal returns (address instance) {
         instance = deployERC1967BeaconProxy(0, beacon);
@@ -1014,6 +1117,7 @@ library LibClone {
     }
 
     /// @dev Returns the address of the ERC1967 beacon proxy, with `salt` by `deployer`.
+    /// Note: The returned result has dirty upper 96 bits. Please clean if used in assembly.
     function predictDeterministicAddressERC1967BeaconProxy(
         address beacon,
         bytes32 salt,
@@ -1027,6 +1131,7 @@ library LibClone {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*    ERC1967 BEACON PROXY WITH IMMUTABLE ARGS OPERATIONS     */
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
     /// @dev Deploys a minimal ERC1967 beacon proxy with `args`.
     function deployERC1967BeaconProxy(address beacon, bytes memory args)
         internal
@@ -1153,6 +1258,7 @@ library LibClone {
     }
 
     /// @dev Returns the address of the ERC1967 beacon proxy with `args`, with `salt` by `deployer`.
+    /// Note: The returned result has dirty upper 96 bits. Please clean if used in assembly.
     function predictDeterministicAddressERC1967BeaconProxy(
         address beacon,
         bytes memory args,
@@ -1194,6 +1300,18 @@ library LibClone {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*              ERC1967I BEACON PROXY OPERATIONS              */
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    // Note: This proxy has a special code path that activates if `calldatasize() == 1`.
+    // This code path skips the delegatecall and directly returns the `implementation` address.
+    // The returned implementation is guaranteed to be valid if the keccak256 of the
+    // proxy's code is equal to `ERC1967_BEACON_PROXY_CODE_HASH`.
+    //
+    // If you use this proxy, you MUST make sure that the beacon is a
+    // valid ERC1967 beacon. This means that the beacon must always return a valid
+    // address upon a staticcall to `implementation()`, given sufficient gas.
+    // For performance, the deployment operations and the proxy assumes that the
+    // beacon is always valid and will NOT validate it.
+
     /// @dev Deploys a ERC1967I beacon proxy.
     function deployERC1967IBeaconProxy(address beacon) internal returns (address instance) {
         instance = deployERC1967IBeaconProxy(0, beacon);
@@ -1270,6 +1388,7 @@ library LibClone {
     }
 
     /// @dev Returns the address of the ERC1967I beacon proxy, with `salt` by `deployer`.
+    /// Note: The returned result has dirty upper 96 bits. Please clean if used in assembly.
     function predictDeterministicAddressERC1967IBeaconProxy(
         address beacon,
         bytes32 salt,
@@ -1283,6 +1402,7 @@ library LibClone {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*    ERC1967I BEACON PROXY WITH IMMUTABLE ARGS OPERATIONS    */
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
     /// @dev Deploys a ERC1967I beacon proxy with `args.
     function deployERC1967IBeaconProxy(address beacon, bytes memory args)
         internal
@@ -1409,6 +1529,7 @@ library LibClone {
     }
 
     /// @dev Returns the address of the ERC1967I beacon proxy, with  `args` and salt` by `deployer`.
+    /// Note: The returned result has dirty upper 96 bits. Please clean if used in assembly.
     function predictDeterministicAddressERC1967IBeaconProxy(
         address beacon,
         bytes memory args,
@@ -1450,6 +1571,7 @@ library LibClone {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                      OTHER OPERATIONS                      */
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
     /// @dev Returns `address(0)` if the implementation address cannot be determined.
     function implementationOf(address instance) internal view returns (address result) {
         // The first 0x57 bytes of the code, and zeros past its end.
@@ -1478,6 +1600,7 @@ library LibClone {
 
     /// @dev Returns the address when a contract with initialization code hash,
     /// `hash`, is deployed with `salt`, by `deployer`.
+    /// Note: The returned result has dirty upper 96 bits. Please clean if used in assembly.
     function predictDeterministicAddress(bytes32 hash, bytes32 salt, address deployer)
         internal
         pure
@@ -1579,8 +1702,6 @@ library LibClone {
         return address(_readBytes20(code, at));
     }
 
-
-
     /// @dev Copies `count` bytes from `src` at `srcOffset` to `dst` at
     /// `dstOffset`. The ranges may overlap: the result is as if the source
     /// were read in full before the first write.
@@ -1618,11 +1739,7 @@ library LibClone {
 
     /// @dev The 20 bytes of `b` at `offset`.
     /// @custom:solar-inline
-    function _readBytes20(bytes memory b, uint256 offset)
-        private
-        pure
-        returns (bytes20 result)
-    {
+    function _readBytes20(bytes memory b, uint256 offset) private pure returns (bytes20 result) {
         for (uint256 k; k < 20; ++k) {
             result |= bytes20(b[offset + k]) >> (8 * k);
         }
@@ -1630,11 +1747,7 @@ library LibClone {
 
     /// @dev The 32 bytes of `b` at `offset`.
     /// @custom:solar-inline
-    function _readBytes32(bytes memory b, uint256 offset)
-        private
-        pure
-        returns (bytes32 result)
-    {
+    function _readBytes32(bytes memory b, uint256 offset) private pure returns (bytes32 result) {
         for (uint256 k; k < 32; ++k) {
             result |= bytes32(b[offset + k]) >> (8 * k);
         }
@@ -1696,11 +1809,12 @@ library LibClone {
     /// at most `maxCopy` bytes of the response into a new buffer, as
     /// `callBounded` does.
     /// @custom:solar-trusted
-    function _staticCallBounded(address target, uint256 gasLimit, bytes memory payload, uint256 maxCopy)
-        private
-        view
-        returns (bool success, bytes memory output, uint256 totalSize)
-    {
+    function _staticCallBounded(
+        address target,
+        uint256 gasLimit,
+        bytes memory payload,
+        uint256 maxCopy
+    ) private view returns (bool success, bytes memory output, uint256 totalSize) {
         assembly ("memory-safe") {
             success := staticcall(gasLimit, target, add(payload, 0x20), mload(payload), 0x00, 0x00)
             totalSize := returndatasize()
@@ -1715,7 +1829,10 @@ library LibClone {
 
     /// @dev Deploys `initcode` with `value` wei and returns the new address.
     /// @custom:solar-trusted
-    function _createDeploy(bytes memory initcode, uint256 value) private returns (address deployed) {
+    function _createDeploy(bytes memory initcode, uint256 value)
+        private
+        returns (address deployed)
+    {
         assembly ("memory-safe") {
             deployed := create(value, add(initcode, 0x20), mload(initcode))
         }
@@ -1742,25 +1859,31 @@ library LibClone {
         returns (address)
     {
         return address(
-            uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), deployer, salt, initcodeHash))))
+            uint160(
+                uint256(keccak256(abi.encodePacked(bytes1(0xff), deployer, salt, initcodeHash)))
+            )
         );
     }
 
     /// @dev Copies `count` bytes of `target`'s code from `start` into `dst`
     /// at `dstOffset`.
     /// @custom:solar-trusted
-    function _codeCopyInto(bytes memory dst, uint256 dstOffset, address target, uint256 start, uint256 count)
-        private
-        view
-    {
-        if (count > dst.length || dstOffset > dst.length - count) count = _outOfBounds();
+    function _codeCopyInto(
+        bytes memory dst,
+        uint256 dstOffset,
+        address target,
+        uint256 start,
+        uint256 count
+    ) private view {
+        if (count > dst.length || dstOffset > dst.length - count) {
+            count = _outOfBounds();
+        }
         uint256 size = target.code.length;
         if (count > size || start > size - count) count = _outOfBounds();
         assembly ("memory-safe") {
             extcodecopy(target, add(add(dst, 0x20), dstOffset), start, count)
         }
     }
-
 
     /// @dev The `count` bytes of `target`'s code from `start`, as a new buffer.
     function _codeRead(address target, uint256 start, uint256 count)
@@ -1771,7 +1894,6 @@ library LibClone {
         out = new bytes(count);
         _codeCopyInto(out, 0, target, start, count);
     }
-
 
     /// @dev Reverts the current call with exactly `data`.
     /// @custom:solar-trusted
@@ -1786,7 +1908,4 @@ library LibClone {
     function _outOfBounds() private pure returns (uint256) {
         return new uint256[](0)[0];
     }
-
-
-
 }

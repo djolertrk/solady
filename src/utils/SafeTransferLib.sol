@@ -1,23 +1,31 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @notice Checked Solidity implementation of the pinned Solady
-/// SafeTransferLib API.
-/// @dev A token's answer is read with the trusted `_callBounded`, at most one
-/// word of it, so a token cannot make the caller copy more. A transfer or approval
-/// succeeds when the call does and the token answers `true`, or answers
-/// nothing and has code, as upstream decides it. A forced transfer deploys a
-/// contract that self-destructs to its recipient, as the assembly does, and
-/// Permit2 is called with exactly the ABI-encoded arguments. Three
-/// deliberate differences from the assembly, none reachable while gas lasts
-/// and the tokens behave: a forced transfer or ETH vault whose creation fails,
-/// which only running out of gas does, reverts with `ETHTransferFailed()`
-/// instead of `codesize` bytes of memory; `safeMoveETH` raises `Panic(0x01)`
-/// where the assembly runs `INVALID` if its balance grew; and a DAI-style
-/// permit sends the nonce zero where the assembly sends its buffer's old word
-/// if the token's `nonces` call fails.
+/// @notice Safe ETH and ERC20 transfer library that gracefully handles missing return values.
+/// @author Solady (https://github.com/vectorized/solady/blob/main/src/utils/SafeTransferLib.sol)
+/// @author Modified from Solmate (https://github.com/transmissions11/solmate/blob/main/src/utils/SafeTransferLib.sol)
+/// @author Permit2 operations from (https://github.com/Uniswap/permit2/blob/main/src/libraries/Permit2Lib.sol)
+///
+/// @dev Note:
+/// - For ETH transfers, please use `forceSafeTransferETH` for DoS protection.
+///
+/// The checked port reads a token's answer with the trusted `_callBounded`, at most one word of
+/// it, so a token cannot make the caller copy more. A transfer or approval succeeds when the
+/// call does and the token answers `true`, or answers nothing and has code, as upstream decides
+/// it. A forced transfer deploys a contract that self-destructs to its recipient, as the
+/// assembly does, and Permit2 is called with exactly the ABI-encoded arguments. Three
+/// deliberate differences, none reachable while gas lasts and the tokens behave: a forced
+/// transfer or ETH vault whose creation fails, which only running out of gas does, reverts with
+/// `ETHTransferFailed()` instead of `codesize` bytes of memory; `safeMoveETH` raises
+/// `Panic(0x01)` where the assembly runs `INVALID` if its balance grew; and a DAI-style permit
+/// sends the nonce zero where the assembly sends its buffer's old word if the token's `nonces`
+/// call fails.
 /// @custom:solar-safe memory arithmetic
 library SafeTransferLib {
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                       CUSTOM ERRORS                        */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
     /// @dev The ETH transfer has failed.
     error ETHTransferFailed();
 
@@ -45,6 +53,10 @@ library SafeTransferLib {
     /// @dev The Permit2 lockdown operation has failed.
     error Permit2LockdownFailed();
 
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                         CONSTANTS                          */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
     /// @dev Suggested gas stipend for contract receiving ETH that disallows any storage writes.
     uint256 internal constant GAS_STIPEND_NO_STORAGE_WRITES = 2300;
 
@@ -68,6 +80,29 @@ library SafeTransferLib {
     /// See: https://gist.github.com/Vectorized/1cb8ad4cf393b1378e08f23f79bd99fa
     /// [Etherscan](https://etherscan.io/address/0x00000000000073c48c8055bD43D1A53799176f0D)
     address internal constant ETH_MOVER = 0x00000000000073c48c8055bD43D1A53799176f0D;
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                       ETH OPERATIONS                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    // If the ETH transfer MUST succeed with a reasonable gas budget, use the force variants.
+    //
+    // The regular variants:
+    // - Forwards all remaining gas to the target.
+    // - Reverts if the target reverts.
+    // - Reverts if the current contract has insufficient balance.
+    //
+    // The force variants:
+    // - Forwards with an optional gas stipend
+    //   (defaults to `GAS_STIPEND_NO_GRIEF`, which is sufficient for most cases).
+    // - If the target reverts, or if the gas stipend is exhausted,
+    //   creates a temporary contract to force send the ETH via `SELFDESTRUCT`.
+    //   Future compatible with `SENDALL`: https://eips.ethereum.org/EIPS/eip-4758.
+    // - Reverts if the current contract has insufficient balance.
+    //
+    // The try variants:
+    // - Forwards with a mandatory gas stipend.
+    // - Instead of reverting, returns whether the transfer succeeded.
 
     /// @dev Sends `amount` (in wei) ETH to `to`.
     function safeTransferETH(address to, uint256 amount) internal {
@@ -147,6 +182,10 @@ library SafeTransferLib {
         }
     }
 
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      ERC20 OPERATIONS                      */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
     /// @dev Sends `amount` of ERC20 `token` from `from` to `to`.
     /// Reverts upon failure.
     ///
@@ -225,8 +264,9 @@ library SafeTransferLib {
     }
 
     /// @dev Performs a `token.balanceOf(account)` check.
-    /// `implemented` denotes whether the `token` implements `balanceOf`.
+    /// `implemented` denotes whether the `token` does not implement `balanceOf`.
     /// `amount` is zero if the `token` does not implement `balanceOf`.
+    /// `implemented` denotes whether the `token` implements `balanceOf`.
     function checkBalanceOf(address token, address account)
         internal
         view
@@ -256,9 +296,7 @@ library SafeTransferLib {
 
     /// @dev Sends `amount` of ERC20 `token` from `from` to `to` via Permit2.
     /// Reverts upon failure.
-    function permit2TransferFrom(address token, address from, address to, uint256 amount)
-        internal
-    {
+    function permit2TransferFrom(address token, address from, address to, uint256 amount) internal {
         bool exists = block.chainid == 1 || PERMIT2.code.length != 0;
         bool tokenHasCode = token.code.length != 0;
         // `transferFrom(address,address,uint160,address)`, with the whole
@@ -337,6 +375,10 @@ library SafeTransferLib {
         );
         if (!success) revert Permit2LockdownFailed();
     }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      PRIVATE HELPERS                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     /// @dev Tries `token`'s own permit: DAI's when its domain separator is
     /// DAI's, EIP-2612's otherwise. WETH9 has none, and neither has a token
@@ -480,11 +522,7 @@ library SafeTransferLib {
 
     /// @dev The 32 bytes of `b` at `offset`.
     /// @custom:solar-inline
-    function _readBytes32(bytes memory b, uint256 offset)
-        private
-        pure
-        returns (bytes32 result)
-    {
+    function _readBytes32(bytes memory b, uint256 offset) private pure returns (bytes32 result) {
         for (uint256 k; k < 32; ++k) {
             result |= bytes32(b[offset + k]) >> (8 * k);
         }
@@ -518,11 +556,12 @@ library SafeTransferLib {
     /// at most `maxCopy` bytes of the response into a new buffer, as
     /// `callBounded` does.
     /// @custom:solar-trusted
-    function _staticCallBounded(address target, uint256 gasLimit, bytes memory payload, uint256 maxCopy)
-        private
-        view
-        returns (bool success, bytes memory output, uint256 totalSize)
-    {
+    function _staticCallBounded(
+        address target,
+        uint256 gasLimit,
+        bytes memory payload,
+        uint256 maxCopy
+    ) private view returns (bool success, bytes memory output, uint256 totalSize) {
         assembly ("memory-safe") {
             success := staticcall(gasLimit, target, add(payload, 0x20), mload(payload), 0x00, 0x00)
             totalSize := returndatasize()
@@ -543,7 +582,9 @@ library SafeTransferLib {
         returns (address)
     {
         return address(
-            uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), deployer, salt, initcodeHash))))
+            uint160(
+                uint256(keccak256(abi.encodePacked(bytes1(0xff), deployer, salt, initcodeHash)))
+            )
         );
     }
 

@@ -1,81 +1,29 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @notice Checked Solidity implementation of the pinned Solady Base64 API.
-/// @dev Both directions work a word at a time without a lookup table:
-/// `encode` turns twenty-four bytes into thirty-two characters and `decode`
-/// thirty-two characters into twenty-four bytes with arithmetic on every byte
-/// of a word at once, the input's tail read as one shorter word.
-///
-/// `encode` writes the standard alphabet with padding, or the URL-safe one and
-/// no padding on request. `decode` accepts the documented standard, URL and
-/// IMAP alphabets and padding modes, and reverts with `InvalidBase64()` on a
-/// character outside them, padding anywhere but the end of a padded input, or a
-/// length no encoding has, where the upstream output is unspecified. It does
-/// not reject unused low bits in a final group, which RFC 4648 leaves to the
-/// decoder.
+/// @notice Library to encode strings in Base64.
+/// @author Solady (https://github.com/vectorized/solady/blob/main/src/utils/Base64.sol)
+/// @author Modified from Solmate (https://github.com/transmissions11/solmate/blob/main/src/utils/Base64.sol)
+/// @author Modified from (https://github.com/Brechtpd/base64/blob/main/base64.sol) by Brecht Devos - <brecht@loopring.org>.
+/// @dev The checked port works a word at a time in both directions without a lookup table:
+/// `encode` turns twenty-four bytes into thirty-two characters and `decode` thirty-two
+/// characters into twenty-four bytes with arithmetic on every byte of a word at once, the
+/// input's tail read as one shorter word. `encode` writes the standard alphabet with padding,
+/// or the URL-safe one and no padding on request. `decode` accepts the documented standard,
+/// URL and IMAP alphabets and padding modes. One deliberate difference: where upstream's
+/// output is undefined, `decode` reverts with `InvalidBase64()`: on a character outside those
+/// alphabets, padding anywhere but the end of a padded input, or a length no encoding has. It
+/// does not reject unused low bits in a final group, which RFC 4648 leaves to the decoder.
 /// @custom:solar-safe memory arithmetic
 library Base64 {
-    /// @dev The input is not Base64.
-    error InvalidBase64();
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                    ENCODING / DECODING                     */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
-    /// @dev One copy of the value in every byte.
-    uint256 private constant ONES =
-        0x0101010101010101010101010101010101010101010101010101010101010101;
-
-    /// @dev The top bit of every byte.
-    uint256 private constant HIGHS =
-        0x8080808080808080808080808080808080808080808080808080808080808080;
-
-    /// @dev The low seven bits of every byte.
-    uint256 private constant LOWS =
-        0x7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f;
-
-    /// @dev The character `A`, which decodes to zero, in every byte.
-    uint256 private constant LETTER_A =
-        0x4141414141414141414141414141414141414141414141414141414141414141;
-
-    /// @dev Masks for spreading twenty-four packed bytes into eight groups of
-    /// three, one group to each four-byte lane. Each step moves the upper half
-    /// of every group up and leaves the lower half where it is.
-    uint256 private constant MASK_96 =
-        0x0000000000000000000000000000000000000000ffffffffffffffffffffffff;
-    uint256 private constant SPREAD_HIGH_48 =
-        0x00000000ffffffffffff00000000000000000000ffffffffffff000000000000;
-    uint256 private constant SPREAD_LOW_48 =
-        0x00000000000000000000ffffffffffff00000000000000000000ffffffffffff;
-    uint256 private constant SPREAD_HIGH_24 =
-        0x0000ffffff0000000000ffffff0000000000ffffff0000000000ffffff000000;
-    uint256 private constant SPREAD_LOW_24 =
-        0x0000000000ffffff0000000000ffffff0000000000ffffff0000000000ffffff;
-
-    /// @dev Six set bits at the bottom of every four-byte lane.
-    uint256 private constant LANE_63 =
-        0x0000003f0000003f0000003f0000003f0000003f0000003f0000003f0000003f;
-
-    /// @dev Masks for gathering thirty-two sextets, one to a byte, into twenty-four
-    /// bytes: each step joins the two halves of every lane twice its width.
-    uint256 private constant HIGH_8 =
-        0xff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00;
-    uint256 private constant LOW_8 =
-        0x00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff;
-    uint256 private constant HIGH_16 =
-        0xffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000;
-    uint256 private constant LOW_16 =
-        0x0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff;
-    uint256 private constant HIGH_32 =
-        0xffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000;
-    uint256 private constant LOW_32 =
-        0x00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff;
-    uint256 private constant HIGH_64 =
-        0xffffffffffffffff0000000000000000ffffffffffffffff0000000000000000;
-    uint256 private constant LOW_64 =
-        0x0000000000000000ffffffffffffffff0000000000000000ffffffffffffffff;
-    uint256 private constant HIGH_128 =
-        0xffffffffffffffffffffffffffffffff00000000000000000000000000000000;
-    uint256 private constant LOW_128 =
-        0x00000000000000000000000000000000ffffffffffffffffffffffffffffffff;
-
+    /// @dev Encodes `data` using the base64 encoding described in RFC 4648.
+    /// See: https://datatracker.ietf.org/doc/html/rfc4648
+    /// @param fileSafe  Whether to replace '+' with '-' and '/' with '_'.
+    /// @param noPadding Whether to strip away the padding.
     function encode(bytes memory data, bool fileSafe, bool noPadding)
         internal
         pure
@@ -110,43 +58,33 @@ library Base64 {
         return string(out);
     }
 
-    /// @dev The thirty-two characters of the twenty-four bytes packed into the
-    /// low bits of `packed`.
-    function _encodeWord(uint256 packed, bool fileSafe) private pure returns (bytes32) {
-        // The URL-safe alphabet differs only in its last two characters.
-        uint256 stepDown = fileSafe ? 13 : 15;
-        uint256 stepUp = fileSafe ? 49 : 3;
-        // Spread the eight groups of three bytes one to a four-byte lane,
-        // halving the packing each step.
-        uint256 x = ((packed >> 96) << 128) | (packed & MASK_96);
-        x = ((x & SPREAD_HIGH_48) << 16) | (x & SPREAD_LOW_48);
-        x = ((x & SPREAD_HIGH_24) << 8) | (x & SPREAD_LOW_24);
-        // Cut each lane's twenty-four bits into four six-bit values, one to a
-        // byte. Shifting the whole word and masking per lane keeps the
-        // neighbours out.
-        uint256 v = (((x >> 18) & LANE_63) << 24) | (((x >> 12) & LANE_63) << 16)
-            | (((x >> 6) & LANE_63) << 8) | (x & LANE_63);
-        // Each threshold the alphabet steps at is found by adding its distance
-        // to 128, which carries into a byte's high bit exactly at the
-        // threshold: a one marks every byte at or above it. No adjustment
-        // carries out of its own byte, so the whole word steps at once.
-        uint256 letter = ((v + 102 * ONES) >> 7) & ONES;
-        uint256 digit = ((v + 76 * ONES) >> 7) & ONES;
-        uint256 last2 = ((v + 66 * ONES) >> 7) & ONES;
-        uint256 last1 = ((v + 65 * ONES) >> 7) & ONES;
-        return bytes32(v + 65 * ONES + 6 * letter - 75 * digit - stepDown * last2 + stepUp * last1);
-    }
-
+    /// @dev Encodes `data` using the base64 encoding described in RFC 4648.
+    /// Equivalent to `encode(data, false, false)`.
     function encode(bytes memory data) internal pure returns (string memory result) {
         return encode(data, false, false);
     }
 
+    /// @dev Encodes `data` using the base64 encoding described in RFC 4648.
+    /// Equivalent to `encode(data, fileSafe, false)`.
     function encode(bytes memory data, bool fileSafe) internal pure returns (string memory result) {
         return encode(data, fileSafe, false);
     }
 
-    /// @dev The bytes `data` encodes, in the standard, URL or IMAP alphabet.
-    /// Reverts with `InvalidBase64()` when `data` is not Base64.
+    /// @dev Decodes base64 encoded `data`.
+    ///
+    /// Supports:
+    /// - RFC 4648 (both standard and file-safe mode).
+    /// - RFC 3501 (63: ',').
+    ///
+    /// Does not support:
+    /// - Line breaks.
+    ///
+    /// Note: For performance reasons,
+    /// this function will NOT revert on invalid `data` inputs.
+    /// Outputs for invalid inputs will simply be undefined behaviour.
+    /// It is the user's responsibility to ensure that the `data`
+    /// is a valid base64 encoded string.
+    /// The checked port reverts with `InvalidBase64()` on such an input instead.
     function decode(string memory data) internal pure returns (bytes memory result) {
         bytes memory input = bytes(data);
         uint256 n = input.length;
@@ -187,6 +125,110 @@ library Base64 {
             _writeBytesN(result, j, bytes32(packed), length - j);
         }
         if (bad != 0) revert InvalidBase64();
+    }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      PRIVATE HELPERS                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev One copy of the value in every byte.
+    uint256 private constant ONES =
+        0x0101010101010101010101010101010101010101010101010101010101010101;
+
+    /// @dev The top bit of every byte.
+    uint256 private constant HIGHS =
+        0x8080808080808080808080808080808080808080808080808080808080808080;
+
+    /// @dev The low seven bits of every byte.
+    uint256 private constant LOWS =
+        0x7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f;
+
+    /// @dev The character `A`, which decodes to zero, in every byte.
+    uint256 private constant LETTER_A =
+        0x4141414141414141414141414141414141414141414141414141414141414141;
+
+    /// @dev Masks for spreading twenty-four packed bytes into eight groups of
+    /// three, one group to each four-byte lane. Each step moves the upper half
+    /// of every group up and leaves the lower half where it is.
+    uint256 private constant MASK_96 =
+        0x0000000000000000000000000000000000000000ffffffffffffffffffffffff;
+
+    uint256 private constant SPREAD_HIGH_48 =
+        0x00000000ffffffffffff00000000000000000000ffffffffffff000000000000;
+
+    uint256 private constant SPREAD_LOW_48 =
+        0x00000000000000000000ffffffffffff00000000000000000000ffffffffffff;
+
+    uint256 private constant SPREAD_HIGH_24 =
+        0x0000ffffff0000000000ffffff0000000000ffffff0000000000ffffff000000;
+
+    uint256 private constant SPREAD_LOW_24 =
+        0x0000000000ffffff0000000000ffffff0000000000ffffff0000000000ffffff;
+
+    /// @dev Six set bits at the bottom of every four-byte lane.
+    uint256 private constant LANE_63 =
+        0x0000003f0000003f0000003f0000003f0000003f0000003f0000003f0000003f;
+
+    /// @dev Masks for gathering thirty-two sextets, one to a byte, into twenty-four
+    /// bytes: each step joins the two halves of every lane twice its width.
+    uint256 private constant HIGH_8 =
+        0xff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00;
+
+    uint256 private constant LOW_8 =
+        0x00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff;
+
+    uint256 private constant HIGH_16 =
+        0xffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000;
+
+    uint256 private constant LOW_16 =
+        0x0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff0000ffff;
+
+    uint256 private constant HIGH_32 =
+        0xffffffff00000000ffffffff00000000ffffffff00000000ffffffff00000000;
+
+    uint256 private constant LOW_32 =
+        0x00000000ffffffff00000000ffffffff00000000ffffffff00000000ffffffff;
+
+    uint256 private constant HIGH_64 =
+        0xffffffffffffffff0000000000000000ffffffffffffffff0000000000000000;
+
+    uint256 private constant LOW_64 =
+        0x0000000000000000ffffffffffffffff0000000000000000ffffffffffffffff;
+
+    uint256 private constant HIGH_128 =
+        0xffffffffffffffffffffffffffffffff00000000000000000000000000000000;
+
+    uint256 private constant LOW_128 =
+        0x00000000000000000000000000000000ffffffffffffffffffffffffffffffff;
+
+    /// @dev The input is not Base64.
+    error InvalidBase64();
+
+    /// @dev The thirty-two characters of the twenty-four bytes packed into the
+    /// low bits of `packed`.
+    function _encodeWord(uint256 packed, bool fileSafe) private pure returns (bytes32) {
+        // The URL-safe alphabet differs only in its last two characters.
+        uint256 stepDown = fileSafe ? 13 : 15;
+        uint256 stepUp = fileSafe ? 49 : 3;
+        // Spread the eight groups of three bytes one to a four-byte lane,
+        // halving the packing each step.
+        uint256 x = ((packed >> 96) << 128) | (packed & MASK_96);
+        x = ((x & SPREAD_HIGH_48) << 16) | (x & SPREAD_LOW_48);
+        x = ((x & SPREAD_HIGH_24) << 8) | (x & SPREAD_LOW_24);
+        // Cut each lane's twenty-four bits into four six-bit values, one to a
+        // byte. Shifting the whole word and masking per lane keeps the
+        // neighbours out.
+        uint256 v = (((x >> 18) & LANE_63) << 24) | (((x >> 12) & LANE_63) << 16)
+            | (((x >> 6) & LANE_63) << 8) | (x & LANE_63);
+        // Each threshold the alphabet steps at is found by adding its distance
+        // to 128, which carries into a byte's high bit exactly at the
+        // threshold: a one marks every byte at or above it. No adjustment
+        // carries out of its own byte, so the whole word steps at once.
+        uint256 letter = ((v + 102 * ONES) >> 7) & ONES;
+        uint256 digit = ((v + 76 * ONES) >> 7) & ONES;
+        uint256 last2 = ((v + 66 * ONES) >> 7) & ONES;
+        uint256 last1 = ((v + 65 * ONES) >> 7) & ONES;
+        return bytes32(v + 65 * ONES + 6 * letter - 75 * digit - stepDown * last2 + stepUp * last1);
     }
 
     /// @dev The twenty-four bytes thirty-two characters encode, left-aligned,
