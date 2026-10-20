@@ -49,6 +49,7 @@ LIBRARIES = [
     "DynamicBufferLib",
     "DynamicArrayLib",
     "MinHeapLib",
+    "JSONParserLib",
     "tokens/ERC20",
     "tokens/WETH",
     "tokens/ERC4626",
