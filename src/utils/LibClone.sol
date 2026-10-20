@@ -67,15 +67,19 @@ pragma solidity ^0.8.4;
 /// if `calldatasize() == 1`. This code path skips the delegatecall and directly returns the
 /// - Uses the identity precompile (0x4) to copy args during deployment.
 ///
-/// The checked port builds each proxy's creation code from the bytes the assembly writes,
-/// assembled with `abi.encodePacked` around its implementation or beacon, and deploys it with
-/// the trusted `_createDeploy`, which fails with the same `DeploymentFailed()`. A proxy's
-/// arguments follow its runtime code and are read back with the trusted `_codeCopyInto`,
-/// checked against the code's size. Three deliberate differences: arguments too long for the
-/// two-byte runtime size fail with `DeploymentFailed()` where the assembly runs out of gas
-/// outside a deployment; reading the arguments of an account whose code is shorter than the
-/// proxy's fails with `Panic(0x11)` instead of running out of gas; and `argLoad` reads zeros
-/// past the end of `args`, where the assembly reads whatever memory follows, which the
+/// The checked port builds each proxy's creation code from the bytes the assembly writes, assembled
+/// with `abi.encodePacked` around its implementation or beacon, and deploys it with the trusted
+/// `_createDeploy`, which fails with the same `DeploymentFailed()`. The `initCode` functions end
+/// the encoding with a zero word that the trusted `_setLength` cuts off, so the bytes past their
+/// result are zero wherever the free memory pointer ends. A proxy's arguments follow its runtime
+/// code and are read back into a new buffer with the trusted `_codeRead`, which reads zeros past
+/// the code as the assembly does: a short slice is copied first and, when its last byte is zero,
+/// cut at the end of the arguments with `_setLength`; any other read is cut with the code's size
+/// first. `implementationOf` reads the code's head the same way. Three deliberate differences:
+/// arguments too long for the two-byte runtime size fail with `DeploymentFailed()` where the
+/// assembly runs out of gas outside a deployment; reading the arguments of an account whose code is
+/// shorter than the proxy's fails with `Panic(0x11)` instead of running out of gas; and `argLoad`
+/// reads zeros past the end of `args`, where the assembly reads whatever memory follows, which the
 /// `argsOn` functions leave zeroed.
 /// @custom:solar-safe memory arithmetic
 library LibClone {
@@ -115,40 +119,40 @@ library LibClone {
         0xf8c46d2793d5aa984eb827aeaba4b63aedcab80119212fce827309788735519a;
 
     /// @dev The creation code of a minimal proxy up to its implementation.
-    bytes private constant _CLONE_HEAD = hex"602c3d8160093d39f33d3d3d3d363d3d37363d73";
+    bytes20 private constant _CLONE_HEAD = hex"602c3d8160093d39f33d3d3d3d363d3d37363d73";
 
     /// @dev The runtime code after the address.
-    bytes private constant _CLONE_TAIL = hex"5af43d3d93803e602a57fd5bf3";
+    bytes13 private constant _CLONE_TAIL = hex"5af43d3d93803e602a57fd5bf3";
 
     /// @dev The creation code of a PUSH0 minimal proxy up to its implementation.
-    bytes private constant _PUSH0_CLONE_HEAD = hex"602d5f8160095f39f35f5f365f5f37365f73";
+    bytes18 private constant _PUSH0_CLONE_HEAD = hex"602d5f8160095f39f35f5f365f5f37365f73";
 
     /// @dev The runtime code after the address.
-    bytes private constant _PUSH0_CLONE_TAIL = hex"5af43d5f5f3e6029573d5ffd5b3d5ff3";
+    bytes16 private constant _PUSH0_CLONE_TAIL = hex"5af43d5f5f3e6029573d5ffd5b3d5ff3";
 
     /// @dev The creation code of a minimal ERC1967 proxy up to its implementation.
-    bytes private constant _ERC1967_HEAD = hex"603d3d8160223d3973";
+    bytes9 private constant _ERC1967_HEAD = hex"603d3d8160223d3973";
 
     /// @dev The runtime code after the address.
     bytes private constant _ERC1967_TAIL =
         hex"60095155f3363d3d373d3d363d7f360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc545af43d6000803e6038573d6000fd5b3d6000f3";
 
     /// @dev The creation code of an ERC1967I proxy up to its implementation.
-    bytes private constant _ERC1967I_HEAD = hex"60523d8160223d3973";
+    bytes9 private constant _ERC1967I_HEAD = hex"60523d8160223d3973";
 
     /// @dev The runtime code after the address.
     bytes private constant _ERC1967I_TAIL =
         hex"600f5155f3365814604357363d3d373d3d363d7f360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc545af43d6000803e603e573d6000fd5b3d6000f35b6020600f3d393d51543d52593df3";
 
     /// @dev The creation code of an ERC1967 beacon proxy up to its beacon.
-    bytes private constant _ERC1967_BEACON_PROXY_HEAD = hex"60523d8160223d3973";
+    bytes9 private constant _ERC1967_BEACON_PROXY_HEAD = hex"60523d8160223d3973";
 
     /// @dev The runtime code after the address.
     bytes private constant _ERC1967_BEACON_PROXY_TAIL =
         hex"60195155f3363d3d373d3d363d602036600436635c60da1b60e01b36527fa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50545afa5036515af43d6000803e604d573d6000fd5b3d6000f3";
 
     /// @dev The creation code of an ERC1967I beacon proxy up to its beacon.
-    bytes private constant _ERC1967I_BEACON_PROXY_HEAD = hex"60573d8160223d3973";
+    bytes9 private constant _ERC1967I_BEACON_PROXY_HEAD = hex"60573d8160223d3973";
 
     /// @dev The runtime code after the address.
     bytes private constant _ERC1967I_BEACON_PROXY_TAIL =
@@ -156,7 +160,7 @@ library LibClone {
 
     /// @dev The creation code of the ERC1967 bootstrap up to its authorized
     /// upgrader.
-    bytes private constant _ERC1967_BOOTSTRAP_HEAD = hex"606880600a3d393df3fe3373";
+    bytes12 private constant _ERC1967_BOOTSTRAP_HEAD = hex"606880600a3d393df3fe3373";
 
     /// @dev The runtime code after the address.
     bytes private constant _ERC1967_BOOTSTRAP_TAIL =
@@ -165,16 +169,16 @@ library LibClone {
     /// @dev The creation code of a clone with arguments, between the runtime
     /// size it pushes and the address; its runtime is 0x2d bytes before the
     /// arguments.
-    bytes private constant _CWIA_ARGS_HEAD = hex"3d81600a3d39f3363d3d373d3d3d363d73";
+    bytes17 private constant _CWIA_ARGS_HEAD = hex"3d81600a3d39f3363d3d373d3d3d363d73";
 
     /// @dev The runtime code of a clone with arguments after the address.
-    bytes private constant _CWIA_TAIL = hex"5af43d82803e903d91602b57fd5bf3";
+    bytes15 private constant _CWIA_TAIL = hex"5af43d82803e903d91602b57fd5bf3";
 
     /// @dev The creation code of an ERC1967 proxy of any kind with arguments,
     /// between the runtime size it pushes and the address. The runtime is 0x3d
     /// bytes before the arguments for a minimal proxy, 0x52 for an ERC1967I
     /// proxy or a beacon proxy, and 0x57 for an ERC1967I beacon proxy.
-    bytes private constant _ERC1967_ARGS_HEAD = hex"3d8160233d3973";
+    bytes7 private constant _ERC1967_ARGS_HEAD = hex"3d8160233d3973";
 
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                       CUSTOM ERRORS                        */
@@ -225,7 +229,8 @@ library LibClone {
 
     /// @dev Returns the initialization code of the clone of `implementation`.
     function initCode(address implementation) internal pure returns (bytes memory c) {
-        return abi.encodePacked(_CLONE_HEAD, implementation, _CLONE_TAIL);
+        return
+            _withoutZeroWord(abi.encodePacked(_CLONE_HEAD, implementation, _CLONE_TAIL, bytes32(0)));
     }
 
     /// @dev Returns the initialization code hash of the clone of `implementation`.
@@ -284,7 +289,9 @@ library LibClone {
 
     /// @dev Returns the initialization code of the PUSH0 clone of `implementation`.
     function initCode_PUSH0(address implementation) internal pure returns (bytes memory c) {
-        return abi.encodePacked(_PUSH0_CLONE_HEAD, implementation, _PUSH0_CLONE_TAIL);
+        return _withoutZeroWord(
+            abi.encodePacked(_PUSH0_CLONE_HEAD, implementation, _PUSH0_CLONE_TAIL, bytes32(0))
+        );
     }
 
     /// @dev Returns the initialization code hash of the PUSH0 clone of `implementation`.
@@ -386,8 +393,16 @@ library LibClone {
         pure
         returns (bytes memory c)
     {
-        return abi.encodePacked(
-            hex"61", _runtimeSize(0x2d, args), _CWIA_ARGS_HEAD, implementation, _CWIA_TAIL, args
+        return _withoutZeroWord(
+            abi.encodePacked(
+                hex"61",
+                _runtimeSize(0x2d, args),
+                _CWIA_ARGS_HEAD,
+                implementation,
+                _CWIA_TAIL,
+                args,
+                bytes32(0)
+            )
         );
     }
 
@@ -436,6 +451,7 @@ library LibClone {
     /// The `instance` MUST be deployed via the clone with immutable args functions.
     /// Otherwise, the behavior is undefined.
     /// Out-of-gas reverts if `instance` does not have any code.
+    /// @custom:solar-inline
     function argsOnClone(address instance, uint256 start, uint256 end)
         internal
         view
@@ -510,7 +526,9 @@ library LibClone {
 
     /// @dev Returns the initialization code of the minimal ERC1967 proxy of `implementation`.
     function initCodeERC1967(address implementation) internal pure returns (bytes memory c) {
-        return abi.encodePacked(_ERC1967_HEAD, implementation, _ERC1967_TAIL);
+        return _withoutZeroWord(
+            abi.encodePacked(_ERC1967_HEAD, implementation, _ERC1967_TAIL, bytes32(0))
+        );
     }
 
     /// @dev Returns the initialization code hash of the minimal ERC1967 proxy of `implementation`.
@@ -629,13 +647,16 @@ library LibClone {
         pure
         returns (bytes memory c)
     {
-        return abi.encodePacked(
-            hex"61",
-            _runtimeSize(0x3d, args),
-            _ERC1967_ARGS_HEAD,
-            implementation,
-            _ERC1967_TAIL,
-            args
+        return _withoutZeroWord(
+            abi.encodePacked(
+                hex"61",
+                _runtimeSize(0x3d, args),
+                _ERC1967_ARGS_HEAD,
+                implementation,
+                _ERC1967_TAIL,
+                args,
+                bytes32(0)
+            )
         );
     }
 
@@ -766,7 +787,9 @@ library LibClone {
 
     /// @dev Returns the initialization code of the ERC1967I proxy of `implementation`.
     function initCodeERC1967I(address implementation) internal pure returns (bytes memory c) {
-        return abi.encodePacked(_ERC1967I_HEAD, implementation, _ERC1967I_TAIL);
+        return _withoutZeroWord(
+            abi.encodePacked(_ERC1967I_HEAD, implementation, _ERC1967I_TAIL, bytes32(0))
+        );
     }
 
     /// @dev Returns the initialization code hash of the ERC1967I proxy of `implementation`.
@@ -884,13 +907,16 @@ library LibClone {
         pure
         returns (bytes memory c)
     {
-        return abi.encodePacked(
-            hex"61",
-            _runtimeSize(0x52, args),
-            _ERC1967_ARGS_HEAD,
-            implementation,
-            _ERC1967I_TAIL,
-            args
+        return _withoutZeroWord(
+            abi.encodePacked(
+                hex"61",
+                _runtimeSize(0x52, args),
+                _ERC1967_ARGS_HEAD,
+                implementation,
+                _ERC1967I_TAIL,
+                args,
+                bytes32(0)
+            )
         );
     }
 
@@ -1016,8 +1042,11 @@ library LibClone {
         pure
         returns (bytes memory c)
     {
-        return
-            abi.encodePacked(_ERC1967_BOOTSTRAP_HEAD, authorizedUpgrader, _ERC1967_BOOTSTRAP_TAIL);
+        return _withoutZeroWord(
+            abi.encodePacked(
+                _ERC1967_BOOTSTRAP_HEAD, authorizedUpgrader, _ERC1967_BOOTSTRAP_TAIL, bytes32(0)
+            )
+        );
     }
 
     /// @dev Returns the initialization code hash of the ERC1967 bootstrap.
@@ -1105,7 +1134,11 @@ library LibClone {
 
     /// @dev Returns the initialization code of the minimal ERC1967 beacon proxy.
     function initCodeERC1967BeaconProxy(address beacon) internal pure returns (bytes memory c) {
-        return abi.encodePacked(_ERC1967_BEACON_PROXY_HEAD, beacon, _ERC1967_BEACON_PROXY_TAIL);
+        return _withoutZeroWord(
+            abi.encodePacked(
+                _ERC1967_BEACON_PROXY_HEAD, beacon, _ERC1967_BEACON_PROXY_TAIL, bytes32(0)
+            )
+        );
     }
 
     /// @dev Returns the initialization code hash of the minimal ERC1967 beacon proxy.
@@ -1229,13 +1262,16 @@ library LibClone {
         pure
         returns (bytes memory c)
     {
-        return abi.encodePacked(
-            hex"61",
-            _runtimeSize(0x52, args),
-            _ERC1967_ARGS_HEAD,
-            beacon,
-            _ERC1967_BEACON_PROXY_TAIL,
-            args
+        return _withoutZeroWord(
+            abi.encodePacked(
+                hex"61",
+                _runtimeSize(0x52, args),
+                _ERC1967_ARGS_HEAD,
+                beacon,
+                _ERC1967_BEACON_PROXY_TAIL,
+                args,
+                bytes32(0)
+            )
         );
     }
 
@@ -1377,7 +1413,11 @@ library LibClone {
 
     /// @dev Returns the initialization code of the ERC1967I beacon proxy.
     function initCodeERC1967IBeaconProxy(address beacon) internal pure returns (bytes memory c) {
-        return abi.encodePacked(_ERC1967I_BEACON_PROXY_HEAD, beacon, _ERC1967I_BEACON_PROXY_TAIL);
+        return _withoutZeroWord(
+            abi.encodePacked(
+                _ERC1967I_BEACON_PROXY_HEAD, beacon, _ERC1967I_BEACON_PROXY_TAIL, bytes32(0)
+            )
+        );
     }
 
     /// @dev Returns the initialization code hash of the ERC1967I beacon proxy.
@@ -1500,13 +1540,16 @@ library LibClone {
         pure
         returns (bytes memory c)
     {
-        return abi.encodePacked(
-            hex"61",
-            _runtimeSize(0x57, args),
-            _ERC1967_ARGS_HEAD,
-            beacon,
-            _ERC1967I_BEACON_PROXY_TAIL,
-            args
+        return _withoutZeroWord(
+            abi.encodePacked(
+                hex"61",
+                _runtimeSize(0x57, args),
+                _ERC1967_ARGS_HEAD,
+                beacon,
+                _ERC1967I_BEACON_PROXY_TAIL,
+                args,
+                bytes32(0)
+            )
         );
     }
 
@@ -1575,9 +1618,7 @@ library LibClone {
     /// @dev Returns `address(0)` if the implementation address cannot be determined.
     function implementationOf(address instance) internal view returns (address result) {
         // The first 0x57 bytes of the code, and zeros past its end.
-        uint256 size = instance.code.length;
-        bytes memory code = new bytes(0x57);
-        _codeCopyInto(code, 0, instance, 0, size < 0x57 ? size : 0x57);
+        bytes memory code = _codeRead(instance, 0, 0x57);
         if (
             _readBytes32(code, 0x2d) != 0
                 && (_keccak256Range(code, 0, 0x52) == ERC1967I_CODE_HASH
@@ -1656,11 +1697,13 @@ library LibClone {
 
     /// @dev The arguments of the proxy `instance`, whose code before them is
     /// `base` bytes.
+    /// @custom:solar-inline
     function _argsOn(address instance, uint256 base) private view returns (bytes memory) {
         return _codeRead(instance, base, instance.code.length - base);
     }
 
     /// @dev The arguments of the proxy `instance` from `start`.
+    /// @custom:solar-inline
     function _argsOn(address instance, uint256 base, uint256 start)
         private
         view
@@ -1672,12 +1715,24 @@ library LibClone {
     }
 
     /// @dev The arguments of the proxy `instance` from `start` to `end`, which is
-    /// clamped to the arguments and to `0xffff`.
+    /// clamped to the arguments and to `0xffff`. A short range is copied first, as
+    /// the assembly does. Past the code the copy reads zeros, so a last byte that is
+    /// not zero lies inside the code, and so does the whole range; otherwise the end
+    /// of the arguments cuts it, and the zeros past it stay as padding.
+    /// @custom:solar-inline
     function _argsOn(address instance, uint256 base, uint256 start, uint256 end)
         private
         view
-        returns (bytes memory)
+        returns (bytes memory args)
     {
+        if (start < end && end <= 0xffff && end - start <= 0x40) {
+            uint256 d = end - start;
+            args = _codeRead(instance, base + start, d);
+            if (args[d - 1] != 0) return args;
+            uint256 available = instance.code.length - base;
+            if (end > available) _setLength(args, start < available ? available - start : 0);
+            return args;
+        }
         uint256 n = instance.code.length - base;
         if (end > n) end = n;
         if (end > 0xffff) end = 0xffff;
@@ -1869,35 +1924,44 @@ library LibClone {
         );
     }
 
-    /// @dev Copies `count` bytes of `target`'s code from `start` into `dst`
-    /// at `dstOffset`.
+    /// @dev The `count` bytes of `target`'s code from `start`, as a new buffer right padded
+    /// with zeros. Past the code the copy reads zeros. Solidity only gives an account's whole
+    /// code.
     /// @custom:solar-trusted
-    function _codeCopyInto(
-        bytes memory dst,
-        uint256 dstOffset,
-        address target,
-        uint256 start,
-        uint256 count
-    ) private view {
-        if (count > dst.length || dstOffset > dst.length - count) {
-            count = _outOfBounds();
-        }
-        uint256 size = target.code.length;
-        if (count > size || start > size - count) count = _outOfBounds();
-        /// @solidity memory-safe-assembly
-        assembly {
-            extcodecopy(target, add(add(dst, 0x20), dstOffset), start, count)
-        }
-    }
-
-    /// @dev The `count` bytes of `target`'s code from `start`, as a new buffer.
+    /// @custom:solar-inline
     function _codeRead(address target, uint256 start, uint256 count)
         private
         view
         returns (bytes memory out)
     {
-        out = new bytes(count);
-        _codeCopyInto(out, 0, target, start, count);
+        /// @solidity memory-safe-assembly
+        assembly {
+            out := mload(0x40)
+            mstore(out, count)
+            let o := add(out, 0x20)
+            extcodecopy(target, o, start, count)
+            mstore(add(o, count), 0) // Zeroize the slot after the bytes.
+            mstore(0x40, add(o, and(add(count, 0x1f), not(0x1f)))) // Allocate the memory.
+        }
+    }
+
+    /// @dev Shrinks `b` to its first `n` bytes in place. The bytes past `n` in its
+    /// last word are zero. Solidity cannot spell a shorter length for an existing buffer.
+    /// @custom:solar-trusted
+    function _setLength(bytes memory b, uint256 n) private pure {
+        if (n > b.length) n = _outOfBounds();
+        /// @solidity memory-safe-assembly
+        assembly {
+            mstore(b, n)
+        }
+    }
+
+    /// @dev `c` without its last 32 bytes, which are zeros, so that the bytes past its
+    /// end read as zero padding wherever the free memory pointer ends up.
+    /// @custom:solar-inline
+    function _withoutZeroWord(bytes memory c) private pure returns (bytes memory) {
+        _setLength(c, c.length - 32);
+        return c;
     }
 
     /// @dev Reverts the current call with exactly `data`.

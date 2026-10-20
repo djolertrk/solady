@@ -9,11 +9,13 @@ pragma solidity ^0.8.4;
 /// @author Modified from SSTORE3 (https://github.com/Philogy/sstore3)
 /// @dev The checked port keeps a data contract's layout: `data` as its code after one STOP
 /// byte, so it cannot be called. Writing deploys it with the trusted `_createDeploy`; reading
-/// copies a range of it with the trusted `_codeCopyInto`, checked against the code's size,
-/// where the assembly copies past the end and trims. The creation code is `abi.encodePacked`
-/// of a fixed prefix and `data`. Two deliberate differences, both where the assembly runs out
-/// of gas: data too long for the two-byte length the creation code pushes fails with
-/// `DeploymentFailed()`, and reading an account without code fails with `Panic(0x11)`.
+/// copies a range of it into a new buffer with the trusted `_codeRead`, which reads zeros past
+/// the code as the assembly does. A short slice is copied first and, when its last byte is
+/// zero, cut at the end of the data with the trusted `_setLength`; any other read is cut with
+/// the code's size first. The creation code is `abi.encodePacked` of a fixed prefix and
+/// `data`. Two deliberate differences, both where the assembly runs out of gas: data too long
+/// for the two-byte length the creation code pushes fails with `DeploymentFailed()`, and
+/// reading an account without code fails with `Panic(0x11)`.
 /// @custom:solar-safe memory arithmetic
 library SSTORE2 {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -127,13 +129,20 @@ library SSTORE2 {
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     /// @dev Equivalent to `read(pointer, 0, 2 ** 256 - 1)`.
+    /// @custom:solar-inline
     function read(address pointer) internal view returns (bytes memory data) {
-        return read(pointer, 0, type(uint256).max);
+        // The data is the code after the STOP byte.
+        uint256 n = pointer.code.length - 1;
+        if (n == 0) return data;
+        return _codeRead(pointer, 1, n);
     }
 
     /// @dev Equivalent to `read(pointer, start, 2 ** 256 - 1)`.
+    /// @custom:solar-inline
     function read(address pointer, uint256 start) internal view returns (bytes memory data) {
-        return read(pointer, start, type(uint256).max);
+        uint256 n = pointer.code.length - 1;
+        if (start >= n) return "";
+        return _codeRead(pointer, start + 1, n - start);
     }
 
     /// @dev Returns a slice of the data on `pointer` from `start` to `end`.
@@ -141,13 +150,25 @@ library SSTORE2 {
     /// The `pointer` MUST be deployed via the SSTORE2 write functions.
     /// Otherwise, the behavior is undefined.
     /// Out-of-gas reverts if `pointer` does not have any code.
+    /// @custom:solar-inline
     function read(address pointer, uint256 start, uint256 end)
         internal
         view
         returns (bytes memory data)
     {
-        // The data is the code after the STOP byte. The read checks its range
-        // against the code size this line already took.
+        // A short range is copied first, as the assembly does. Past the code the
+        // copy reads zeros, so a last byte that is not zero lies inside the code,
+        // and so does the whole range; otherwise the end of the data cuts it, and
+        // the zeros past it stay as padding.
+        if (start < end && end - start <= 0x40) {
+            uint256 d = end - start;
+            data = _codeRead(pointer, start + 1, d);
+            if (data[d - 1] != 0) return data;
+            uint256 n = pointer.code.length - 1;
+            if (end > n) _setLength(data, start < n ? n - start : 0);
+            return data;
+        }
+        // The data is the code after the STOP byte.
         uint256 n = pointer.code.length - 1;
         if (end > n) end = n;
         if (start >= end) return "";
@@ -239,34 +260,35 @@ library SSTORE2 {
         );
     }
 
-    /// @dev The `count` bytes of `target`'s code from `start`, as a new buffer.
+    /// @dev The `count` bytes of `target`'s code from `start`, as a new buffer right padded
+    /// with zeros. Past the code the copy reads zeros. Solidity only gives an account's whole
+    /// code.
+    /// @custom:solar-trusted
+    /// @custom:solar-inline
     function _codeRead(address target, uint256 start, uint256 count)
         private
         view
         returns (bytes memory out)
     {
-        out = new bytes(count);
-        _codeCopyInto(out, 0, target, start, count);
-    }
-
-    /// @dev Copies `count` bytes of `target`'s code from `start` into `dst`
-    /// at `dstOffset`.
-    /// @custom:solar-trusted
-    function _codeCopyInto(
-        bytes memory dst,
-        uint256 dstOffset,
-        address target,
-        uint256 start,
-        uint256 count
-    ) private view {
-        if (count > dst.length || dstOffset > dst.length - count) {
-            count = _outOfBounds();
-        }
-        uint256 size = target.code.length;
-        if (count > size || start > size - count) count = _outOfBounds();
         /// @solidity memory-safe-assembly
         assembly {
-            extcodecopy(target, add(add(dst, 0x20), dstOffset), start, count)
+            out := mload(0x40)
+            mstore(out, count)
+            let o := add(out, 0x20)
+            extcodecopy(target, o, start, count)
+            mstore(add(o, count), 0) // Zeroize the slot after the bytes.
+            mstore(0x40, add(o, and(add(count, 0x1f), not(0x1f)))) // Allocate the memory.
+        }
+    }
+
+    /// @dev Shrinks `b` to its first `n` bytes in place. The bytes past `n` in its
+    /// last word are zero. Solidity cannot spell a shorter length for an existing buffer.
+    /// @custom:solar-trusted
+    function _setLength(bytes memory b, uint256 n) private pure {
+        if (n > b.length) n = _outOfBounds();
+        /// @solidity memory-safe-assembly
+        assembly {
+            mstore(b, n)
         }
     }
 
