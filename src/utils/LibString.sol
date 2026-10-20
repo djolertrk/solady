@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.5;
 
 import {LibBytes} from "./LibBytes.sol";
 
@@ -825,7 +825,7 @@ library LibString {
         if (value >= 0) return _toString(uint256(value));
         // The magnitude of the most negative value does not fit `int256`.
         uint256 magnitude = value == type(int256).min ? uint256(1) << 255 : uint256(-value);
-        return string.concat("-", _toString(magnitude));
+        return string(bytes.concat("-", bytes(_toString(magnitude))));
     }
 
     /// @dev `s` with every character JSON requires escaped, without quotes.
@@ -1249,7 +1249,8 @@ library LibString {
     /// @custom:solar-trusted
     function _truncate(bytes memory b, uint256 n) private pure {
         if (n > b.length) n = new uint256[](0)[0];
-        assembly ("memory-safe") {
+        /// @solidity memory-safe-assembly
+        assembly {
             mstore(b, n)
             mstore(add(add(b, 0x20), n), 0)
         }
@@ -1261,7 +1262,8 @@ library LibString {
     /// @custom:solar-trusted
     function _directReturn(string memory s) private pure {
         bytes memory data = abi.encode(s);
-        assembly ("memory-safe") {
+        /// @solidity memory-safe-assembly
+        assembly {
             return(add(data, 0x20), mload(data))
         }
     }
@@ -1345,7 +1347,8 @@ library LibString {
     /// Solidity cannot convert in place.
     /// @custom:solar-trusted
     function _toStrings(bytes[] memory a) private pure returns (string[] memory result) {
-        assembly ("memory-safe") {
+        /// @solidity memory-safe-assembly
+        assembly {
             result := a
         }
     }

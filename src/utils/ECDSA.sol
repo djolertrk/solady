@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.5;
 
 /// @notice Gas optimized ECDSA wrapper.
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/utils/ECDSA.sol)

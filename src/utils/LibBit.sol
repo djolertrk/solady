@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.5;
 
 /// @notice Library for bit twiddling and boolean operations.
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/utils/LibBit.sol)

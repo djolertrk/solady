@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.4;
 
 /// @notice Safe ETH and ERC20 transfer library that gracefully handles missing return values.
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/utils/SafeTransferLib.sol)
@@ -540,7 +540,8 @@ library SafeTransferLib {
         bytes memory payload,
         uint256 maxCopy
     ) private returns (bool success, bytes memory output, uint256 totalSize) {
-        assembly ("memory-safe") {
+        /// @solidity memory-safe-assembly
+        assembly {
             success := call(gasLimit, target, value, add(payload, 0x20), mload(payload), 0x00, 0x00)
             totalSize := returndatasize()
             let copied := totalSize
@@ -562,7 +563,8 @@ library SafeTransferLib {
         bytes memory payload,
         uint256 maxCopy
     ) private view returns (bool success, bytes memory output, uint256 totalSize) {
-        assembly ("memory-safe") {
+        /// @solidity memory-safe-assembly
+        assembly {
             success := staticcall(gasLimit, target, add(payload, 0x20), mload(payload), 0x00, 0x00)
             totalSize := returndatasize()
             let copied := totalSize
@@ -595,7 +597,8 @@ library SafeTransferLib {
         private
         returns (bool success, address deployed)
     {
-        assembly ("memory-safe") {
+        /// @solidity memory-safe-assembly
+        assembly {
             deployed := create(value, add(initcode, 0x20), mload(initcode))
         }
         success = deployed != address(0);
@@ -608,7 +611,8 @@ library SafeTransferLib {
         private
         returns (bool success, address deployed)
     {
-        assembly ("memory-safe") {
+        /// @solidity memory-safe-assembly
+        assembly {
             deployed := create2(value, add(initcode, 0x20), mload(initcode), salt)
         }
         success = deployed != address(0);

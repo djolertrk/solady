@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.4;
 
 /// @notice Simple EIP-6909 implementation.
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/tokens/ERC6909.sol)

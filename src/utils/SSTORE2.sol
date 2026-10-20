@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.4;
 
 /// @notice Read and write to persistent storage at a fraction of the cost.
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/utils/SSTORE2.sol)
@@ -186,7 +186,8 @@ library SSTORE2 {
         bytes memory payload,
         uint256 maxCopy
     ) private returns (bool success, bytes memory output, uint256 totalSize) {
-        assembly ("memory-safe") {
+        /// @solidity memory-safe-assembly
+        assembly {
             success := call(gasLimit, target, value, add(payload, 0x20), mload(payload), 0x00, 0x00)
             totalSize := returndatasize()
             let copied := totalSize
@@ -204,7 +205,8 @@ library SSTORE2 {
         private
         returns (address deployed)
     {
-        assembly ("memory-safe") {
+        /// @solidity memory-safe-assembly
+        assembly {
             deployed := create(value, add(initcode, 0x20), mload(initcode))
         }
         if (deployed == address(0)) revert DeploymentFailed();
@@ -216,7 +218,8 @@ library SSTORE2 {
         private
         returns (address deployed)
     {
-        assembly ("memory-safe") {
+        /// @solidity memory-safe-assembly
+        assembly {
             deployed := create2(value, add(initcode, 0x20), mload(initcode), salt)
         }
         if (deployed == address(0)) revert DeploymentFailed();
@@ -261,7 +264,8 @@ library SSTORE2 {
         }
         uint256 size = target.code.length;
         if (count > size || start > size - count) count = _outOfBounds();
-        assembly ("memory-safe") {
+        /// @solidity memory-safe-assembly
+        assembly {
             extcodecopy(target, add(add(dst, 0x20), dstOffset), start, count)
         }
     }

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.4;
 
 /// @notice Optimized sorts and operations for sorted arrays.
 /// @author Solady (https://github.com/Vectorized/solady/blob/main/src/utils/LibSort.sol)
@@ -789,7 +789,8 @@ library LibSort {
     /// @custom:solar-trusted
     function _truncate(uint256[] memory a, uint256 n) private pure {
         if (n > a.length) n = _outOfBounds();
-        assembly ("memory-safe") {
+        /// @solidity memory-safe-assembly
+        assembly {
             mstore(a, n)
         }
     }
@@ -1076,7 +1077,8 @@ library LibSort {
     /// @custom:solar-trusted
     function _truncate(int256[] memory a, uint256 n) private pure {
         if (n > a.length) n = _outOfBounds();
-        assembly ("memory-safe") {
+        /// @solidity memory-safe-assembly
+        assembly {
             mstore(a, n)
         }
     }
@@ -1352,7 +1354,8 @@ library LibSort {
     /// @custom:solar-trusted
     function _truncate(address[] memory a, uint256 n) private pure {
         if (n > a.length) n = _outOfBounds();
-        assembly ("memory-safe") {
+        /// @solidity memory-safe-assembly
+        assembly {
             mstore(a, n)
         }
     }
@@ -1641,7 +1644,8 @@ library LibSort {
     /// @custom:solar-trusted
     function _truncate(bytes32[] memory a, uint256 n) private pure {
         if (n > a.length) n = _outOfBounds();
-        assembly ("memory-safe") {
+        /// @solidity memory-safe-assembly
+        assembly {
             mstore(a, n)
         }
     }

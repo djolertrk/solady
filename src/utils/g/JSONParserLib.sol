@@ -914,7 +914,8 @@ library JSONParserLib {
     /// @custom:solar-trusted
     /// @custom:solar-inline
     function _addr(Item memory item) private pure returns (uint256 result) {
-        assembly ("memory-safe") {
+        /// @solidity memory-safe-assembly
+        assembly {
             result := item
         }
     }
@@ -923,7 +924,8 @@ library JSONParserLib {
     /// @custom:solar-trusted
     /// @custom:solar-inline
     function _addr(uint256[] memory a) private pure returns (uint256 result) {
-        assembly ("memory-safe") {
+        /// @solidity memory-safe-assembly
+        assembly {
             result := a
         }
     }
@@ -932,7 +934,8 @@ library JSONParserLib {
     /// @custom:solar-trusted
     /// @custom:solar-inline
     function _addr(bytes memory s) private pure returns (uint256 result) {
-        assembly ("memory-safe") {
+        /// @solidity memory-safe-assembly
+        assembly {
             result := s
         }
     }
@@ -941,7 +944,8 @@ library JSONParserLib {
     /// @custom:solar-trusted
     /// @custom:solar-inline
     function _item(uint256 p) private pure returns (Item memory result) {
-        assembly ("memory-safe") {
+        /// @solidity memory-safe-assembly
+        assembly {
             result := p
         }
     }
@@ -951,7 +955,8 @@ library JSONParserLib {
     /// @custom:solar-trusted
     /// @custom:solar-inline
     function _items(uint256 p) private pure returns (Item[] memory result) {
-        assembly ("memory-safe") {
+        /// @solidity memory-safe-assembly
+        assembly {
             result := p
         }
     }
@@ -961,7 +966,8 @@ library JSONParserLib {
     /// @custom:solar-trusted
     /// @custom:solar-inline
     function _string(uint256 p) private pure returns (string memory result) {
-        assembly ("memory-safe") {
+        /// @solidity memory-safe-assembly
+        assembly {
             result := p
         }
     }
@@ -971,7 +977,8 @@ library JSONParserLib {
     /// @custom:solar-trusted
     function _setLength(bytes memory b, uint256 n) private pure {
         if (n > b.length) _fail();
-        assembly ("memory-safe") {
+        /// @solidity memory-safe-assembly
+        assembly {
             mstore(b, n)
         }
     }

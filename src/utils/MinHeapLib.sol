@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.4;
 
 /// @notice Library for managing a min-heap in storage or memory.
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/utils/MinHeapLib.sol)

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.4;
 
 /// @notice Library for making calls.
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/utils/LibCall.sol)
@@ -158,7 +158,8 @@ library LibCall {
         bytes memory payload,
         uint256 maxCopy
     ) private returns (bool success, bytes memory output, uint256 totalSize) {
-        assembly ("memory-safe") {
+        /// @solidity memory-safe-assembly
+        assembly {
             success := call(gasLimit, target, value, add(payload, 0x20), mload(payload), 0x00, 0x00)
             totalSize := returndatasize()
             let copied := totalSize
@@ -180,7 +181,8 @@ library LibCall {
         bytes memory payload,
         uint256 maxCopy
     ) private view returns (bool success, bytes memory output, uint256 totalSize) {
-        assembly ("memory-safe") {
+        /// @solidity memory-safe-assembly
+        assembly {
             success := staticcall(gasLimit, target, add(payload, 0x20), mload(payload), 0x00, 0x00)
             totalSize := returndatasize()
             let copied := totalSize
@@ -195,7 +197,8 @@ library LibCall {
     /// @dev Reverts the current call with exactly `data`.
     /// @custom:solar-trusted
     function _revertRaw(bytes memory data) private pure {
-        assembly ("memory-safe") {
+        /// @solidity memory-safe-assembly
+        assembly {
             revert(add(data, 0x20), mload(data))
         }
     }

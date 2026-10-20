@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.4;
 
 /// @notice Simple ERC721 implementation with storage hitchhiking.
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/tokens/ERC721.sol)

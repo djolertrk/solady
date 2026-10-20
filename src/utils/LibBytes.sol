@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.5;
 
 /// @notice Library for byte related operations.
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/utils/LibBytes.sol)
@@ -517,7 +517,8 @@ library LibBytes {
     /// @custom:solar-trusted
     function _load(BytesStorage storage $, uint256 index) private view returns (bytes32 value) {
         if (index >> 64 != 0) index = new uint256[](0)[0];
-        assembly ("memory-safe") {
+        /// @solidity memory-safe-assembly
+        assembly {
             mstore(0x00, $.slot)
             value := sload(add(keccak256(0x00, 0x20), index))
         }
@@ -532,7 +533,8 @@ library LibBytes {
         if (count >> 69 != 0 || offset > b.length || count > b.length - offset) {
             count = new uint256[](0)[0];
         }
-        assembly ("memory-safe") {
+        /// @solidity memory-safe-assembly
+        assembly {
             mstore(0x00, $.slot)
             let base := keccak256(0x00, 0x20)
             let src := add(add(b, 0x20), offset)
@@ -556,7 +558,8 @@ library LibBytes {
         if (count >> 69 != 0 || offset > b.length || count > b.length - offset) {
             count = new uint256[](0)[0];
         }
-        assembly ("memory-safe") {
+        /// @solidity memory-safe-assembly
+        assembly {
             mstore(0x00, $.slot)
             let base := keccak256(0x00, 0x20)
             let src := add(b.offset, offset)
@@ -579,7 +582,8 @@ library LibBytes {
         if (count >> 69 != 0 || offset > b.length || count > b.length - offset) {
             count = new uint256[](0)[0];
         }
-        assembly ("memory-safe") {
+        /// @solidity memory-safe-assembly
+        assembly {
             mstore(0x00, $.slot)
             let base := keccak256(0x00, 0x20)
             let dst := add(add(b, 0x20), offset)
@@ -601,7 +605,8 @@ library LibBytes {
     /// @custom:solar-trusted
     function _truncate(bytes memory b, uint256 n) private pure {
         if (n > b.length) n = new uint256[](0)[0];
-        assembly ("memory-safe") {
+        /// @solidity memory-safe-assembly
+        assembly {
             mstore(b, n)
         }
     }
@@ -1111,7 +1116,8 @@ library LibBytes {
     /// @custom:solar-trusted
     function _truncateWords(uint256[] memory a, uint256 n) private pure {
         if (n > a.length) n = new uint256[](0)[0];
-        assembly ("memory-safe") {
+        /// @solidity memory-safe-assembly
+        assembly {
             mstore(a, n)
         }
     }
@@ -1127,7 +1133,8 @@ library LibBytes {
     /// @custom:solar-trusted
     function _truncateParts(bytes[] memory a, uint256 n) private pure {
         if (n > a.length) n = new uint256[](0)[0];
-        assembly ("memory-safe") {
+        /// @solidity memory-safe-assembly
+        assembly {
             mstore(a, n)
         }
     }
@@ -1136,7 +1143,8 @@ library LibBytes {
     /// library function without assembly.
     /// @custom:solar-trusted
     function _return(bytes memory data) private pure {
-        assembly ("memory-safe") {
+        /// @solidity memory-safe-assembly
+        assembly {
             return(add(data, 0x20), mload(data))
         }
     }
