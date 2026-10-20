@@ -262,8 +262,16 @@ library SignatureCheckerLib {
         if (offset > n - 32) return false;
         uint256 length = uint256(_readBytes32(signature, offset));
         if (length > n - 32 - offset) return false;
-        bytes memory inner = _slice(signature, offset + 32, length);
-        return _erc1271(signer, abi.encodePacked(_ERC1271_MAGIC, hash, uint256(0x40), length, inner));
+        // `isValidSignature(hash, inner)`, built around the inner signature's
+        // bytes: the selector, the hash, the bytes' offset and length, then the
+        // bytes, copied once.
+        bytes memory payload = new bytes(100 + length);
+        _writeBytes4(payload, 0, _ERC1271_MAGIC);
+        _writeBytes32(payload, 4, hash);
+        _writeBytes32(payload, 36, bytes32(uint256(0x40)));
+        _writeBytes32(payload, 68, bytes32(length));
+        _copy(payload, 100, signature, offset + 32, length);
+        return _erc1271(signer, payload);
     }
 
     /// @dev The 32 bytes of `b` at `offset`.
@@ -278,23 +286,34 @@ library SignatureCheckerLib {
         }
     }
 
-    /// @dev A copy of the `count` bytes of `b` at `offset`. Reverts with
-    /// `Panic(0x32)` unless they all lie inside `b`, before allocating.
-    function _slice(bytes memory b, uint256 offset, uint256 count)
-        private
-        pure
-        returns (bytes memory result)
-    {
-        if (offset > b.length || count > b.length - offset) offset = _outOfBounds();
-        result = new bytes(count);
-        for (uint256 k; k < count; ++k) {
-            result[k] = b[offset + k];
+    /// @dev Writes `value` into `b` at `offset`.
+    /// @custom:solar-inline
+    function _writeBytes4(bytes memory b, uint256 offset, bytes4 value) private pure {
+        for (uint256 k; k < 4; ++k) {
+            b[offset + k] = value[k];
         }
     }
 
-    /// @dev Raises the `Panic(0x32)` an out-of-range index raises, which is the
-    /// portable spelling of a failed range check.
-    function _outOfBounds() private pure returns (uint256) {
-        return new uint256[](0)[0];
+    /// @dev Writes `value` into `b` at `offset`.
+    /// @custom:solar-inline
+    function _writeBytes32(bytes memory b, uint256 offset, bytes32 value) private pure {
+        for (uint256 k; k < 32; ++k) {
+            b[offset + k] = value[k];
+        }
+    }
+
+    /// @dev Copies `count` bytes from `src` at `srcOffset` to `dst` at
+    /// `dstOffset`, front to back.
+    /// @custom:solar-inline
+    function _copy(
+        bytes memory dst,
+        uint256 dstOffset,
+        bytes memory src,
+        uint256 srcOffset,
+        uint256 count
+    ) private pure {
+        for (uint256 k; k < count; ++k) {
+            dst[dstOffset + k] = src[srcOffset + k];
+        }
     }
 }
