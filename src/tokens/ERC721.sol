@@ -593,7 +593,7 @@ abstract contract ERC721 {
         // Bubble up the revert if the call reverts.
         if (!success && answer.length != 0) _revertWith(answer);
         // Load the returndata and compare it.
-        if (answer.length < 0x20 || abi.decode(answer, (bytes4)) != bytes4(0x150b7a02)) {
+        if (answer.length < 0x20 || abi.decode(answer, (bytes32)) != bytes32(bytes4(0x150b7a02))) {
             revert TransferToNonERC721ReceiverImplementer();
         }
     }
