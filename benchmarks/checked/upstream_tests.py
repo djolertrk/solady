@@ -78,8 +78,26 @@ LIBRARIES = [
     "auth/TimedRoles",
     "tokens/ERC2981",
     "tokens/ERC20Votes",
+    "Multicallable",
+    "MetadataReaderLib",
+    "Lifebuoy",
+    "DeploylessPredeployQueryer",
+    "utils/ext/delegatexyz/DelegateCheckerLib",
+    "utils/legacy/LibCWIA",
+    "utils/legacy/CWIA",
 ]
 
+
+# Tests that fail on upstream's own build too, for reasons outside the
+# sources under test. A leg succeeds when no other test fails.
+KNOWN_FAILURES = {
+    # Upstream's `toNibbles` allocates too little memory for the long input the
+    # fuzzer draws, which the test's memory check catches; the ports pass it.
+    "test/LibBit.t.sol:LibBitTest::testToNibblesDifferential(uint256,bytes)",
+    # The fuzzer draws Foundry's console address as the deployer, whose calls
+    # Foundry intercepts, on every leg.
+    "test/Lifebuoy.t.sol:LifebuoyTest::testLifebuoyCreateDeployment(address,address,uint256)",
+}
 
 # Suites not named after the library they test.
 SUITES = {
@@ -177,10 +195,11 @@ def run(args):
             any(name.startswith(f"{test_path(lib)}:") for name in tests)
             for lib in libraries
         )
-        succeeded = (
-            result.returncode == 0
-            and complete
-            and all(test["status"] == "Success" for test in tests.values())
+        failures = {
+            name for name, test in tests.items() if test["status"] != "Success"
+        }
+        succeeded = complete and (
+            result.returncode == 0 if not failures else failures <= KNOWN_FAILURES
         )
         results[label] = {
             "exit_code": result.returncode,
