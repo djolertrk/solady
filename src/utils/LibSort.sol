@@ -559,43 +559,23 @@ library LibSort {
         (values[i], values[j]) = (values[j], values[i]);
     }
 
-    /// @dev Whether `a` contains the same value at two indices. Up to six
-    /// elements compare every pair. Longer arrays go through an open-addressed
-    /// table of the values, at most two-thirds full, where zero marks an empty
-    /// slot and a zero element is remembered on its own.
+    /// @dev Whether `a` contains the same value at two indices, through an
+    /// open-addressed table of indices at least twice as long as `a`.
     function _hasDuplicate(uint256[] memory a) private pure returns (bool) {
-        uint256 n = a.length;
-        if (n < 2) return false;
-        if (n < 7) {
-            for (uint256 i; i < n - 1; ++i) {
-                uint256 x = a[i];
-                for (uint256 j = i + 1; j < n; ++j) {
-                    if (a[j] == x) return true;
-                }
-            }
-            return false;
-        }
-        uint256 capacity = 2;
-        while (capacity * 2 < n * 3) capacity *= 2;
+        if (a.length < 2) return false;
+        uint256 capacity = 1;
+        while (capacity < a.length * 2) capacity *= 2;
         uint256[] memory seen = new uint256[](capacity);
         uint256 mask = capacity - 1;
-        bool zero;
-        for (uint256 i = n; i != 0;) {
+        for (uint256 i = a.length; i != 0;) {
             --i;
-            uint256 x = a[i];
-            if (x == 0) {
-                if (zero) return true;
-                zero = true;
-                continue;
-            }
-            uint256 slot = mulmod(x, 0x100000000000000000000000000000051, ~uint256(0xbc)) & mask;
-            while (true) {
-                uint256 y = seen[slot];
-                if (y == 0) break;
-                if (y == x) return true;
+            uint256 slot = mulmod(a[i], 0x100000000000000000000000000000051, ~uint256(0xbc))
+                & mask;
+            while (seen[slot] != 0) {
+                if (a[seen[slot] - 1] == a[i]) return true;
                 slot = (slot + 1) & mask;
             }
-            seen[slot] = x;
+            seen[slot] = i + 1;
         }
         return false;
     }
@@ -858,43 +838,23 @@ library LibSort {
         (values[i], values[j]) = (values[j], values[i]);
     }
 
-    /// @dev Whether `a` contains the same value at two indices. Up to six
-    /// elements compare every pair. Longer arrays go through an open-addressed
-    /// table of the values, at most two-thirds full, where zero marks an empty
-    /// slot and a zero element is remembered on its own.
+    /// @dev Whether `a` contains the same value at two indices, through an
+    /// open-addressed table of indices at least twice as long as `a`.
     function _hasDuplicate(int256[] memory a) private pure returns (bool) {
-        uint256 n = a.length;
-        if (n < 2) return false;
-        if (n < 7) {
-            for (uint256 i; i < n - 1; ++i) {
-                int256 x = a[i];
-                for (uint256 j = i + 1; j < n; ++j) {
-                    if (a[j] == x) return true;
-                }
-            }
-            return false;
-        }
-        uint256 capacity = 2;
-        while (capacity * 2 < n * 3) capacity *= 2;
+        if (a.length < 2) return false;
+        uint256 capacity = 1;
+        while (capacity < a.length * 2) capacity *= 2;
         uint256[] memory seen = new uint256[](capacity);
         uint256 mask = capacity - 1;
-        bool zero;
-        for (uint256 i = n; i != 0;) {
+        for (uint256 i = a.length; i != 0;) {
             --i;
-            uint256 x = uint256(a[i]);
-            if (x == 0) {
-                if (zero) return true;
-                zero = true;
-                continue;
-            }
-            uint256 slot = mulmod(x, 0x100000000000000000000000000000051, ~uint256(0xbc)) & mask;
-            while (true) {
-                uint256 y = seen[slot];
-                if (y == 0) break;
-                if (y == x) return true;
+            uint256 slot = mulmod(uint256(a[i]), 0x100000000000000000000000000000051, ~uint256(0xbc))
+                & mask;
+            while (seen[slot] != 0) {
+                if (a[seen[slot] - 1] == a[i]) return true;
                 slot = (slot + 1) & mask;
             }
-            seen[slot] = x;
+            seen[slot] = i + 1;
         }
         return false;
     }
@@ -1155,43 +1115,23 @@ library LibSort {
         (values[i], values[j]) = (values[j], values[i]);
     }
 
-    /// @dev Whether `a` contains the same value at two indices. Up to six
-    /// elements compare every pair. Longer arrays go through an open-addressed
-    /// table of the values, at most two-thirds full, where zero marks an empty
-    /// slot and a zero element is remembered on its own.
+    /// @dev Whether `a` contains the same value at two indices, through an
+    /// open-addressed table of indices at least twice as long as `a`.
     function _hasDuplicate(address[] memory a) private pure returns (bool) {
-        uint256 n = a.length;
-        if (n < 2) return false;
-        if (n < 7) {
-            for (uint256 i; i < n - 1; ++i) {
-                address x = a[i];
-                for (uint256 j = i + 1; j < n; ++j) {
-                    if (a[j] == x) return true;
-                }
-            }
-            return false;
-        }
-        uint256 capacity = 2;
-        while (capacity * 2 < n * 3) capacity *= 2;
+        if (a.length < 2) return false;
+        uint256 capacity = 1;
+        while (capacity < a.length * 2) capacity *= 2;
         uint256[] memory seen = new uint256[](capacity);
         uint256 mask = capacity - 1;
-        bool zero;
-        for (uint256 i = n; i != 0;) {
+        for (uint256 i = a.length; i != 0;) {
             --i;
-            uint256 x = uint256(uint160(a[i]));
-            if (x == 0) {
-                if (zero) return true;
-                zero = true;
-                continue;
-            }
-            uint256 slot = mulmod(x, 0x100000000000000000000000000000051, ~uint256(0xbc)) & mask;
-            while (true) {
-                uint256 y = seen[slot];
-                if (y == 0) break;
-                if (y == x) return true;
+            uint256 slot = mulmod(uint256(uint160(a[i])), 0x100000000000000000000000000000051, ~uint256(0xbc))
+                & mask;
+            while (seen[slot] != 0) {
+                if (a[seen[slot] - 1] == a[i]) return true;
                 slot = (slot + 1) & mask;
             }
-            seen[slot] = x;
+            seen[slot] = i + 1;
         }
         return false;
     }
@@ -1438,43 +1378,23 @@ library LibSort {
         (values[i], values[j]) = (values[j], values[i]);
     }
 
-    /// @dev Whether `a` contains the same value at two indices. Up to six
-    /// elements compare every pair. Longer arrays go through an open-addressed
-    /// table of the values, at most two-thirds full, where zero marks an empty
-    /// slot and a zero element is remembered on its own.
+    /// @dev Whether `a` contains the same value at two indices, through an
+    /// open-addressed table of indices at least twice as long as `a`.
     function _hasDuplicate(bytes32[] memory a) private pure returns (bool) {
-        uint256 n = a.length;
-        if (n < 2) return false;
-        if (n < 7) {
-            for (uint256 i; i < n - 1; ++i) {
-                bytes32 x = a[i];
-                for (uint256 j = i + 1; j < n; ++j) {
-                    if (a[j] == x) return true;
-                }
-            }
-            return false;
-        }
-        uint256 capacity = 2;
-        while (capacity * 2 < n * 3) capacity *= 2;
+        if (a.length < 2) return false;
+        uint256 capacity = 1;
+        while (capacity < a.length * 2) capacity *= 2;
         uint256[] memory seen = new uint256[](capacity);
         uint256 mask = capacity - 1;
-        bool zero;
-        for (uint256 i = n; i != 0;) {
+        for (uint256 i = a.length; i != 0;) {
             --i;
-            uint256 x = uint256(a[i]);
-            if (x == 0) {
-                if (zero) return true;
-                zero = true;
-                continue;
-            }
-            uint256 slot = mulmod(x, 0x100000000000000000000000000000051, ~uint256(0xbc)) & mask;
-            while (true) {
-                uint256 y = seen[slot];
-                if (y == 0) break;
-                if (y == x) return true;
+            uint256 slot = mulmod(uint256(a[i]), 0x100000000000000000000000000000051, ~uint256(0xbc))
+                & mask;
+            while (seen[slot] != 0) {
+                if (a[seen[slot] - 1] == a[i]) return true;
                 slot = (slot + 1) & mask;
             }
-            seen[slot] = x;
+            seen[slot] = i + 1;
         }
         return false;
     }
