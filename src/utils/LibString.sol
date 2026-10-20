@@ -198,6 +198,7 @@ library LibString {
         pure
         returns (string memory result)
     {
+        _checkHexLength(value, byteCount);
         return _toHexString(value, byteCount);
     }
 
@@ -211,6 +212,7 @@ library LibString {
         pure
         returns (string memory result)
     {
+        _checkHexLength(value, byteCount);
         return _toHexStringNoPrefix(value, byteCount);
     }
 
@@ -278,13 +280,13 @@ library LibString {
     /// @dev Returns the hexadecimal representation of `value`.
     /// The output is prefixed with "0x" and encoded using 2 hexadecimal digits per byte.
     function toHexString(address value) internal pure returns (string memory result) {
-        return toHexString(uint160(value), 20);
+        return _toHexString(uint160(value), 20);
     }
 
     /// @dev Returns the hexadecimal representation of `value`.
     /// The output is encoded using 2 hexadecimal digits per byte.
     function toHexStringNoPrefix(address value) internal pure returns (string memory result) {
-        return toHexStringNoPrefix(uint160(value), 20);
+        return _toHexStringNoPrefix(uint160(value), 20);
     }
 
     /// @dev Returns the hex encoded string from the raw bytes.
@@ -988,8 +990,8 @@ library LibString {
     }
 
     /// @dev The low `byteCount` bytes of `value` as lowercase hexadecimal, two
-    /// digits per byte, without a prefix. Reverts with `HexLengthInsufficient()`
-    /// when `value` does not fit in them.
+    /// digits per byte, without a prefix. `value` must fit in them, which
+    /// `_checkHexLength` checks for a caller's `byteCount`.
     function _toHexStringNoPrefix(uint256 value, uint256 byteCount)
         private
         pure
@@ -1051,15 +1053,22 @@ library LibString {
         if (value >> 4 != 0) ++n;
     }
 
+    /// @dev Reverts with `HexLengthInsufficient()` when `value` does not fit in
+    /// its low `byteCount` bytes. The functions taking a caller's `byteCount`
+    /// check it before they allocate the digits, which a failing call does
+    /// not need; a length found from `value` always fits.
+    function _checkHexLength(uint256 value, uint256 byteCount) private pure {
+        if (byteCount < 32 && value >> (8 * byteCount) != 0) revert HexLengthInsufficient();
+    }
+
     /// @dev Writes the low `byteCount` bytes of `value` into `out` at `offset`
-    /// as `2 * byteCount` lowercase hexadecimal digits. Reverts with
-    /// `HexLengthInsufficient()` when `value` does not fit in them. Sixteen
-    /// bytes make a word of digits; bytes past the word's are zeros.
+    /// as `2 * byteCount` lowercase hexadecimal digits, once `_checkHexLength`
+    /// found that `value` fits in them. Sixteen bytes make a word of digits;
+    /// bytes past the word's are zeros.
     function _hexInto(bytes memory out, uint256 offset, uint256 value, uint256 byteCount)
         private
         pure
     {
-        if (byteCount < 32 && value >> (8 * byteCount) != 0) revert HexLengthInsufficient();
         uint256 o = offset;
         for (; byteCount > 32; --byteCount) {
             (out[o], out[o + 1]) = ("0", "0");
