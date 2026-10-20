@@ -3,6 +3,14 @@ pragma solidity ^0.8.4;
 
 /// @notice Library for reading contract metadata robustly.
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/utils/MetadataReaderLib.sol)
+///
+/// The checked port makes each query with the trusted `_staticCallWord`, which passes the
+/// same gas stipend and copies only the first word of the returndata, as the assembly does.
+/// The checks of the `abi.decode` and the scan for the null byte, a word at a time, are
+/// Solidity. The trusted `_returnDataWord` and `_returnDataCopy` copy the length word and the
+/// string's bytes these checks decide on, or the bytes up to the null byte, as the assembly
+/// does, since Solidity only gives a call's whole returndata.
+/// @custom:solar-safe memory arithmetic
 library MetadataReaderLib {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                         CONSTANTS                          */
@@ -136,88 +144,148 @@ library MetadataReaderLib {
     /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
 
     /// @dev Attempts to read and return a string at `target`.
-    function _string(address target, bytes32 ptr, uint256 limit, uint256 gasStipend)
+    function _string(address target, bytes memory ptr, uint256 limit, uint256 gasStipend)
         private
         view
         returns (string memory result)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            function min(x_, y_) -> _z {
-                _z := xor(x_, mul(xor(x_, y_), lt(y_, x_)))
-            }
-            for {} staticcall(gasStipend, target, add(ptr, 0x20), mload(ptr), 0x00, 0x20) {} {
-                let m := mload(0x40) // Grab the free memory pointer.
-                let s := add(0x20, m) // Start of the string's bytes in memory.
-                // Attempt to `abi.decode` if the returndatasize is greater or equal to 64.
-                if iszero(lt(returndatasize(), 0x40)) {
-                    let o := mload(0x00) // Load the string's offset in the returndata.
-                    // If the string's offset is within bounds.
-                    if iszero(gt(o, sub(returndatasize(), 0x20))) {
-                        returndatacopy(m, o, 0x20) // Copy the string's length.
-                        // If the full string's end is within bounds.
-                        // Note: If the full string doesn't fit, the `abi.decode` must be aborted
-                        // for compliance purposes, regardless if the truncated string can fit.
-                        if iszero(gt(mload(m), sub(returndatasize(), add(o, 0x20)))) {
-                            let n := min(mload(m), limit) // Truncate if needed.
-                            mstore(m, n) // Overwrite the length.
-                            returndatacopy(s, add(o, 0x20), n) // Copy the string's bytes.
-                            mstore(add(s, n), 0) // Zeroize the slot after the string.
-                            mstore(0x40, add(0x20, add(s, n))) // Allocate memory for the string.
-                            result := m
-                            break
-                        }
-                    }
+        (bool success, uint256 size, bytes32 word) = _staticCallWord(target, gasStipend, ptr);
+        if (!success) return result;
+        // Attempt to `abi.decode` if the returndatasize is greater or equal to 64.
+        if (size >= 0x40) {
+            uint256 o = uint256(word); // The string's offset in the returndata.
+            // If the string's offset is within bounds.
+            if (o <= size - 0x20) {
+                uint256 l = uint256(_returnDataWord(o)); // The string's length.
+                // If the full string's end is within bounds.
+                // Note: If the full string doesn't fit, the `abi.decode` must be aborted
+                // for compliance purposes, regardless if the truncated string can fit.
+                if (l <= size - (o + 0x20)) {
+                    // Truncate if needed.
+                    return string(_returnDataCopy(o + 0x20, l < limit ? l : limit));
                 }
-                // Try interpreting as a null-terminated string.
-                let n := min(returndatasize(), limit) // Truncate if needed.
-                returndatacopy(s, 0, n) // Copy the string's bytes.
-                mstore8(add(s, n), 0) // Place a '\0' at the end.
-                let i := s // Pointer to the next byte to scan.
-                for {} // Scan for '\0'.
-                 byte(0, mload(i)) { i := add(i, 1) } {}
-                mstore(m, sub(i, s)) // Store the string's length.
-                mstore(i, 0) // Zeroize the slot after the string.
-                mstore(0x40, add(0x20, i)) // Allocate memory for the string.
-                result := m
-                break
             }
         }
+        // Try interpreting as a null-terminated string.
+        uint256 n = size < limit ? size : limit; // Truncate if needed.
+        uint256 i = _firstZeroByte(word); // Scan for '\0'.
+        if (i > n) i = n;
+        if (i == 0) return result;
+        // If the first word has no '\0', scan on in a copy of the bytes, a word at a time.
+        if (i == 0x20 && n > 0x20) {
+            bytes memory s = _returnDataCopy(0, n);
+            uint256 z;
+            do {
+                uint256 m = n - i < 0x20 ? n - i : 0x20;
+                // The word's bytes past `m` are zero, so `z <= m`.
+                z = _firstZeroByte(_gather(s, i, m));
+                i += z;
+            } while (z == 0x20 && i < n);
+            if (i == n) return string(s);
+        }
+        result = string(_returnDataCopy(0, i));
     }
 
     /// @dev Attempts to read and return a uint at `target`.
-    function _uint(address target, bytes32 ptr, uint256 gasStipend)
+    function _uint(address target, bytes memory ptr, uint256 gasStipend)
         private
         view
         returns (uint256 result)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := mul(
-                mload(0x20),
-                and( // The arguments of `and` are evaluated from right to left.
-                    gt(returndatasize(), 0x1f), // At least 32 bytes returned.
-                    staticcall(gasStipend, target, add(ptr, 0x20), mload(ptr), 0x20, 0x20)
-                )
-            )
-        }
+        (bool success, uint256 size, bytes32 word) = _staticCallWord(target, gasStipend, ptr);
+        // At least 32 bytes returned.
+        if (success && size > 0x1f) result = uint256(word);
     }
 
     /// @dev Casts the function selector `s` into a pointer.
-    function _ptr(uint256 s) private pure returns (bytes32 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            // Layout the calldata in the scratch space for temporary usage.
-            mstore(0x04, s) // Store the function selector.
-            mstore(result, 4) // Store the length.
-        }
+    /// The port returns the calldata, the 4-byte selector.
+    function _ptr(uint256 s) private pure returns (bytes memory result) {
+        result = abi.encodeWithSelector(bytes4(uint32(s)));
     }
 
     /// @dev Casts the `data` into a pointer.
-    function _ptr(bytes memory data) private pure returns (bytes32 result) {
+    /// The port passes the calldata on as it is.
+    function _ptr(bytes memory data) private pure returns (bytes memory result) {
+        result = data;
+    }
+
+    /// @dev The index of the first zero byte of `w`, or 32 if it has none.
+    function _firstZeroByte(bytes32 w) private pure returns (uint256 i) {
+        uint256 x = uint256(w);
+        if (x >> 248 == 0) return 0;
+        uint256 m = 0x7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f;
+        // The top bit of each byte of `x | ((x & m) + m)` is set where `x`'s byte is not
+        // zero, and `(x & m) + m` carries into no other byte.
+        uint256 t = ~(x | ((x & m) + m)) & ~m;
+        if (t == 0) return 32;
+        // Count the bytes before the first set top bit.
+        if (t >> 128 == 0) (i, t) = (16, t << 128);
+        if (t >> 192 == 0) (i, t) = (i + 8, t << 64);
+        if (t >> 224 == 0) (i, t) = (i + 4, t << 32);
+        if (t >> 240 == 0) (i, t) = (i + 2, t << 16);
+        if (t >> 248 == 0) ++i;
+    }
+
+    /// @dev The `count` bytes of `b` from `offset`, for `count` at most 32, left-aligned in a
+    /// word whose other bytes are zero.
+    /// @custom:solar-inline
+    function _gather(bytes memory b, uint256 offset, uint256 count)
+        private
+        pure
+        returns (bytes32 w)
+    {
+        for (uint256 k; k < count; ++k) {
+            w |= bytes32(b[offset + k]) >> (8 * k);
+        }
+    }
+
+    /// @dev Static-calls `target` with `payload` and `gasLimit` gas, and returns the first word
+    /// of the returndata, right padded with zeros, which is all of it that is copied.
+    /// `totalSize` is how many bytes there were. Solidity copies a call's whole returndata.
+    /// @custom:solar-trusted
+    function _staticCallWord(address target, uint256 gasLimit, bytes memory payload)
+        private
+        view
+        returns (bool success, uint256 totalSize, bytes32 word)
+    {
         /// @solidity memory-safe-assembly
         assembly {
-            result := data
+            mstore(0x00, 0)
+            success := staticcall(gasLimit, target, add(payload, 0x20), mload(payload), 0x00, 0x20)
+            totalSize := returndatasize()
+            word := mload(0x00)
+        }
+    }
+
+    /// @dev The word of the last call's returndata at `start`. Solidity only gives a call's
+    /// whole returndata. The caller calls nothing in between, and checks that the word lies
+    /// inside the returndata.
+    /// @custom:solar-trusted
+    function _returnDataWord(uint256 start) private pure returns (bytes32 word) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            returndatacopy(0x00, start, 0x20)
+            word := mload(0x00)
+        }
+    }
+
+    /// @dev The `count` bytes of the last call's returndata from `start`, as a new buffer
+    /// right padded with zeros. Solidity only gives a call's whole returndata. The caller
+    /// calls nothing in between, and checks that the bytes lie inside the returndata.
+    /// @custom:solar-trusted
+    function _returnDataCopy(uint256 start, uint256 count)
+        private
+        pure
+        returns (bytes memory output)
+    {
+        /// @solidity memory-safe-assembly
+        assembly {
+            output := mload(0x40)
+            mstore(output, count)
+            let o := add(output, 0x20)
+            returndatacopy(o, start, count)
+            mstore(add(o, count), 0) // Zeroize the slot after the bytes.
+            mstore(0x40, add(o, and(add(count, 0x1f), not(0x1f)))) // Allocate the memory.
         }
     }
 }
