@@ -36,7 +36,16 @@ using LibPRNG for LazyShuffler global;
 /// the signed and address shuffles go through upstream's trusted array casts. A
 /// shuffle keeps the state in a local and stores it when it ends, where the
 /// assembly stores it after every draw: they differ only for an array that
-/// overlaps the generator's memory.
+/// overlaps the generator's memory. A full shuffle takes both draws of a hash in
+/// one pass and tests its bound once per pass, so for an even length it also makes
+/// the last pass's swap of the first element with itself, which the assembly
+/// skips. A lazy shuffler's `next` reads each bucket word once and writes the words
+/// both entries end with, once when they share a bucket, where the assembly reads a
+/// bucket again for each entry it writes: the storage ends the same. One deliberate
+/// difference, as later upstream releases have it: `grow` reverts with
+/// `InvalidNewLazyShufflerLength()` for a length of `2**32 - 1` or more, which the
+/// assembly stores without its high bits, and for growing past 65535 entries from fewer,
+/// after which the assembly reads the 16-bit entries as 32-bit ones.
 /// @custom:solar-safe memory arithmetic
 library LibPRNG {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
@@ -118,7 +127,8 @@ library LibPRNG {
         uint256 r3 = mulmod(r2, a, n);
         uint256 sum = _laneSum((m & r0) + (m & r1)) + _laneSum((m & r2) + (m & r3))
             + _laneSum(m & mulmod(r3, a, n));
-        result = (int256(26614938895861601847173011183 * sum) >> 96) - 7745966692414833770;
+        // The product stays below `2**161`, so the logical shift is the assembly's arithmetic one.
+        result = int256((26614938895861601847173011183 * sum) >> 96) - 7745966692414833770;
     }
 
     /// @dev Returns a sample from the unit exponential distribution denominated in `WAD`.
@@ -130,19 +140,20 @@ library LibPRNG {
         if (w <= p) {
             uint256 n = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff43; // Prime.
             uint256 a = 0x100000000000000000000000000000051; // Prime and a primitive root of `n`.
+            uint128 k; // The number of whole units drawn, added as `WAD`s at the end.
             while (true) {
                 r = mulmod(r, a, n);
-                if (r << 129 >= w) {
+                uint256 q = r << 129;
+                if (q >= w) {
                     r = mulmod(r, a, n);
-                    result += 1000000000000000000;
-                    w = r << 1;
+                    ++k;
                     p = r << 129;
-                    if (w >= p) break;
-                    continue;
+                    q = p;
                 }
                 w = r << 1;
-                if (w >= r << 129) break;
+                if (w >= q) break;
             }
+            result = uint256(k) * 1000000000000000000;
         }
         result += p / (uint256(170141183460469231732) << 129);
     }
@@ -157,19 +168,20 @@ library LibPRNG {
         if (n == 0) return;
         // The state stays in a local until the shuffle ends.
         uint256 r = prng.state;
-        while (true) {
+        while (n > 1) {
             r = uint256(keccak256(abi.encode(r)));
             // Note that there will be a very tiny modulo bias
             // if the length of the array is not a power of 2.
             // For all practical purposes, it is negligible
             // and will not be a fairness or security concern.
             uint256 j = (r >> 128) % n;
-            if (--n == 0) break;
-            (a[n], a[j]) = (a[j], a[n]);
-            j = (r & type(uint128).max) % n;
-            if (--n == 0) break;
-            (a[n], a[j]) = (a[j], a[n]);
+            (a[n - 1], a[j]) = (a[j], a[n - 1]);
+            j = ((r << 128) >> 128) % (n - 1);
+            (a[n - 2], a[j]) = (a[j], a[n - 2]);
+            n -= 2;
         }
+        // An odd length draws once more, for a last element that stays in place.
+        if (n == 1) r = uint256(keccak256(abi.encode(r)));
         prng.state = r;
     }
 
@@ -189,21 +201,29 @@ library LibPRNG {
         uint256 n = a.length;
         if (k > n) k = n;
         if (k == 0) return;
-        uint256 b;
         // The state stays in a local until the shuffle ends.
         uint256 r = prng.state;
-        while (true) {
+        uint256 b;
+        // `m` counts the elements from `b` on, which the draws choose from; two or more of the
+        // first `k` remain while it exceeds `n - k + 1`.
+        uint256 m = n;
+        for (uint256 last = n - k + 1; m > last; m -= 2) {
             r = uint256(keccak256(abi.encode(r)));
             // Note that there will be a very tiny modulo bias
             // if the length of the array is not a power of 2.
             // For all practical purposes, it is negligible
             // and will not be a fairness or security concern.
-            uint256 j = b + (r >> 128) % (n - b);
+            uint256 j = b + (r >> 128) % m;
             (a[b], a[j]) = (a[j], a[b]);
-            if (++b == k) break;
-            j = b + (r & type(uint128).max) % (n - b);
+            j = b + 1 + ((r << 128) >> 128) % (m - 1);
+            (a[b + 1], a[j]) = (a[j], a[b + 1]);
+            b += 2;
+        }
+        // An odd `k` draws once more, for its last element.
+        if (b < k) {
+            r = uint256(keccak256(abi.encode(r)));
+            uint256 j = b + (r >> 128) % m;
             (a[b], a[j]) = (a[j], a[b]);
-            if (++b == k) break;
         }
         prng.state = r;
     }
@@ -226,19 +246,20 @@ library LibPRNG {
         if (n == 0) return;
         // The state stays in a local until the shuffle ends.
         uint256 r = prng.state;
-        while (true) {
+        while (n > 1) {
             r = uint256(keccak256(abi.encode(r)));
             // Note that there will be a very tiny modulo bias
             // if the length of the array is not a power of 2.
             // For all practical purposes, it is negligible
             // and will not be a fairness or security concern.
             uint256 o = (r >> 128) % n;
-            if (--n == 0) break;
-            (a[n], a[o]) = (a[o], a[n]);
-            o = (r & type(uint128).max) % n;
-            if (--n == 0) break;
-            (a[n], a[o]) = (a[o], a[n]);
+            (a[n - 1], a[o]) = (a[o], a[n - 1]);
+            o = ((r << 128) >> 128) % (n - 1);
+            (a[n - 2], a[o]) = (a[o], a[n - 2]);
+            n -= 2;
         }
+        // An odd length draws once more, for a last element that stays in place.
+        if (n == 1) r = uint256(keccak256(abi.encode(r)));
         prng.state = r;
     }
 
@@ -310,7 +331,11 @@ library LibPRNG {
         uint256 state = $._state; // The packed value at `$`.
         uint256 n = state >> 224; // Length of `$`.
         if (index >= n) revert LazyShufflerGetOutOfBounds();
-        result = _getAt(n > 0xfffe, state, index);
+        uint256 w = n > 0xfffe ? 1 : 0; // Whether entries are 32 bits wide.
+        uint256 s = (index >> (4 - w)) + ((state << 32) >> 64); // Bucket slot.
+        uint256 o = (index & (15 >> w)) << (4 + w); // Bucket slot offset (bits).
+        result = (_sload(s) >> o) & (0xffffffff >> ((w ^ 1) << 4));
+        result = result == 0 ? index : result - 1;
     }
 
     /// @dev Does a single Fisher-Yates shuffle step, increments the `numShuffled` in `$`,
@@ -320,16 +345,48 @@ library LibPRNG {
     function next(LazyShuffler storage $, uint256 randomness) internal returns (uint256 chosen) {
         uint256 state = $._state; // The packed value at `$`.
         uint256 shuffled = state & 0xffffffff; // Number of elements shuffled.
-        uint256 n = state >> 224; // Length of `$`.
-        uint256 remainder = n - shuffled; // Number of elements left to shuffle.
-        if (remainder == 0) revert LazyShuffleFinished();
-        // (Re)hash the randomness so that we don't
-        // need to expect guarantees on its distribution.
-        uint256 index = uint256(keccak256(abi.encode(randomness, shuffled))) % remainder + shuffled;
-        bool u32 = n > 0xfffe;
-        chosen = _getAt(u32, state, index);
-        _setAt(u32, state, index, _getAt(u32, state, shuffled));
-        _setAt(u32, state, shuffled, chosen);
+        uint256 index;
+        // The blocks keep the legacy pipeline's stack within reach.
+        {
+            uint256 n = state >> 224; // Length of `$`.
+            uint256 remainder = n - shuffled; // Number of elements left to shuffle.
+            if (remainder == 0) revert LazyShuffleFinished();
+            // (Re)hash the randomness so that we don't
+            // need to expect guarantees on its distribution.
+            index = uint256(keccak256(abi.encode(randomness, shuffled))) % remainder + shuffled;
+        }
+        uint256 m; // Value mask.
+        uint256 sI; // Bucket slot of `index`.
+        uint256 oI; // Its offset (bits).
+        uint256 sS; // Bucket slot of `shuffled`.
+        uint256 oS; // Its offset (bits).
+        {
+            uint256 w = state >> 224 > 0xfffe ? 1 : 0; // Whether entries are 32 bits wide.
+            uint256 base = (state << 32) >> 64; // The permutation slot.
+            m = 0xffffffff >> ((w ^ 1) << 4);
+            sI = (index >> (4 - w)) + base;
+            oI = (index & (15 >> w)) << (4 + w);
+            sS = (shuffled >> (4 - w)) + base;
+            oS = (shuffled & (15 >> w)) << (4 + w);
+        }
+        uint256 vI = _sload(sI);
+        chosen = (vI >> oI) & m;
+        chosen = chosen == 0 ? index : chosen - 1;
+        // Record the value at `shuffled` at `index`, then `chosen` at `shuffled`, reading and
+        // writing each bucket word once.
+        if (sS == sI) {
+            uint256 value = (vI >> oS) & m;
+            value = value == 0 ? shuffled : value - 1; // The value at `shuffled`.
+            vI ^= (((vI >> oI) & m) ^ (index == value ? 0 : value + 1)) << oI;
+            vI ^= (((vI >> oS) & m) ^ (shuffled == chosen ? 0 : chosen + 1)) << oS;
+            _sstore(sI, vI);
+        } else {
+            uint256 vS = _sload(sS);
+            uint256 value = (vS >> oS) & m;
+            _sstore(sS, vS ^ ((value ^ (shuffled == chosen ? 0 : chosen + 1)) << oS));
+            value = value == 0 ? shuffled : value - 1; // The value at `shuffled`.
+            _sstore(sI, vI ^ ((((vI >> oI) & m) ^ (index == value ? 0 : value + 1)) << oI));
+        }
         $._state = state + 1; // Increment the `numShuffled` by 1, and store it.
     }
 
@@ -362,29 +419,6 @@ library LibPRNG {
     /// top lane: the bits it carries past the word are dropped, as the assembly drops them.
     function _laneSum(uint256 x) private pure returns (uint256) {
         return _mul(0x1000000000000000100000000000000010000000000000001, x) >> 192;
-    }
-
-    /// @dev The permuted value at `i`, or `i` itself where the permutation holds zero: entries
-    /// are 16 bits wide, or 32 bits once the length passes `0xfffe`, at `permutationSlot`
-    /// onwards.
-    function _getAt(bool u32, uint256 state, uint256 i) private view returns (uint256 value) {
-        uint256 w = u32 ? 1 : 0;
-        uint256 s = (i >> (4 - w)) + ((state << 32) >> 64); // Bucket slot.
-        uint256 o = (i & (15 >> w)) << (4 + w); // Bucket slot offset (bits).
-        uint256 m = (uint256(1) << (16 << w)) - 1; // Value mask.
-        value = (_sload(s) >> o) & m;
-        value = value == 0 ? i : value - 1;
-    }
-
-    /// @dev Records `value` at `i`, as zero where it is `i` itself.
-    function _setAt(bool u32, uint256 state, uint256 i, uint256 value) private {
-        uint256 w = u32 ? 1 : 0;
-        uint256 s = (i >> (4 - w)) + ((state << 32) >> 64); // Bucket slot.
-        uint256 o = (i & (15 >> w)) << (4 + w); // Bucket slot offset (bits).
-        uint256 m = (uint256(1) << (16 << w)) - 1; // Value mask.
-        uint256 v = _sload(s); // Bucket slot value.
-        value = i == value ? 0 : value + 1;
-        _sstore(s, v ^ ((((v >> o) ^ value) & m) << o));
     }
 
     /// @dev Unchecked arithmetic for multiplying two numbers.
