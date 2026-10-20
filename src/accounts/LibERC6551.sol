@@ -1,9 +1,19 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.4;
+pragma solidity ^0.8.5;
 
 /// @notice Library for interacting with ERC6551 accounts.
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/accounts/LibERC6551.sol)
 /// @author ERC6551 team (https://github.com/erc6551/reference/blob/main/src/lib/ERC6551AccountLib.sol)
+///
+/// The checked port writes the account's creation code with `abi.encodePacked`, hashes it with
+/// `keccak256` and derives the account's CREATE2 address from the hash. Solidity can only copy a
+/// whole account's code, so the trusted `_codeWord` reads one word of it through the scratch
+/// space and the trusted `_codeCopyInto` copies the footer into a buffer it checks it fits, both
+/// with zeros past the end of the code as the assembly reads it. `createAccount` calls the
+/// registry with the trusted `_callBounded`, which copies at most the one word of the answer the
+/// assembly reads. Addresses come back with their upper 96 bits clear, where the assembly can
+/// return a whole word.
+/// @custom:solar-safe memory arithmetic
 library LibERC6551 {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                       CUSTOM ERRORS                        */
@@ -37,20 +47,15 @@ library LibERC6551 {
         address tokenContract_,
         uint256 tokenId_
     ) internal pure returns (bytes memory result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := mload(0x40) // Grab the free memory pointer..
-            // Layout the variables and bytecode backwards.
-            mstore(add(result, 0xb7), tokenId_)
-            mstore(add(result, 0x97), shr(96, shl(96, tokenContract_)))
-            mstore(add(result, 0x77), chainId_)
-            mstore(add(result, 0x57), salt_)
-            mstore(add(result, 0x37), 0x5af43d82803e903d91602b57fd5bf3)
-            mstore(add(result, 0x28), implementation_)
-            mstore(add(result, 0x14), 0x3d60ad80600a3d3981f3363d3d373d3d3d363d73)
-            mstore(result, 0xb7) // Store the length.
-            mstore(0x40, add(result, 0xd7)) // Allocate the memory.
-        }
+        result = abi.encodePacked(
+            hex"3d60ad80600a3d3981f3363d3d373d3d3d363d73",
+            implementation_,
+            hex"5af43d82803e903d91602b57fd5bf3",
+            salt_,
+            chainId_,
+            uint256(uint160(tokenContract_)),
+            tokenId_
+        );
     }
 
     /// @dev Returns the initialization code hash of the ERC6551 account.
@@ -61,19 +66,17 @@ library LibERC6551 {
         address tokenContract_,
         uint256 tokenId_
     ) internal pure returns (bytes32 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := mload(0x40) // Grab the free memory pointer.
-            // Layout the variables and bytecode backwards.
-            mstore(add(result, 0xa3), tokenId_)
-            mstore(add(result, 0x83), shr(96, shl(96, tokenContract_)))
-            mstore(add(result, 0x63), chainId_)
-            mstore(add(result, 0x43), salt_)
-            mstore(add(result, 0x23), 0x5af43d82803e903d91602b57fd5bf3)
-            mstore(add(result, 0x14), implementation_)
-            mstore(result, 0x3d60ad80600a3d3981f3363d3d373d3d3d363d73)
-            result := keccak256(add(result, 0x0c), 0xb7)
-        }
+        result = keccak256(
+            abi.encodePacked(
+                hex"3d60ad80600a3d3981f3363d3d373d3d3d363d73",
+                implementation_,
+                hex"5af43d82803e903d91602b57fd5bf3",
+                salt_,
+                chainId_,
+                uint256(uint160(tokenContract_)),
+                tokenId_
+            )
+        );
     }
 
     /// @dev Creates an account via the ERC6551 registry.
@@ -84,27 +87,18 @@ library LibERC6551 {
         address tokenContract_,
         uint256 tokenId_
     ) internal returns (address result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let m := mload(0x40)
-            mstore(add(m, 0x14), implementation_)
-            mstore(add(m, 0x34), salt_)
-            mstore(add(m, 0x54), chainId_)
-            mstore(add(m, 0x74), shr(96, shl(96, tokenContract_)))
-            mstore(add(m, 0x94), tokenId_)
-            // `createAccount(address,bytes32,uint256,address,uint256)`.
-            mstore(m, 0x8a54c52f000000000000000000000000)
-            if iszero(
-                and(
-                    gt(returndatasize(), 0x1f),
-                    call(gas(), REGISTRY, 0, add(m, 0x10), 0xa4, 0x00, 0x20)
-                )
-            ) {
-                mstore(0x00, 0x20188a59) // `AccountCreationFailed()`.
-                revert(0x1c, 0x04)
-            }
-            result := mload(0x00)
-        }
+        // `createAccount(address,bytes32,uint256,address,uint256)`.
+        (bool success, bytes memory answer, uint256 answerSize) = _callBounded(
+            REGISTRY,
+            0,
+            gasleft(),
+            abi.encodeWithSelector(
+                0x8a54c52f, implementation_, salt_, chainId_, tokenContract_, tokenId_
+            ),
+            0x20
+        );
+        if (!success || answerSize < 0x20) revert AccountCreationFailed();
+        result = address(uint160(uint256(bytes32(answer))));
     }
 
     /// @dev Returns the address of the ERC6551 account.
@@ -115,25 +109,9 @@ library LibERC6551 {
         address tokenContract_,
         uint256 tokenId_
     ) internal pure returns (address result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            result := mload(0x40) // Grab the free memory pointer.
-            // Layout the variables and bytecode backwards.
-            mstore(add(result, 0xa3), tokenId_)
-            mstore(add(result, 0x83), shr(96, shl(96, tokenContract_)))
-            mstore(add(result, 0x63), chainId_)
-            mstore(add(result, 0x43), salt_)
-            mstore(add(result, 0x23), 0x5af43d82803e903d91602b57fd5bf3)
-            mstore(add(result, 0x14), implementation_)
-            mstore(result, 0x3d60ad80600a3d3981f3363d3d373d3d3d363d73)
-            // Compute and store the bytecode hash.
-            mstore8(0x00, 0xff) // Write the prefix.
-            mstore(0x35, keccak256(add(result, 0x0c), 0xb7))
-            mstore(0x01, shl(96, REGISTRY))
-            mstore(0x15, salt_)
-            result := keccak256(0x00, 0x55)
-            mstore(0x35, 0) // Restore the overwritten part of the free memory pointer.
-        }
+        result = _create2Address(
+            salt_, initCodeHash(implementation_, salt_, chainId_, tokenContract_, tokenId_)
+        );
     }
 
     /// @dev Returns if `a` is an ERC6551 account with `expectedImplementation`.
@@ -142,37 +120,28 @@ library LibERC6551 {
         view
         returns (bool result)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let m := mload(0x40) // Grab the free memory pointer..
-            extcodecopy(a, add(m, 0x20), 0x0a, 0xa3)
-            let implementation_ := shr(96, mload(add(m, 0x20)))
-            if mul(
-                extcodesize(implementation_),
-                gt(eq(extcodesize(a), 0xad), shl(96, xor(expectedImplementation, implementation_)))
-            ) {
-                // Layout the variables and bytecode backwards.
-                mstore(add(m, 0x23), 0x5af43d82803e903d91602b57fd5bf3)
-                mstore(add(m, 0x14), implementation_)
-                mstore(m, 0x3d60ad80600a3d3981f3363d3d373d3d3d363d73)
-                // Compute and store the bytecode hash.
-                mstore8(0x00, 0xff) // Write the prefix.
-                mstore(0x35, keccak256(add(m, 0x0c), 0xb7))
-                mstore(0x01, shl(96, REGISTRY))
-                mstore(0x15, mload(add(m, 0x43)))
-                result := iszero(shl(96, xor(a, keccak256(0x00, 0x55))))
-                mstore(0x35, 0) // Restore the overwritten part of the free memory pointer.
-            }
-        }
+        // The account's code is 173 bytes: 10 bytes, the implementation, 15 bytes, then the salt,
+        // chain ID, token contract and token ID words, which its creation code is built from.
+        address implementation_ = implementation(a);
+        if (
+            implementation_.code.length == 0 || a.code.length != 0xad
+                || implementation_ != expectedImplementation
+        ) return false;
+        bytes memory footer = _codeRead(a, 0x2d, 0x80);
+        bytes32 hash = keccak256(
+            abi.encodePacked(
+                hex"3d60ad80600a3d3981f3363d3d373d3d3d363d73",
+                implementation_,
+                hex"5af43d82803e903d91602b57fd5bf3",
+                footer
+            )
+        );
+        result = a == _create2Address(bytes32(footer), hash);
     }
 
     /// @dev Returns the implementation of the ERC6551 account `a`.
     function implementation(address a) internal view returns (address result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            extcodecopy(a, 0x00, 0x0a, 0x14)
-            result := shr(96, mload(0x00))
-        }
+        result = address(bytes20(_codeWord(a, 0x0a)));
     }
 
     /// @dev Returns the static variables of the ERC6551 account `a`.
@@ -181,52 +150,113 @@ library LibERC6551 {
         view
         returns (bytes32 salt_, uint256 chainId_, address tokenContract_, uint256 tokenId_)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            let m := mload(0x40) // Cache the free memory pointer.
-            extcodecopy(a, 0x00, 0x2d, 0x80)
-            salt_ := mload(0x00)
-            chainId_ := mload(0x20)
-            tokenContract_ := mload(0x40)
-            tokenId_ := mload(0x60)
-            mstore(0x40, m) // Restore the free memory pointer.
-            mstore(0x60, 0) // Restore the zero pointer.
-        }
+        uint256 tokenContractWord;
+        (salt_, chainId_, tokenContractWord, tokenId_) =
+            abi.decode(_codeRead(a, 0x2d, 0x80), (bytes32, uint256, uint256, uint256));
+        tokenContract_ = address(uint160(tokenContractWord));
     }
 
     /// @dev Returns the salt of the ERC6551 account `a`.
     function salt(address a) internal view returns (bytes32 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            extcodecopy(a, 0x00, 0x2d, 0x20)
-            result := mload(0x00)
-        }
+        result = _codeWord(a, 0x2d);
     }
 
     /// @dev Returns the chain ID of the ERC6551 account `a`.
     function chainId(address a) internal view returns (uint256 result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            extcodecopy(a, 0x00, 0x4d, 0x20)
-            result := mload(0x00)
-        }
+        result = uint256(_codeWord(a, 0x4d));
     }
 
     /// @dev Returns the token contract of the ERC6551 account `a`.
     function tokenContract(address a) internal view returns (address result) {
-        /// @solidity memory-safe-assembly
-        assembly {
-            extcodecopy(a, 0x00, 0x6d, 0x20)
-            result := mload(0x00)
-        }
+        result = address(uint160(uint256(_codeWord(a, 0x6d))));
     }
 
     /// @dev Returns the token ID of the ERC6551 account `a`.
     function tokenId(address a) internal view returns (uint256 result) {
+        result = uint256(_codeWord(a, 0x8d));
+    }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      PRIVATE HELPERS                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev The address the registry's CREATE2 deployment with `salt_` and creation code hashing
+    /// to `hash` gets.
+    function _create2Address(bytes32 salt_, bytes32 hash) private pure returns (address) {
+        return
+            address(
+                uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), REGISTRY, salt_, hash))))
+            );
+    }
+
+    /// @dev The `count` bytes of `a`'s code from `start`, as a new buffer.
+    function _codeRead(address a, uint256 start, uint256 count)
+        private
+        view
+        returns (bytes memory out)
+    {
+        out = new bytes(count);
+        _codeCopyInto(out, 0, a, start, count);
+    }
+
+    /// @dev Copies `count` bytes of `target`'s code from `start` into `dst` at `dstOffset`, with
+    /// zeros for the bytes past the end of the code. Solidity can only copy a whole account's code.
+    /// @custom:solar-trusted
+    function _codeCopyInto(
+        bytes memory dst,
+        uint256 dstOffset,
+        address target,
+        uint256 start,
+        uint256 count
+    ) private view {
+        if (count > dst.length || dstOffset > dst.length - count) {
+            count = _outOfBounds();
+        }
         /// @solidity memory-safe-assembly
         assembly {
-            extcodecopy(a, 0x00, 0x8d, 0x20)
+            extcodecopy(target, add(add(dst, 0x20), dstOffset), start, count)
+        }
+    }
+
+    /// @dev The 32 bytes of `a`'s code from `start`, with zeros past the end of the code, read
+    /// through the scratch space. Solidity can only copy a whole account's code.
+    /// @custom:solar-trusted
+    function _codeWord(address a, uint256 start) private view returns (bytes32 result) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            extcodecopy(a, 0x00, start, 0x20)
             result := mload(0x00)
         }
+    }
+
+    /// @dev Calls `target` with `payload`, `value` wei and `gasLimit` gas, and
+    /// copies at most `maxCopy` bytes of the response into a new buffer sized to
+    /// what it holds, allocated after the call. `totalSize` is how many bytes
+    /// there were.
+    /// @custom:solar-trusted
+    function _callBounded(
+        address target,
+        uint256 value,
+        uint256 gasLimit,
+        bytes memory payload,
+        uint256 maxCopy
+    ) private returns (bool success, bytes memory output, uint256 totalSize) {
+        /// @solidity memory-safe-assembly
+        assembly {
+            success := call(gasLimit, target, value, add(payload, 0x20), mload(payload), 0x00, 0x00)
+            totalSize := returndatasize()
+            let copied := totalSize
+            if gt(copied, maxCopy) { copied := maxCopy }
+            output := mload(0x40)
+            mstore(output, copied)
+            returndatacopy(add(output, 0x20), 0x00, copied)
+            mstore(0x40, and(add(add(output, 0x3f), copied), not(0x1f)))
+        }
+    }
+
+    /// @dev Raises the `Panic(0x32)` an out-of-range index raises, which is the
+    /// portable spelling of a failed range check.
+    function _outOfBounds() private pure returns (uint256) {
+        return new uint256[](0)[0];
     }
 }
