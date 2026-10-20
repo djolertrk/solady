@@ -8,6 +8,19 @@ import {P256} from "./P256.sol";
 /// @author Solady (https://github.com/vectorized/solady/blob/main/src/utils/WebAuthn.sol)
 /// @author Modified from Daimo WebAuthn (https://github.com/daimo-eth/p256-verifier/blob/master/src/WebAuthn.sol)
 /// @author Modified from Coinbase WebAuthn (https://github.com/base-org/webauthn-sol/blob/main/src/WebAuthn.sol)
+/// @dev The checked port compares the client data JSON's type and challenge with the
+/// expected bytes a word at a time, where the assembly compares their hashes, and checks
+/// every index before it reads, so an index past the JSON gives `false` where the assembly's
+/// reads past it can run out of gas. The message hash is the `sha256` builtin over a copy of
+/// the authenticator data and the JSON's hash, which the assembly writes after the
+/// authenticator data and restores; a failed precompile call reverts with no data, as the
+/// assembly's `invalid()` does. `tryDecodeAuth` makes the assembly's bounds checks, with the
+/// same wrap-around of a length added to an address, through the trusted `_addr`, and returns
+/// the two strings as aliases into `encodedAuth` through the trusted `_bytesAt`, as the
+/// assembly does; a length word that does not lie in `encodedAuth` fails, where the assembly
+/// reads the memory after it. The compact codecs copy with `abi.encodePacked`, calldata slices
+/// and byte-copy loops.
+/// @custom:solar-safe memory arithmetic
 library WebAuthn {
     /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
     /*                          STRUCTS                           */
@@ -92,50 +105,25 @@ library WebAuthn {
     ) internal view returns (bool result) {
         bytes32 messageHash;
         string memory encoded = Base64.encode(challenge, true, true);
-        /// @solidity memory-safe-assembly
-        assembly {
-            let clientDataJSON := mload(add(auth, 0x20))
-            let n := mload(clientDataJSON) // `clientDataJSON`'s length.
-            let o := add(clientDataJSON, 0x20) // Start of `clientData`'s bytes.
+        bytes memory clientDataJSON = bytes(auth.clientDataJSON);
+        // 11. Verify JSON's type. Also checks for possible addition overflows.
+        // 12. Verify JSON's challenge. Includes a check for the closing '"'.
+        result =
+            _checkClientData(clientDataJSON, auth.challengeIndex, auth.typeIndex, bytes(encoded));
+        // Skip 13., 14., 15.
+        bytes memory authenticatorData = auth.authenticatorData;
+        // 16. Verify that the "User Present" flag is set (bit 0).
+        // 17. Verify that the "User Verified" flag is set (bit 2), if required.
+        // See: https://www.w3.org/TR/webauthn-2/#flags.
+        uint256 u = requireUserVerification ? 5 : 1;
+        result =
+            result && authenticatorData.length > 0x20 && (uint8(authenticatorData[0x20]) & u) == u;
+        if (result) {
+            /// @custom:solar-scratch
             {
-                let c := mload(add(auth, 0x40)) // Challenge index in `clientDataJSON`.
-                let t := mload(add(auth, 0x60)) // Type index in `clientDataJSON`.
-                let l := mload(encoded) // Cache `encoded`'s length.
-                let q := add(l, 0x0d) // Length of `encoded` prefixed with '"challenge":"'.
-                mstore(encoded, shr(152, '"challenge":"')) // Temp prefix with '"challenge":"'.
-                result := and(
-                    // 11. Verify JSON's type. Also checks for possible addition overflows.
-                    and(
-                        eq(shr(88, mload(add(o, t))), shr(88, '"type":"webauthn.get"')),
-                        lt(shr(128, or(t, c)), lt(add(0x14, t), n))
-                    ),
-                    // 12. Verify JSON's challenge. Includes a check for the closing '"'.
-                    and(
-                        eq(keccak256(add(o, c), q), keccak256(add(encoded, 0x13), q)),
-                        and(eq(byte(0, mload(add(add(o, c), q))), 34), lt(add(q, c), n))
-                    )
-                )
-                mstore(encoded, l) // Restore `encoded`'s length, in case of string interning.
-            }
-            // Skip 13., 14., 15.
-            let l := mload(mload(auth)) // Length of `authenticatorData`.
-            // 16. Verify that the "User Present" flag is set (bit 0).
-            // 17. Verify that the "User Verified" flag is set (bit 2), if required.
-            // See: https://www.w3.org/TR/webauthn-2/#flags.
-            let u := or(1, shl(2, iszero(iszero(requireUserVerification))))
-            result := and(and(result, gt(l, 0x20)), eq(and(mload(add(mload(auth), 0x21)), u), u))
-            if result {
-                let p := add(mload(auth), 0x20) // Start of `authenticatorData`'s bytes.
-                let e := add(p, l) // Location of the word after `authenticatorData`.
-                let w := mload(e) // Cache the word after `authenticatorData`.
                 // 19. Compute `sha256(clientDataJSON)`.
                 // 20. Compute `sha256(authenticatorData ‖ sha256(clientDataJSON))`.
-                // forgefmt: disable-next-item
-                messageHash := mload(staticcall(gas(),
-                    shl(1, staticcall(gas(), 2, o, n, e, 0x20)), p, add(l, 0x20), 0x01, 0x20))
-                mstore(e, w) // Restore the word after `authenticatorData`, in case of reuse.
-                // `returndatasize()` is `0x20` on `sha256` success, and `0x00` otherwise.
-                if iszero(returndatasize()) { invalid() }
+                messageHash = sha256(abi.encodePacked(authenticatorData, sha256(clientDataJSON)));
             }
         }
         // `P256.verifySignature` returns false if `s > N/2` due to the malleability check.
@@ -181,32 +169,27 @@ library WebAuthn {
         pure
         returns (WebAuthnAuth memory decoded)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            for { let n := mload(encodedAuth) } iszero(lt(n, 0xc0)) {} {
-                let o := add(encodedAuth, 0x20) // Start of `encodedAuth`'s bytes.
-                let e := add(o, n) // End of `encodedAuth` in memory.
-                let p := add(mload(o), o) // Start of `encodedAuth`.
-                if or(gt(add(p, 0xc0), e), lt(p, o)) { break }
-                let authenticatorData := add(mload(p), p)
-                let clientDataJSON := add(mload(add(p, 0x20)), p)
-                if or(
-                    or(gt(authenticatorData, e), lt(authenticatorData, p)),
-                    or(gt(clientDataJSON, e), lt(clientDataJSON, p))
-                ) { break }
-                if or(
-                    gt(add(add(authenticatorData, 0x20), mload(authenticatorData)), e),
-                    gt(add(add(clientDataJSON, 0x20), mload(clientDataJSON)), e)
-                ) { break }
-                mstore(decoded, authenticatorData) // `authenticatorData`.
-                mstore(add(decoded, 0x20), clientDataJSON) // `clientDataJSON`.
-                mstore(add(decoded, 0x40), mload(add(p, 0x40))) // `challengeIndex`.
-                mstore(add(decoded, 0x60), mload(add(p, 0x60))) // `typeIndex`.
-                mstore(add(decoded, 0x80), mload(add(p, 0x80))) // `r`.
-                mstore(add(decoded, 0xa0), mload(add(p, 0xa0))) // `s`.
-                break
-            }
-        }
+        uint256 n = encodedAuth.length;
+        if (n < 0xc0) return decoded;
+        // Offsets in `encodedAuth`: `p` of the encoded tuple, `a` and `c` of the length
+        // words of `authenticatorData` and `clientDataJSON`. Each is bounded before it is
+        // added to, as the assembly's address checks bound it.
+        uint256 p = uint256(_readBytes32(encodedAuth, 0)); // Start of `encodedAuth`.
+        if (p > n - 0xc0) return decoded;
+        (uint256 a, uint256 c, uint256 challengeIndex, uint256 typeIndex, bytes32 r, bytes32 s) =
+            _readHead(encodedAuth, p);
+        if (a > n - p || c > n - p) return decoded;
+        a += p;
+        c += p;
+        if (!_endsIn(encodedAuth, a) || !_endsIn(encodedAuth, c)) return decoded;
+        bytes memory authenticatorData = _bytesAt(encodedAuth, a);
+        bytes memory clientDataJSON = _bytesAt(encodedAuth, c);
+        decoded.authenticatorData = authenticatorData; // `authenticatorData`.
+        decoded.clientDataJSON = string(clientDataJSON); // `clientDataJSON`.
+        decoded.challengeIndex = challengeIndex; // `challengeIndex`.
+        decoded.typeIndex = typeIndex; // `typeIndex`.
+        decoded.r = r; // `r`.
+        decoded.s = s; // `s`.
     }
 
     /// @dev Returns the compact encoding of `auth`:
@@ -227,33 +210,21 @@ library WebAuthn {
         pure
         returns (bytes memory result)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            function copyBytes(o_, s_, c_) -> _e {
-                mstore(o_, shl(240, mload(s_)))
-                o_ := add(o_, c_)
-                _e := add(o_, mload(s_)) // The end of the bytes.
-                for { let d_ := sub(add(0x20, s_), o_) } 1 {} {
-                    mstore(o_, mload(add(d_, o_)))
-                    o_ := add(o_, 0x20)
-                    if iszero(lt(o_, _e)) { break }
-                }
-            }
-            let clientDataJSON := mload(add(0x20, auth))
-            let c := mload(add(0x40, auth)) // `challengeIndex`.
-            let t := mload(add(0x60, auth)) // `typeIndex`.
-            // If none of the lengths are more than `0xffff`.
-            if iszero(shr(16, or(or(t, c), or(mload(mload(auth)), mload(clientDataJSON))))) {
-                result := mload(0x40)
-                // `authenticatorData`, `clientDataJSON`.
-                let o := copyBytes(copyBytes(add(result, 0x20), mload(auth), 2), clientDataJSON, 0)
-                mstore(o, or(shl(240, c), shl(224, t))) // `challengeIndex`, `typeIndex`.
-                mstore(add(o, 0x04), mload(add(0x80, auth))) // `r`.
-                mstore(add(o, 0x24), mload(add(0xa0, auth))) // `s`.
-                mstore(result, sub(add(o, 0x24), result)) // Store the length.
-                mstore(add(o, 0x44), 0) // Zeroize the slot after the string.
-                mstore(0x40, add(o, 0x64)) // Allocate memory .
-            }
+        bytes memory authenticatorData = auth.authenticatorData;
+        bytes memory clientDataJSON = bytes(auth.clientDataJSON);
+        uint256 c = auth.challengeIndex; // `challengeIndex`.
+        uint256 t = auth.typeIndex; // `typeIndex`.
+        // If none of the lengths are more than `0xffff`.
+        if ((t | c | authenticatorData.length | clientDataJSON.length) >> 16 == 0) {
+            result = abi.encodePacked(
+                uint16(authenticatorData.length),
+                authenticatorData,
+                clientDataJSON,
+                uint16(c),
+                uint16(t),
+                auth.r,
+                auth.s
+            );
         }
     }
 
@@ -265,36 +236,22 @@ library WebAuthn {
         pure
         returns (WebAuthnAuth memory decoded)
     {
-        /// @solidity memory-safe-assembly
-        assembly {
-            function extractBytes(o_, l_) -> _m {
-                _m := mload(0x40) // Grab the free memory pointer.
-                let s_ := add(_m, 0x20)
-                for { let i_ := 0 } 1 {} {
-                    mstore(add(s_, i_), mload(add(o_, i_)))
-                    i_ := add(i_, 0x20)
-                    if iszero(lt(i_, l_)) { break }
-                }
-                mstore(_m, l_) // Store the length.
-                mstore(add(l_, s_), 0) // Zeroize the slot after the string.
-                mstore(0x40, add(0x20, add(l_, s_))) // Allocate memory.
-            }
-            let n := mload(encodedAuth)
-            if iszero(lt(n, 0x46)) {
-                let o := add(encodedAuth, 0x20) // Start of `encodedAuth`'s bytes.
-                let e := add(o, n) // End of `encodedAuth` in memory.
-                n := shr(240, mload(o)) // Length of `authenticatorData`.
-                let a := add(o, 0x02) // Start of `authenticatorData`.
-                let c := add(a, n) // Start of `clientDataJSON`.
-                let j := sub(e, 0x44) // Start of `challengeIndex`.
-                if iszero(gt(c, j)) {
-                    mstore(decoded, extractBytes(a, n)) // `authenticatorData`.
-                    mstore(add(decoded, 0x20), extractBytes(c, sub(j, c))) // `clientDataJSON`.
-                    mstore(add(decoded, 0x40), shr(240, mload(j))) // `challengeIndex`.
-                    mstore(add(decoded, 0x60), shr(240, mload(add(j, 0x02)))) // `typeIndex`.
-                    mstore(add(decoded, 0x80), mload(add(j, 0x04))) // `r`.
-                    mstore(add(decoded, 0xa0), mload(add(j, 0x24))) // `s`.
-                }
+        uint256 n = encodedAuth.length;
+        if (n >= 0x46) {
+            // Length of `authenticatorData`.
+            uint256 l = uint256(_readBytes32(encodedAuth, 0)) >> 240;
+            uint256 j = n - 0x44; // Start of `challengeIndex`.
+            if (l + 2 <= j) {
+                uint256 w = uint256(_readBytes32(encodedAuth, j)); // `challengeIndex`, `typeIndex`.
+                bytes32 r = _readBytes32(encodedAuth, j + 4); // `r`.
+                bytes32 s = _readBytes32(encodedAuth, j + 0x24); // `s`.
+                decoded.authenticatorData = _slice(encodedAuth, 2, l); // `authenticatorData`.
+                // `clientDataJSON`.
+                decoded.clientDataJSON = string(_slice(encodedAuth, l + 2, j - l - 2));
+                decoded.challengeIndex = w >> 240; // `challengeIndex`.
+                decoded.typeIndex = (w >> 224) & 0xffff; // `typeIndex`.
+                decoded.r = r; // `r`.
+                decoded.s = s; // `s`.
             }
         }
     }
@@ -305,31 +262,158 @@ library WebAuthn {
         pure
         returns (WebAuthnAuth memory decoded)
     {
+        uint256 n = encodedAuth.length;
+        if (n >= 0x46) {
+            // Length of `authenticatorData`.
+            uint256 l = abi.decode(encodedAuth[:0x20], (uint256)) >> 240;
+            uint256 j = n - 0x44; // Start of `challengeIndex`.
+            if (l + 2 <= j) {
+                // `challengeIndex`, `typeIndex`.
+                uint256 w = abi.decode(encodedAuth[j:j + 0x20], (uint256));
+                decoded.authenticatorData = encodedAuth[2:l + 2]; // `authenticatorData`.
+                decoded.clientDataJSON = string(encodedAuth[l + 2:j]); // `clientDataJSON`.
+                decoded.challengeIndex = w >> 240; // `challengeIndex`.
+                decoded.typeIndex = (w >> 224) & 0xffff; // `typeIndex`.
+                // `r`, `s`.
+                (decoded.r, decoded.s) = abi.decode(encodedAuth[j + 4:], (bytes32, bytes32));
+            }
+        }
+    }
+
+    /*´:°•.°+.*•´.*:˚.°*.˚•´.°:°•.°•.*•´.*:˚.°*.˚•´.°:°•.°+.*•´.*:*/
+    /*                      PRIVATE HELPERS                       */
+    /*.•°:°.´+˚.*°.˚:*.´•*.+°.•°:´*.´•*.•°.•°:°.´:•˚°.*°.˚:*.´+°.•*/
+
+    /// @dev Whether `clientDataJSON` holds `"type":"webauthn.get"` at `t`, and `"challenge":"`,
+    /// `encoded` and a closing `"` at `c`, with both indices below `2**128` so that no sum
+    /// overflows, as the assembly checks with hashes of the same bytes. Every range is
+    /// checked before it is read.
+    /// @custom:solar-inline
+    function _checkClientData(
+        bytes memory clientDataJSON,
+        uint256 c,
+        uint256 t,
+        bytes memory encoded
+    ) private pure returns (bool) {
+        uint256 n = clientDataJSON.length;
+        uint256 l = encoded.length;
+        if ((t | c) >> 128 != 0 || n < 21 || t > n - 21) return false; // `t + 0x14 < n`.
+        uint256 q = l + 0x0d; // Length of `encoded` prefixed with '"challenge":"'.
+        if (q + c >= n) return false;
+        if (_readBytesN(clientDataJSON, t, 21) != bytes32('"type":"webauthn.get"')) return false;
+        if (l < 0x20) {
+            return _readBytesN(clientDataJSON, c, 13) == bytes32('"challenge":"')
+                && _readBytesN(clientDataJSON, c + 13, l) == _readBytesN(encoded, 0, l)
+                && clientDataJSON[c + q] == '"';
+        }
+        // The `q + 1` bytes from `c` a word at a time: the first word is the prefix and the
+        // start of `encoded`, the last ends with the closing quote.
+        bytes32 first = bytes32('"challenge":"') | (_readBytes32(encoded, 0) >> 104);
+        if (_readBytes32(clientDataJSON, c) != first) return false;
+        for (uint256 k = 0x20; k + 0x20 <= q; k += 0x20) {
+            if (_readBytes32(clientDataJSON, c + k) != _readBytes32(encoded, k - 13)) return false;
+        }
+        bytes32 last = (_readBytes32(encoded, l - 0x20) << 8) | bytes32(uint256(0x22));
+        return _readBytes32(clientDataJSON, c + q - 31) == last;
+    }
+
+    /// @dev The six words of the encoded tuple at `p` in `encodedAuth`, which lie in it.
+    /// The tuple of `abi.encode(auth)` follows its offset, and is decoded in one go.
+    /// @custom:solar-inline
+    function _readHead(bytes memory encodedAuth, uint256 p)
+        private
+        pure
+        returns (
+            uint256 a,
+            uint256 c,
+            uint256 challengeIndex,
+            uint256 typeIndex,
+            bytes32 r,
+            bytes32 s
+        )
+    {
+        if (p == 0x20) {
+            (, a, c, challengeIndex, typeIndex, r, s) = abi.decode(
+                encodedAuth, (uint256, uint256, uint256, uint256, uint256, bytes32, bytes32)
+            );
+        } else {
+            a = uint256(_readBytes32(encodedAuth, p));
+            c = uint256(_readBytes32(encodedAuth, p + 0x20));
+            challengeIndex = uint256(_readBytes32(encodedAuth, p + 0x40));
+            typeIndex = uint256(_readBytes32(encodedAuth, p + 0x60));
+            r = _readBytes32(encodedAuth, p + 0x80);
+            s = _readBytes32(encodedAuth, p + 0xa0);
+        }
+    }
+
+    /// @dev Whether the `bytes` whose length word is at `offset` in `b` ends within `b`, as
+    /// the assembly tests it: the address after the length word plus the length, with
+    /// wrap-around, is at most the end of `b`. A length word that does not lie in `b` fails.
+    /// @custom:solar-inline
+    function _endsIn(bytes memory b, uint256 offset) private pure returns (bool) {
+        uint256 n = b.length;
+        if (n < 0x20 || offset > n - 0x20) return false;
+        uint256 length = uint256(_readBytes32(b, offset));
+        // Without wrap-around the sum is at most the end of `b`, and a sum that wraps around
+        // is below the address after the length word, which is at most the end of `b`.
+        return
+            length <= n - 0x20 - offset || length > type(uint256).max - (_addr(b) + 0x40 + offset);
+    }
+
+    /// @dev A copy of the `count` bytes of `b` at `offset`.
+    /// @custom:solar-inline
+    function _slice(bytes memory b, uint256 offset, uint256 count)
+        private
+        pure
+        returns (bytes memory result)
+    {
+        result = new bytes(count);
+        for (uint256 k; k < count; ++k) {
+            result[k] = b[offset + k];
+        }
+    }
+
+    /// @dev The 32 bytes of `b` at `offset`.
+    /// @custom:solar-inline
+    function _readBytes32(bytes memory b, uint256 offset) private pure returns (bytes32 result) {
+        for (uint256 k; k < 32; ++k) {
+            result |= bytes32(b[offset + k]) >> (8 * k);
+        }
+    }
+
+    /// @dev The `count` bytes of `b` at `offset`, at most a word, left-aligned.
+    /// @custom:solar-inline
+    function _readBytesN(bytes memory b, uint256 offset, uint256 count)
+        private
+        pure
+        returns (bytes32 result)
+    {
+        for (uint256 k; k < count; ++k) {
+            result |= bytes32(b[offset + k]) >> (8 * k);
+        }
+    }
+
+    /// @dev The address of `b`. Solidity cannot convert a reference to a number.
+    /// @custom:solar-trusted
+    /// @custom:solar-inline
+    function _addr(bytes memory b) private pure returns (uint256 result) {
         /// @solidity memory-safe-assembly
         assembly {
-            function extractBytes(o_, l_) -> _m {
-                _m := mload(0x40) // Grab the free memory pointer.
-                let s_ := add(_m, 0x20)
-                calldatacopy(s_, o_, l_)
-                mstore(_m, l_) // Store the length.
-                mstore(add(l_, s_), 0) // Zeroize the slot after the string.
-                mstore(0x40, add(0x20, add(l_, s_))) // Allocate memory.
-            }
-            if iszero(lt(encodedAuth.length, 0x46)) {
-                let e := add(encodedAuth.offset, encodedAuth.length) // End of `encodedAuth`.
-                let n := shr(240, calldataload(encodedAuth.offset)) // Length of `authenticatorData`.
-                let a := add(encodedAuth.offset, 0x02) // Start of `authenticatorData`.
-                let c := add(a, n) // Start of `clientDataJSON`.
-                let j := sub(e, 0x44) // Start of `challengeIndex`.
-                if iszero(gt(c, j)) {
-                    mstore(decoded, extractBytes(a, n)) // `authenticatorData`.
-                    mstore(add(decoded, 0x20), extractBytes(c, sub(j, c))) // `clientDataJSON`.
-                    mstore(add(decoded, 0x40), shr(240, calldataload(j))) // `challengeIndex`.
-                    mstore(add(decoded, 0x60), shr(240, calldataload(add(j, 0x02)))) // `typeIndex`.
-                    mstore(add(decoded, 0x80), calldataload(add(j, 0x04))) // `r`.
-                    mstore(add(decoded, 0xa0), calldataload(add(j, 0x24))) // `s`.
-                }
-            }
+            result := b
+        }
+    }
+
+    /// @dev The `bytes` whose length word is at `offset` in `b`, as an alias into `b`, as the
+    /// assembly returns it. Solidity cannot make a reference into another object. The length
+    /// word must lie in `b`; the bytes extend past `b` only for a length whose end wraps
+    /// around, which the assembly lets through as well.
+    /// @custom:solar-trusted
+    /// @custom:solar-inline
+    function _bytesAt(bytes memory b, uint256 offset) private pure returns (bytes memory result) {
+        if (b.length < 0x20 || offset > b.length - 0x20) revert();
+        /// @solidity memory-safe-assembly
+        assembly {
+            result := add(add(b, 0x20), offset)
         }
     }
 }
