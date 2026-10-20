@@ -133,7 +133,10 @@ SOLC_SAFE_GAS_FAILURES = {
 # memory with junk seeded by `gas()`, and TestPlus hashes the free memory
 # pointer into its randomness, so two builds would otherwise run different
 # inputs on different memory; Foundry also draws fuzz inputs from each build's
-# bytecode, which `--fair` turns off.
+# bytecode, which `--fair` turns off. Helpers that copy the test contract's own
+# code into random values, random bytes or memory copy the call's calldata
+# instead, or hash, so neither the inputs nor what the copies cost depend on
+# each build's bytecode.
 FAIR_PATCHES = {
     "test/utils/Brutalizer.sol": [
         (
@@ -151,7 +154,34 @@ FAIR_PATCHES = {
             "mstore(0x1f, sValue)\n                sValue := keccak256(0x20, 0x40)",
             "mstore(0x00, sValue)\n                sValue := keccak256(0x00, 0x20)",
         ),
+        (
+            "codecopy(0x00, mod(and(y, 0xffff), add(codesize(), 0x20)), 0x20)",
+            "mstore(0x00, keccak256(0x00, 0x20))",
+        ),
+        (
+            "{ codecopy(result, byte(1, r), codesize()) }",
+            "{ calldatacopy(result, byte(1, r), add(n, 0x40)) }",
+        ),
+        (
+            "codecopy(add(result, n), byte(2, r), 0x40)",
+            "calldatacopy(add(result, n), byte(2, r), 0x40)",
+        ),
     ],
+    "test/JSONParserLib.t.sol": [
+        (
+            "codecopy(mload(0x40), 0, codesize())",
+            "calldatacopy(mload(0x40), 0, calldatasize())",
+        ),
+    ],
+    **{
+        suite: [
+            (
+                "codecopy(add(result, 0x20), byte(1, r), add(n, 0x40))",
+                "calldatacopy(add(result, 0x20), byte(1, r), add(n, 0x40))",
+            ),
+        ]
+        for suite in ("test/ERC4337.t.sol", "test/ERC6551.t.sol")
+    },
 }
 
 # Suites not named after the library they test.
