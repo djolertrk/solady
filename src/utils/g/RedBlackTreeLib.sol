@@ -129,6 +129,7 @@ library RedBlackTreeLib {
 
     /// @dev Returns a pointer to the value `x`.
     /// If the value `x` is not in the tree, the returned pointer will be empty.
+    /// @custom:solar-inline
     function find(Tree storage tree, uint256 x) internal view returns (bytes32 result) {
         (uint256 nodes,, uint256 key) = _find(tree, x);
         result = _pack(nodes, key);
@@ -295,6 +296,7 @@ library RedBlackTreeLib {
     }
 
     /// @dev Step the pointer `ptr` forwards or backwards.
+    /// @custom:solar-inline
     function _step(bytes32 ptr, uint256 L, uint256 R) private view returns (bytes32 result) {
         if (ptr == bytes32(0)) return ptr;
         (uint256 nodes, uint256 target) = _unpack(ptr);
@@ -355,6 +357,7 @@ library RedBlackTreeLib {
     }
 
     /// @dev Finds `x` in `tree`. The `key` will be zero if `x` is not found.
+    /// @custom:solar-inline
     function _find(Tree storage tree, uint256 x)
         private
         view
