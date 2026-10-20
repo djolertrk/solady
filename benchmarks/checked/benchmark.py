@@ -403,10 +403,13 @@ def prepare(
         row["wrapper_returns"] = returns
     # solc's legacy pipeline cannot keep more than twelve word arguments on its
     # stack while it encodes a call, so no leg could compile a wrapper for them.
+    # A storage pointer result, such as a cast between storage structs, has no
+    # ABI encoding for a wrapper to return.
     harness_apis = [
         row
         for row in select_harness_apis(apis, api_filters, isolate)
         if len(row["wrapper_params"]) <= MAX_WRAPPER_PARAMS
+        and all(loc != "storage" for _, loc in row["wrapper_returns"])
     ]
     # Files the port adds have no upstream counterpart, so the shared harness
     # cannot import them by name: the upstream leg would not resolve the path.
@@ -482,7 +485,8 @@ def prepare(
         "total_source_files": len(inventory),
     }
     (out / "api-coverage.json").write_text(json.dumps(audit, indent=2) + "\n")
-    return safe, upstream, apis, audit
+    # A run measures the APIs the harness wraps.
+    return safe, upstream, harness_apis, audit
 
 
 # The words a storage case sets up and observes: the root slot and this many
@@ -1251,6 +1255,10 @@ def merkle_verify_multi(proof, root, leaves, flags):
 def merkle_vectors(name, rng):
     def word():
         return rng.getrandbits(256).to_bytes(32, "big")
+
+    if name in ("emptyProof", "emptyLeaves", "emptyFlags"):
+        yield [], [[]]
+        return
 
     trees = []
     for n in [1, 2, 3, 4, 5, 7, 8, 16, 33]:
